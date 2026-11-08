@@ -187,7 +187,8 @@ Milestone {{n}} of {{total}} is next: {{milestone}}
 
 Please write the instruction that gets {{critic}} started on it: what is needed, what matters most and what to
 watch out for. Describe the work itself and keep it high level; {{critic}} does not hear about milestones,
-your rubric or scores. I will pass on your reply as it is.
+your rubric or scores. Put the instruction inside `<message to="{{critic}}">…</message>`; anything outside it is
+for me.
 """,
     "manager_question": """\
 {{human_messages}}
@@ -196,8 +197,8 @@ your rubric or scores. I will pass on your reply as it is.
 
 {{question}}
 
-Please answer if you can. If only I can decide it, start your reply with a line `QUESTIONS FOR YOU:`
-followed by the question(s), and still give {{critic}} your best guess to work with until I reply.
+Please answer if you can, inside `<message to="{{critic}}">…</message>`. If only I can decide it, ask me in a
+`<question>…</question>` (one per decision), and still give {{critic}} your best guess to work with until I reply.
 """,
     "manager_review": """\
 {{human_messages}}
@@ -206,19 +207,19 @@ followed by the question(s), and still give {{critic}} your best guess to work w
 
 {{report}}
 
-Please score it against your rubric: a small table with a score out of 5 for each criterion, then a line
-"Overall score: x/5". If the milestone is done, write me a short summary (tables welcome) and end with the
-line `DECISION: ACCEPT`. If it is not, add a line `For {{critic}}:` followed by what still has to happen,
-in terms of the work and at a high level (only that part is passed on, so leave out milestones and scores),
-and end with the line `DECISION: REVISE`.
+Please score it against your rubric: a small table with a score out of 5 for each criterion, then your overall
+score as `<score>x</score>` (out of 5). If the milestone is done, write me a short summary (tables welcome) and end
+with `<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
+`<message to="{{critic}}">…</message>`, in terms of the work and at a high level (only that is passed on, so leave
+out milestones and scores), and end with `<decision>REVISE</decision>`.
 """,
     "manager_feedback": """\
 I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
 
 {{comment}}
 
-Please write what {{critic}} should do next, at a high level and in terms of the work (no milestones or scores);
-I will pass on your reply as it is.
+Please write what {{critic}} should do next, at a high level and in terms of the work (no milestones or scores),
+inside `<message to="{{critic}}">…</message>`.
 """,
     "critic_brief": """\
 {{instructions}}
@@ -239,17 +240,16 @@ will check. The repository is at `{{cwd}}`.
 
 {{worker_report}}
 
-Please take a look at the changes. If {{worker}} has nothing useful left to do until a task of mine or the
-authors' is done, don't tell {{worker}} to hold: propose a pause with a `WAITING FOR YOU:` paragraph instead.
-End with one final line: `VERDICT: PASS` or `VERDICT: FAIL`.
+Please take a look at the changes. If everything the agents can do is done and the rest waits on a person, don't
+tell {{worker}} to hold: propose a pause in `<pause>…</pause>` instead. End with your `<checklist>` and
+`<verdict>PASS</verdict>` or `<verdict>FAIL</verdict>`.
 """,
     "critic_answer": """\
 About your question:
 
 {{answer}}
 
-If this changes what {{worker}} should do, say what. If it changes your verdict, end with a new
-`VERDICT:` line.
+If this changes what {{worker}} should do, say what. If it changes your verdict, end with a new `<verdict>`.
 """,
     "critic_report": """\
 {{human_messages}}
@@ -266,14 +266,15 @@ and reply with your summary as usual.
     "manager_pause": """\
 {{human_messages}}
 
-{{critic}} proposes pausing the work, because what comes next is waiting on me (or the authors):
+{{critic}} proposes pausing the whole run, because what the agents can do is done and the rest waits on me (or
+the authors):
 
 {{proposal}}
 
-Please decide. If nothing useful can be done until that is finished, write for me, in a few plain lines, what I need
-to do and what to send back, and end with the line `DECISION: PAUSE`; the work then waits, without spending rounds,
-until I say it is done. If there is still useful work meanwhile, write `For {{critic}}:` followed by what to do in
-the meantime, and end with the line `DECISION: CONTINUE`.
+Please decide. A pause stops the whole run (no agent works, no rounds are spent) until I continue it. If that is
+right, write for me, in a few plain lines, what I need to do and what to send back, and end with
+`<decision>PAUSE</decision>`. If there is still useful work meanwhile, put it inside
+`<message to="{{critic}}">…</message>` and end with `<decision>CONTINUE</decision>`.
 """,
     "critic_continue": """\
 {{human_messages}}
@@ -315,11 +316,10 @@ A quick update from {{critic}}:
 
 {{update}}
 
-No full review needed. Your reply is shown to me, not to {{critic}}: only a paragraph starting with
-`NOTE FOR {{critic}}:` is passed on, so write one if {{critic}} should change course. If nothing useful can be done
-until I finish something, write a paragraph starting `WAITING FOR YOU:` saying what I need to do; the work then
-pauses, without spending rounds, until I say it is done. Otherwise a line for me is enough, including anything you
-need me to do.
+No full review needed. Your reply is shown to me, not to {{critic}}: only a `<message to="{{critic}}">` is passed
+on, so write one if {{critic}} should change course. If everything the agents can do is done and the rest waits on
+me, write `<pause>what I need to do</pause>`: the whole run stops until I continue it. Otherwise a line for me is
+enough, including anything you need me to do.
 """,
     "worker_start": """\
 {{task}}
@@ -361,5 +361,24 @@ The repository is at `{{cwd}}`.
                                "from now on: what we decided, and anything it changes in their instructions. "
                                "Write it as you would tell {{critic}}; nothing else.",
     "relay_note": "{{note}}",
+    "tag_reminder_manager": "A reminder, in case it helps (not a request to add anything): what is for {{critic}} goes in "
+                            "<message to=\"{{critic}}\">…</message>; a decision only I can make in <question>…</question> "
+                            "(one per question); stopping the whole run until I act in <pause>…</pause>; in reviews "
+                            "<score>…</score> and <decision>…</decision>. Everything outside tags is read by me.",
+    "tag_reminder_critic": "A reminder, in case it helps (not a request to add anything): text outside tags reaches "
+                           "{{worker}}; what is only for {{manager}} goes in <message to=\"{{manager}}\">…</message>; "
+                           "questions for {{manager}} in <question>…</question>; proposing to stop the whole run until "
+                           "a person acts in <pause>…</pause>; each review ends with <checklist>…</checklist> and "
+                           "<verdict>PASS</verdict> or <verdict>FAIL</verdict>.",
+    "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for {{critic}} "
+                           "goes in <question>…</question>; jobs you start detached are noticed by orch, and "
+                           "<no-wait pid=\"…\"/> marks one the review should not wait for.",
+    "session_reset": """\
+This is a fresh conversation: your earlier one was cleared to keep turns quick, and the work carries on from where it
+is. Here is what you need from before.
+
+{{state}}
+
+Read the files and logs you need before you act, and carry on from there.""",
     "relay_note_up": "{{critic}} mentioned: {{note}}",
 }

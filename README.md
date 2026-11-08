@@ -105,8 +105,8 @@ A project keeps its agents in `<project>/.orch/agents/`, one folder per agent; t
   agents/<name>/
     agent.yaml       role (manager | critic | worker), display_name, backend, backend_options, timeout …
                      plus the run settings that belong to this agent, e.g.
-                       manager: goal_file, max_rounds, approve_plan, approve_milestones, min_score, protocol
-                       critic:  checklist, checklist_nudge, milestone_rounds, checkin_every, job_wait
+                       manager: goal_file, max_rounds, approve_plan, approve_milestones, min_score, protocol, tag_reminder
+                       critic:  checklist, checklist_nudge, milestone_rounds, checkin_every, job_wait, job_ignore
                        worker:  snapshot, fresh_session
     goal.md          manager: the goal (only the manager reads it)
     memory.md, memory/*.md   this project's notes and preferences, added after the system prompt
@@ -132,37 +132,46 @@ Three layers of review, so each layer above reads less. Agents: exactly one `rol
 | plan | manager | splits the goal into a numbered milestone list + a scored rubric → **I approve** (`approve_plan`) |
 | kickoff | manager → critic | a high-level note for the milestone |
 | brief | critic → worker | concrete instructions; the critic starts its own checklist |
-| rounds | worker ↔ critic | work, then review with `VERDICT` (checklist-gated as in pipeline), up to `milestone_rounds` |
+| rounds | worker ↔ critic | work, then review with `<checklist>` + `<verdict>`, up to `milestone_rounds` |
 | report | critic → manager | milestone report (tables first) |
-| review | manager | scores per criterion + `Overall score: x/5` + `DECISION: ACCEPT/REVISE` (`min_score` optional); REVISE → guidance to the critic |
+| review | manager | scores per criterion + `<score>` + `<decision>ACCEPT/REVISE</decision>` (`min_score` optional); REVISE → guidance to the critic |
 | gate | me | the manager's summary → **I approve** or send it back (`approve_milestones`) |
 
-Questions go up one level at a time and never stop the run: a worker's question is answered by the critic; a critic reply starting `QUESTIONS FOR …:` is answered by the manager straight away; a manager reply starting `QUESTIONS FOR YOU:` is labelled (Q1, Q2 …) for me while the asker continues with a stated assumption. My answer is relayed to the manager and the critic on their next turn. `NOTE FOR <name>:` in a manager reply (also in my chat with it) is passed to that agent.
+Questions go up one level at a time and never stop the run: a worker's `<question>` is answered by the critic; a critic's is answered by the manager straight away; a manager's is labelled (Q1, Q2 …) for me while the asker continues with a stated assumption. My answer is relayed to the manager and the critic on their next turn. A `<message to="…">` in a manager reply (also in my chat with it) is passed to that agent.
 
 **The protocol.** In managed mode orch adds a fixed section, *How this team works*, to every agent's system prompt
-(`orch/prompts/protocol/<role>.md`), after the project's own prompt and before its memory notes. The role
-prompts describe the job and the working style; the protocol is what the framework itself depends on, so it stays
-the same however a project edits its prompts (`protocol: false` turns it off). It sets three things for each role:
-which part of its reply each other party reads, the signals orch acts on, and hard boundaries. The signals:
+(`orch/prompts/protocol/<role>.md`), after the project's own prompt and before its memory notes. The role prompts
+describe the job and the working style; the protocol is what the framework itself depends on, so it stays the same
+however a project edits its prompts (`protocol: false` turns it off). Signals are XML-style tags with a start and an
+end, so orch never guesses where a block stops (`orch/tags.py`); tags quoted in `code` are ignored, and a tag left
+open runs to the next tag or the end of the reply. Text outside the tags is for whoever the agent is replying to:
+the critic's review goes to the worker, the manager's text to me.
 
-| signal (start of a line) | written by | what orch does |
+| tag | written by | what orch does |
 |---|---|---|
-| `QUESTIONS FOR YOU:` | worker → critic, critic → manager, manager → me | records the question (Q1, Q2 …) and passes it up one level; the run does not wait |
-| `NOTE FOR <name>:` | manager (also in the chat), critic (`NOTE FOR YOU:`) | passes that block to the named agent's next turn |
-| `## Review for <worker>` | critic | only what follows reaches the worker (without checklist, verdict and signals) |
-| `- [x]` / `- [ ]` + `VERDICT: PASS/FAIL` | critic | a PASS counts only when every item is `[x]` |
-| `For <critic>:` | manager, in reviews and answers | only that part reaches the critic |
-| `Overall score: x/5` + `DECISION: ACCEPT/REVISE` | manager, milestone review | accepts the milestone or sends it back |
-| `WAITING FOR YOU:` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's pauses the run |
-| `DECISION: PAUSE/CONTINUE` | manager, on a proposed pause (also in the chat) | pauses without spending rounds, or sends the critic what to do meanwhile |
-| (none: orch finds detached jobs itself) / `NO WAIT: pid …` | worker | holds the critic's review until a job the worker left running exits / not for that one |
+| `<message to="…">…</message>` | anyone | delivers the block to that agent only (the manager's instructions and answers to the critic, the critic's notes to the manager) |
+| `<question>…</question>` | worker → critic, critic → manager, manager → me | one decision per tag; recorded (Q1, Q2 …) and passed up one level; the run does not wait |
+| `<pause>…</pause>` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's stops the whole run until I continue it |
+| `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | a PASS counts only when every item is `[x]` |
+| `<score>x</score>` + `<decision>ACCEPT\|REVISE</decision>` | manager, milestone review | accepts the milestone or sends it back |
+| `<decision>PAUSE\|CONTINUE</decision>` | manager, on a proposed pause | stops the run, or sends the critic what to do meanwhile |
+| `<no-wait pid="…"/>` | worker | the review does not wait for that process (orch finds the worker's detached jobs itself) |
 
 The boundaries: the manager doesn't edit files and keeps milestones, rubric and scores to itself; the critic only
 reviews (no edits, no fixes written for the worker, no wider scope); the worker changes only what the work needs,
 commits nothing unless asked, writes no notes or status files, caps and pilots anything that spends, never starts
-a job twice and never keeps its turn open to wait (orch waits for its jobs between turns). Protocol reminders that matter most are also repeated in the
-per-turn messages (for example the pause in every review request), because an agent deep in a long session follows
-the message in front of it more reliably than its system prompt.
+a job twice and never keeps its turn open to wait (orch waits for its jobs between turns).
+
+**Tag reminders.** With probability `tag_reminder` (default 0.2) a turn's message ends with a short
+`<system-reminder>` listing that role's tags, worded as a reminder rather than a request, so an agent deep in a long
+session keeps the protocol in view without being pushed to add tags it doesn't need. The board marks those turns.
+
+**Fresh sessions mid-run.** `orch reset-sessions <project> [--agent NAME]` (with the run stopped) clears the agents'
+conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. Each agent
+starts a new session on its next turn with a handover: the manager gets the goal, its approved plan and rubric, the
+milestone table and the critic's latest report; the critic gets its current instruction and its latest review with
+the checklist; the worker its latest report; all get the decisions register and anything the run is paused on. The
+board chat follows the new session.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
 answers and notes, messages I add at a gate, and the manager's answers to the critic, each with who decided and
@@ -176,14 +185,14 @@ starts; its work is in the files, and the critic's brief plus the register tell 
 re-reads its whole history on every step, so this keeps worker turns from getting slower and dearer as a run goes
 on. The manager and critic are best left in one session: they are cheap, and they need to remember the decisions.
 
-**Waiting for a human task.** When the next step is mine or the authors' (labelling, a dry run) and the worker has
-nothing useful left, the critic proposes a pause with a paragraph starting `WAITING FOR YOU:`. The manager decides:
-`DECISION: PAUSE` pauses the run without spending rounds, and the board shows the manager's note on what I need to
-do under *Needs you*, with a **Done, carry on** button and a message box (the message goes into the decisions
-register and to the critic, which then tells the worker what to do next). `DECISION: CONTINUE` instead sends the
-critic what to do in the meantime.
-The manager can also pause the work itself, in any reply or in the board chat, with its own `WAITING FOR YOU:`
-paragraph saying what I need to do; it takes effect before the next round.
+**Pausing the whole run.** A pause stops the pipeline itself: no agent works and no rounds are spent until I
+continue it. It is for the point where everything the agents can do is done and the rest waits on people
+(labelling, a dry run). The critic proposes one with `<pause>…</pause>`; the manager decides with
+`<decision>PAUSE</decision>` or `<decision>CONTINUE</decision>` (then with a message for the critic on what to do
+meanwhile). The manager can also call one itself, in any reply or in the board chat, with its own `<pause>`; it
+takes effect before the next round. While paused, the board shows what I need to do under *Needs you*, with a
+**Done, carry on** button and a message box; the message goes into the decisions register and to the critic, which
+then tells the worker what to do next.
 
 **Waiting for the worker's own jobs.** orch finds them itself: a process that started during the worker's turn, is
 still running after the turn ends, runs inside the workspace and was detached from the agent (`nohup … &`, so its
@@ -191,8 +200,8 @@ parent is the system's init process) is a job; processes of mine, an editor or a
 runs, the critic's review is held (no review spent on unfinished work, and none of it counts against the worker's
 turn time limit); when it exits, the worker gets the turn back to finish, and the critic then reviews both replies
 together. `job_wait` (seconds, default 21600; 0 = off) caps the wait, after which the worker is asked for progress;
-`job_ignore` (regexes on the command line) and a worker line `NO WAIT: pid <id>` exclude long-lived helpers.
-**Review now** on the board skips the wait. A worker may still name a job with `WAITING ON JOB: pid <id>`.
+`job_ignore` (regexes on the command line) and a worker's `<no-wait pid="…"/>` exclude long-lived helpers.
+**Review now** on the board skips the wait.
 
 **The board** — `orch run cfg.yaml --serve [--open]`, or `orch serve cfg.yaml` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Without the board: `orch approve <run|cfg> [--note … | --revise …]`, `orch answer <run|cfg> Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
 

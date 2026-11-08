@@ -186,8 +186,22 @@ function inline(s){ s = esc(s);
   return s.replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>')
           .replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,;:!?]|$)/g,'$1<i>$2</i>'); }
 const LI = /^\s*([-*+]|\d+[.)])\s+/;
+// the tag protocol, shown as labelled blocks: <message to="x">, <question>, <pause>, <checklist>, <verdict> …
+function tagsToMd(s){
+  const lab = (t) => `\n\n**${t}**\n\n`;
+  return String(s||'')
+    .replace(/<message\s+to\s*=\s*["']?([^"'>]+)["']?\s*>/gi, (_, w) => lab('→ ' + who(w.trim().replace(/^the\s+/i,'')) ))
+    .replace(/<question\s*>/gi, lab('❓ Question')).replace(/<pause\s*>/gi, lab('⏸ Pause'))
+    .replace(/<checklist\s*>/gi, lab('Checklist'))
+    .replace(/<verdict\s*>\s*([^<]*)<\/verdict\s*>/gi, (_, v) => lab('Verdict: ' + v.trim()))
+    .replace(/<score\s*>\s*([^<]*)<\/score\s*>/gi, (_, v) => lab('Score: ' + v.trim() + (/\//.test(v) ? '' : '/5')))
+    .replace(/<decision\s*>\s*([^<]*)<\/decision\s*>/gi, (_, v) => lab('Decision: ' + v.trim()))
+    .replace(/<no-wait\s+pid\s*=\s*["']?(\d+)["']?\s*\/?>/gi, (_, p) => `\n\n*(not waited on: pid ${p})*\n\n`)
+    .replace(/<\/(message|question|pause|checklist|verdict|score|decision|no-wait)\s*>/gi, '\n\n');
+}
+const TAGBLOCK = /<(message|question|pause|checklist|verdict|score|decision|no-wait)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
 function md(src){
-  const L = String(src || '').replace(/\r/g,'').split('\n'); let h = '', i = 0;
+  const L = tagsToMd(src).replace(/\r/g,'').split('\n'); let h = '', i = 0;
   while (i < L.length){
     const l = L[i];
     if (/^\s*```/.test(l)){ const b=[]; i++; while(i<L.length && !/^\s*```/.test(L[i])) b.push(L[i++]); i++; h += '<pre>'+esc(b.join('\n'))+'</pre>'; continue; }
@@ -357,9 +371,7 @@ function renderNeeds(mg){
   el.querySelectorAll('.qthread').forEach(t => t.scrollTop = t.scrollHeight);
 }
 // what follows a question that is meant for me, up to a divider or the part addressed to the critic
-function forMe(t){ t = String(t||''); const crit = esc(called('critic')).replace(/^the\s+/i, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = t.match(new RegExp('^\\s*(?:-{3,}|\\*{3,}|_{3,}|#{1,6}\\s|[*_]*\\s*(?:reply|message|answer|notes?|instructions?)?\\s*(?:to|for)\\s+(?:the\\s+)?(?:' + crit + '|critic)\\b|NOTES?\\s+FOR\\b)', 'im'));
-  return (m ? t.slice(0, m.index) : t).trim(); }
+function forMe(t){ return String(t||'').replace(TAGBLOCK, '').replace(/\n{3,}/g, '\n\n').trim(); }  // outside the tags
 async function qSend(qid, text){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('/api/chat', {qid, message: text}); }
 document.addEventListener('keydown', e => { const t = e.target;
   if (t.id && t.id.startsWith('qa-') && e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); qSend(t.id.slice(3), t.value.trim()); } });
@@ -459,11 +471,11 @@ function renderReport(mg){
 
 function bubble(t, opts){
   const f = (D.flow||{})[t.purpose] || [t.role, ''];
-  let to = f[1]; if (t.purpose === 'review' && /DECISION:\s*\**\s*REVISE/i.test(t.output||'')) to = 'critic';
+  let to = f[1]; if (t.purpose === 'review' && /<decision>\s*REVISE/i.test(t.output||'')) to = 'critic';
   const id = 'm-' + t.turn_id, long = (t.output||'').length > 900, open = expanded.has(id);
   const body = t.status === 'running' ? `<div data-live="${esc(t.turn_id)}"></div>` : `<div class="md">${md(t.output||'(empty)')}</div>`;
   return `<div class="msg${to==='human'?' to-human':''}"><div class="h"><b>${esc(called(t.agent))}</b> → <b>${esc(who(to))}</b>
-    <span class="pill">${esc(t.purpose)}</span>${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}<span>${tm(t.started_at)}</span>
+    <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}<span>${tm(t.started_at)}</span>
     ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
     ${t.checklist?`<span class="mono">☑ ${t.checklist[0]}/${t.checklist[1]}</span>`:''}</div>
     <div class="${long && !open && t.status!=='running' ? 'clamp' : ''}">${body}</div>
@@ -476,12 +488,12 @@ function preview(text){  // first line of prose, without markdown, for a folded 
 }
 function fold(t){
   const f = (D.flow||{})[t.purpose] || [t.role, ''];
-  let to = f[1]; if (t.purpose === 'review' && /DECISION:\s*\**\s*REVISE/i.test(t.output||'')) to = 'critic';
+  let to = f[1]; if (t.purpose === 'review' && /<decision>\s*REVISE/i.test(t.output||'')) to = 'critic';
   const run = t.status === 'running', open = openMsgs.has(t.turn_id) || (run && !shutMsgs.has(t.turn_id));
   const body = run ? `<div data-live="${esc(t.turn_id)}"></div>` : `<div class="md">${md(t.output||'(empty)')}</div>`;
   return `<details class="fold${to==='human'?' to-human':''}" data-t="${esc(t.turn_id)}"${open?' open':''}><summary>
     <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
-    <span class="pill">${esc(t.purpose)}</span>${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
+    <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
     ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
     <span class="pv">${esc(run ? 'writing…' : preview(t.output))}</span></summary><div class="fb">${body}</div></details>`;
 }

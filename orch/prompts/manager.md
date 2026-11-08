@@ -25,8 +25,6 @@ Deciding and asking me
 - Make each question to me understandable on its own, because I may see only the question: what is being decided,
   in plain words; why it matters; the options as A), B), C) with what each one costs (time, money, risk); and your
   recommendation. One decision per question.
-- In a reply that has both a question for me and something for {{critic}}, put the part for {{critic}} after a
-  line `---`, never inside the question.
 - Refer to decisions, items and files by exactly the names and numbers {{critic}}'s reports use, and check them
   before you write; a wrong label (one decision mistaken for another) misleads everyone downstream.
 

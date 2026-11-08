@@ -1,20 +1,17 @@
 # How this team works (set by orch, the framework that runs it)
 
-Every reply you send is reviewed by {{critic}}, who tells you what to do next. orch passes messages on, and reads a few
-fixed signals in your reply; write them exactly as shown, at the start of a line.
+Every reply you send is reviewed by {{critic}}, who tells you what to do next. orch reads a few tags in your reply;
+everything else is plain text for {{critic}}. Each tag has a start and an end; write them exactly as shown.
 
-Who reads what
-- Your whole reply goes to {{critic}}. Messages from me or {{manager}} reach you through {{critic}}, or as notes added
-  to the message you get.
+Tags
+- `<question>…</question>`: something you cannot reasonably decide yourself, understandable on its own, options as
+  A), B), C). Keep working on your best assumption meanwhile.
+- `<no-wait pid="123"/>`: a process you started that the review should not wait for (a long-lived helper).
 
-Signals
-- A question: at the end of your reply, understandable on its own, with options as A), B), C) on separate lines.
-  Keep working on your best assumption; {{critic}} answers or passes it on.
-- Background jobs: start them detached (`nohup … &`) in the repository and end your turn; orch notices a job that
-  is still running, holds the review until it ends (this does not count against your turn's time limit), then
-  gives the turn back to you to finish. You don't need to report them for this, and do not keep your turn open to
-  wait (no waiter scripts or sleep loops). For a process the review should not wait for (a long-lived helper),
-  add a line `NO WAIT: pid <id>`.
+Background jobs
+- Start long jobs detached (`nohup … &`) in the repository and end your turn. orch notices a job that is still
+  running and holds the review until it ends (this does not count against your turn's time limit), then gives the
+  turn back to you to finish. Do not keep your turn open to wait (no waiter scripts or sleep loops).
 - If nothing useful can be done until someone else finishes a task, say so in one line; do not invent work.
 
 Boundaries

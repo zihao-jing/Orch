@@ -492,19 +492,22 @@ class MockBackend(Backend):
             text = self._manager(purpose, req, o)
         elif req.role == "verifier" and purpose and purpose not in ("verify",):
             text = {"brief": "Here is what I need for this milestone: make the change and check it.\n\n"
-                             "- [ ] the change is made\n- [ ] it has been checked",
+                             "<checklist>\n- [ ] the change is made\n- [ ] it has been checked\n</checklist>",
                     "report": "| item | state |\n|---|---|\n| change made | done |\n| checked | done |\n\n"
                               "Everything on my list holds now.",
                     }.get(purpose, "Noted. Please also keep the summary short.")
         elif req.role == "verifier":
             ms_round = int(req.context.get("milestone_round", rnd))
-            if ms_round >= int(o.get("pass_after", 2)):
-                text = (f"Checked the workspace in round {rnd}. Everything matches the goal.\n\n"
-                        "- [x] the change is made\n- [x] it has been checked\nVERDICT: PASS")
-            else:
-                text = (f"Round {rnd} review: the work is incomplete.\n- add input validation\n"
-                        f"- add a unit test for the edge case\n\n- [ ] the change is made\n- [ ] it has been checked\n"
-                        "VERDICT: FAIL")
+            tags = "milestone_round" in req.context  # managed mode speaks the tag protocol
+            ok = ms_round >= int(o.get("pass_after", 2))
+            items = "- [x] the change is made\n- [x] it has been checked" if ok else \
+                "- [ ] the change is made\n- [ ] it has been checked"
+            body = (f"Checked the workspace in round {rnd}. Everything matches the goal." if ok else
+                    f"Round {rnd} review: the work is incomplete.\n- add input validation\n"
+                    f"- add a unit test for the edge case")
+            v = "PASS" if ok else "FAIL"
+            text = (f"{body}\n\n<checklist>\n{items}\n</checklist>\n<verdict>{v}</verdict>" if tags
+                    else f"{body}\n\n{items}\nVERDICT: {v}")
         elif req.role == "controller":
             roster = [a for a in req.context.get("roster", []) if a != req.agent]
             if rnd >= int(o.get("done_after", 2)):
@@ -536,13 +539,14 @@ class MockBackend(Backend):
                     "| correctness | nothing wrong |\n| clarity | easy to read |\n\nI accept a milestone at 4/5 or more.")
         if purpose == "review":
             return ("| criterion | score |\n|---|---|\n| correctness | 5 |\n| clarity | 4 |\n\n"
-                    "Overall score: 4.5/5. This milestone is done.\n\nDECISION: ACCEPT")
+                    "This milestone is done.\n\n<score>4.5</score>\n<decision>ACCEPT</decision>")
         if purpose == "answer":
             return "Go with the simpler option for now."
         if purpose == "chat":
             return "Things are on track; nothing needs you right now."
         if purpose == "pause":
-            return "Nothing useful is left until that is done. Please do the task the critic describes.\n\nDECISION: PAUSE"
+            return ("Nothing useful is left until that is done. Please do the task the critic describes.\n\n"
+                    "<decision>PAUSE</decision>")
         if purpose == "ack":
             return "Thanks, carry on."
         return "Please get the first part of the goal done and keep me posted."

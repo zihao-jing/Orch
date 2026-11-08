@@ -323,7 +323,7 @@ class TestCommandBackendAndConfig(unittest.TestCase):
 
 
 def managed(name="m", controller=None, mgr=None, critic=None, worker=None):
-    c = {"mode": "managed", "checklist": True, "approve_plan": False, "approve_milestones": False}
+    c = {"mode": "managed", "checklist": True, "approve_plan": False, "approve_milestones": False, "tag_reminder": 0}
     c.update(controller or {})
     return {"name": name, "workspace": "ws", "goal": "Revise the plan.", "max_rounds": 12, "controller": c,
             "agents": [{"name": "boss", "role": "manager", "display_name": "Alex", "backend_options": mgr or {}},
@@ -342,13 +342,15 @@ class TestManaged(unittest.TestCase):
                               "Rubric\n1. something else")
         self.assertEqual([m["title"] for m in ms], ["Scope", "Tables"])
         self.assertEqual(ms[1]["done_when"], "numbers checked and sourced")
-        self.assertEqual(parse_score("| a | 4 |\n\nOverall score: 8/10"), 4.0)
+        self.assertEqual(parse_score("| a | 4 |\n\n<score>8/10</score>"), 4.0)
+        self.assertEqual(parse_score("<score>4.5</score>"), 4.5)
+        self.assertIsNone(parse_score("Overall score: 4/5"))  # only the tag counts
         self.assertEqual(parse_criteria("| criterion | score |\n|---|---|\n| clarity | 4/5 |\n| depth | **3** |\n| Overall | 3.5 |"),
                          [["clarity", 4.0], ["depth", 3.0]])
 
     def test_milestones_flow_and_worker_question_answered_by_critic(self):
         status, rec = run(make_cfg(self.tmp, [managed(worker={"replies": {"work": [
-            "Changed it. Should the headers be bold?\n\nA) yes\nB) no", "Fixed the rest."]}})]))
+            "Changed it.\n\n<question>Should the headers be bold?\nA) yes\nB) no</question>", "Fixed the rest."]}})]))
         self.assertEqual(status, "completed")
         st = rec.state
         ms = st["managed"]["milestones"]
@@ -375,21 +377,24 @@ class TestManaged(unittest.TestCase):
 
     def test_revise_passes_only_the_part_for_the_critic(self):
         status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1, "replies": {"review": [
-            "| criterion | score |\n|---|---|\n| depth | 2 |\n\nOverall score: 2/5. Milestone 1 is not met.\n\n"
-            "For Jordan:\nThe comparison table still lacks the new baseline; add it.\n\nDECISION: REVISE",
-            "Overall score: 5/5.\n\nDECISION: ACCEPT"]}})]))
+            "| criterion | score |\n|---|---|\n| depth | 2 |\n\nMilestone 1 is not met.\n\n"
+            "<message to=\"Jordan\">The comparison table still lacks the new baseline; add it.</message>\n\n"
+            "<score>2</score>\n<decision>REVISE</decision>",
+            "<score>5</score>\n<decision>ACCEPT</decision>"]}})]))
         self.assertEqual(status, "completed")
         g = next(t for t in turns(rec) if t["purpose"] == "guidance")
         self.assertIn("lacks the new baseline", g["input"])
-        for word in ("Milestone", "score", "DECISION", "| depth"):
+        for word in ("Milestone", "score", "decision", "| depth"):
             self.assertNotIn(word, g["input"])
 
     def test_checkins_and_notes_up(self):
         status, rec = run(make_cfg(self.tmp, [managed(
             controller={"checkin_every": 1}, mgr={"milestones": 1},
             critic={"pass_after": 3, "replies": {"verify": [
-                "Add the units.\n\nNOTE FOR YOU: the reviewers' tables use different seeds.\n\n- [ ] units\nVERDICT: FAIL",
-                "Nearly there.\n\n- [ ] units\nVERDICT: FAIL", "Done.\n\n- [x] units\nVERDICT: PASS"]}})]))
+                "Add the units.\n\n<message to=\"Alex\">The reviewers' tables use different seeds.</message>\n\n"
+                "<checklist>\n- [ ] units\n</checklist>\n<verdict>FAIL</verdict>",
+                "Nearly there.\n\n<checklist>- [ ] units</checklist>\n<verdict>FAIL</verdict>",
+                "Done.\n\n<checklist>- [x] units</checklist>\n<verdict>PASS</verdict>"]}})]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
         seq = [(t["agent"], t["purpose"]) for t in ts]
@@ -399,7 +404,7 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(seq[i + 1], ("boss", "ack"))
         self.assertEqual(seq[i + 2], ("writer", "work"))
         ack = next(t for t in ts if t["purpose"] == "ack")
-        self.assertIn("Jordan mentioned: the reviewers' tables use different seeds.", ack["input"])
+        self.assertIn("Jordan mentioned: The reviewers' tables use different seeds.", ack["input"])
         w2 = [t for t in ts if t["agent"] == "writer"][1]
         self.assertIn("Add the units.", w2["input"])
         self.assertNotIn("seeds", w2["input"])  # the note was for the manager only
@@ -419,9 +424,11 @@ class TestManaged(unittest.TestCase):
 
     def test_question_chain_up_to_me_does_not_block(self):
         cfg = make_cfg(self.tmp, [managed(
-            mgr={"milestones": 1, "replies": {"answer": ["QUESTIONS FOR YOU:\nDo we cite the new run?\nA) yes\nB) no\n\nAssume yes for now."]}},
-            critic={"replies": {"verify": ["QUESTIONS FOR ALEX:\nDo we cite the new run in the main text?\n\n- [ ] cited\nVERDICT: FAIL",
-                                           "Good.\n\n- [x] cited\nVERDICT: PASS"]}})])
+            mgr={"milestones": 1, "replies": {"answer": ["<question>Do we cite the new run?\nA) yes\nB) no</question>\n\n"
+                                                         "<message to=\"Jordan\">Assume yes for now.</message>"]}},
+            critic={"replies": {"verify": ["<question>Do we cite the new run in the main text?</question>\n\n"
+                                           "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                                           "Good.\n\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})])
         status, rec = run(cfg)
         self.assertEqual(status, "completed")  # finished although my answer never came
         qs = rec.state["questions"]
@@ -429,7 +436,7 @@ class TestManaged(unittest.TestCase):
                          [("critic", "boss", "passed_up"), ("boss", "human", "open")])
         amend = next(t for t in turns(rec) if t["purpose"] == "amend")
         self.assertIn("Assume yes for now.", amend["input"])
-        self.assertNotIn("QUESTIONS FOR YOU", amend["input"])
+        self.assertNotIn("<question>", amend["input"])
 
     def test_human_answer_is_relayed_to_manager_and_critic(self):
         from orch.managed import ManagedRunner
@@ -665,8 +672,8 @@ class TestManaged(unittest.TestCase):
 
     def test_decisions_register_and_fresh_worker_session_per_milestone(self):
         m = managed(critic={"replies": {"brief": [
-            "QUESTIONS FOR YOU:\n1. Should the tables use percentages?\nA) yes\nB) no\n\nAssuming A.\n\n"
-            "## Review for Sam\nStart with the tables."]}})
+            "<question>Should the tables use percentages?\nA) yes\nB) no</question>\n\n"
+            "Start with the tables; assume percentages for now."]}})
         m["agents"][2]["fresh_session"] = "milestone"
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "completed")
@@ -712,9 +719,9 @@ class TestManaged(unittest.TestCase):
 
     def test_critic_pauses_the_work_while_waiting_for_a_human_task(self):
         crit = {"replies": {"verify": [
-            "WAITING FOR YOU: the authors label the 20 items in `labels/`; I need the four CSV files back.\n\n"
-            "## Review for Sam\nNothing more to do until the labels are in.\n\n- [ ] labels are in\nVERDICT: FAIL",
-            "All good.\n\n- [x] labels are in\nVERDICT: PASS"]}}
+            "<pause>The authors label the 20 items in `labels/`; I need the four CSV files back.</pause>\n\n"
+            "Nothing more to do until the labels are in.\n\n<checklist>- [ ] labels are in</checklist>\n<verdict>FAIL</verdict>",
+            "All good.\n\n<checklist>- [x] labels are in</checklist>\n<verdict>PASS</verdict>"]}}
         cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1}, critic=crit)])
         out = self.tmp / "out" / "m"
         holder = {}
@@ -741,7 +748,7 @@ class TestManaged(unittest.TestCase):
         self.assertIn("Labels are in labels/v2.", res[0]["input"])
         self.assertIn("four CSV files", res[0]["input"])
         work = [t for t in ts if t["purpose"] == "work"]
-        self.assertTrue(all("WAITING FOR" not in t["input"] for t in work))
+        self.assertTrue(all("<pause>" not in t["input"] and "four CSV" not in t["input"] for t in work))
         self.assertEqual(rec.state["round"], n_rounds + 1)  # the pause spent no rounds
         self.assertIn("Labels are in labels/v2.", rec.state["decisions"][-1]["text"])
         pause = [t for t in ts if t["purpose"] == "pause"]
@@ -750,40 +757,26 @@ class TestManaged(unittest.TestCase):
 
     def test_manager_can_turn_down_a_proposed_pause(self):
         crit = {"replies": {"verify": [
-            "WAITING FOR YOU: the authors label the 20 items.\n\n## Review for Sam\nNothing more to do.\n\n"
-            "- [ ] labels are in\nVERDICT: FAIL", "All good.\n\n- [x] labels are in\nVERDICT: PASS"],
-            "guidance": ["## Review for Sam\nWrite the analysis script against the dummy labels."]}}
+            "<pause>The authors label the 20 items.</pause>\n\nNothing more to do.\n\n"
+            "<checklist>- [ ] labels are in</checklist>\n<verdict>FAIL</verdict>",
+            "All good.\n\n<checklist>- [x] labels are in</checklist>\n<verdict>PASS</verdict>"],
+            "guidance": ["Write the analysis script against the dummy labels."]}}
         mgr = {"milestones": 1, "replies": {"pause": [
-            "Not yet.\n\nFor the critic: have the worker write the analysis script on dummy labels.\n\nDECISION: CONTINUE"]}}
+            "Not yet.\n\n<message to=\"the critic\">Have the worker write the analysis script on dummy labels.</message>\n\n"
+            "<decision>CONTINUE</decision>"]}}
         status, rec = run(make_cfg(self.tmp, [managed(mgr=mgr, critic=crit)]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
         self.assertFalse(any(g["kind"] == "wait" for g in rec.state["managed"].get("gates") or []))
         cont = [t for t in ts if t["agent"] == "critic" and t["purpose"] == "guidance"]
         self.assertIn("analysis script on dummy labels", cont[0]["input"])
-        self.assertNotIn("DECISION", cont[0]["input"])
+        self.assertNotIn("<decision>", cont[0]["input"])
         work = [t for t in ts if t["purpose"] == "work"]
         self.assertIn("dummy labels", work[1]["input"])
 
-    def test_review_waits_for_the_workers_job(self):
-        job = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"])
-        work = {"replies": {"work": [f"Started the run.\n\nWAITING ON JOB: pid {job.pid}, log logs/run.log",
-                                     "The run finished; results are in out.csv."]}}
-        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=work)]))
-        job.wait()
-        self.assertEqual(status, "completed")
-        ts = turns(rec)
-        seq = [(t["agent"], t["purpose"]) for t in ts if t["purpose"] in ("work", "verify")]
-        self.assertEqual(seq[:3], [("writer", "work"), ("writer", "work"), ("critic", "verify")])
-        self.assertIn("has finished", ts[[t["purpose"] for t in ts].index("work") + 1]["input"])
-        first_review = [t for t in ts if t["purpose"] == "verify"][0]["input"]
-        self.assertIn("Started the run.", first_review)
-        self.assertIn("results are in out.csv", first_review)
-
     def test_review_now_skips_the_job_wait(self):
-        job = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-        self.addCleanup(job.kill)
-        work = {"replies": {"work": [f"WAITING ON JOB: pid {job.pid}", "Carried on."]}}
+        self.addCleanup(lambda: subprocess.run(["pkill", "-f", "sleep 60.17"]))
+        work = {"spawn": "sleep 60.17", "replies": {"work": ["Started the long run.", "Carried on."]}}
         cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=work)])
         out = self.tmp / "out" / "m"
         holder = {}
@@ -794,16 +787,16 @@ class TestManaged(unittest.TestCase):
             runs = sorted(out.glob("*/state.json")) if out.exists() else []
             st = read_json(runs[-1]) if runs else {}
             time.sleep(0.05)
-        self.assertEqual(st["managed"]["job"]["agents"]["writer"]["pids"], [job.pid])
+        self.assertIn("sleep 60.17", " ".join(st["managed"]["job"]["agents"]["writer"]["lines"]))
         (runs[-1].parent / "inbox" / "a-job.json").write_text(json.dumps({"kind": "job"}))
         th.join(10)
         status, rec = holder["res"]
         self.assertEqual(status, "completed")
-        self.assertTrue(job.poll() is None)  # the job itself is left alone
+        self.assertEqual(subprocess.run(["pgrep", "-f", "sleep 60.17"], capture_output=True).returncode, 0)  # left alone
 
     def test_manager_pauses_the_work_itself(self):
         mgr = {"milestones": 1, "replies": {"ack": [
-            "WAITING FOR YOU: please finish the dry run and tell me where the notes are.\n\nThanks.", "Carry on."]}}
+            "<pause>Please finish the dry run and tell me where the notes are.</pause>\n\nThanks.", "Carry on."]}}
         cfg = make_cfg(self.tmp, [managed(controller={"checkin_every": 1}, mgr=mgr, critic={"pass_after": 3})])
         out = self.tmp / "out" / "m"
         holder = {}
@@ -831,9 +824,9 @@ class TestManaged(unittest.TestCase):
     def test_protocol_is_added_to_every_role_and_can_be_turned_off(self):
         status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
         sp = {t["agent"]: t["system_prompt"] for t in turns(rec)}
-        self.assertIn("`DECISION: PAUSE`", sp["boss"])
-        self.assertIn("## Review for Sam", sp["critic"])  # names filled in
-        self.assertIn("NO WAIT: pid", sp["writer"])
+        self.assertIn("<decision>PAUSE</decision>", sp["boss"])
+        self.assertIn('<message to="Alex">', sp["critic"])  # names filled in
+        self.assertIn('<no-wait pid="123"/>', sp["writer"])
         self.assertNotIn("{{", sp["writer"])
         off = managed(name="n", controller={"protocol": False}, mgr={"milestones": 1})
         (self.tmp / "b").mkdir()
@@ -860,6 +853,42 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(status, "completed")
         seq = [(t["agent"], t["purpose"]) for t in turns(rec) if t["purpose"] in ("work", "verify")]
         self.assertEqual(seq[:2], [("writer", "work"), ("critic", "verify")])
+
+    def test_tag_reminder_is_added_now_and_then(self):
+        status, rec = run(make_cfg(self.tmp, [managed(controller={"tag_reminder": 1}, mgr={"milestones": 1})]))
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        self.assertTrue(all("<system-reminder>" in t["input"] and t.get("tag_reminder") for t in ts))
+        crit = next(t for t in ts if t["agent"] == "critic")["input"]
+        self.assertIn('<message to="Alex">', crit)
+        self.assertIn("not a request to add anything", crit)
+        status, rec = run(make_cfg(self.tmp / "x" if (self.tmp / "x").mkdir() is None else self.tmp,
+                                   [managed(controller={"tag_reminder": 0}, mgr={"milestones": 1})]))
+        self.assertFalse(any("<system-reminder>" in t["input"] for t in turns(rec)))
+
+    def test_reset_sessions_keeps_the_run_and_hands_over(self):
+        cfg_path = make_cfg(self.tmp, [managed(mgr={"milestones": 2})])
+        status, rec = run(cfg_path)
+        self.assertEqual(status, "completed")
+        from orch.managed import ManagedRunner
+        mon = load_config(cfg_path).monitor("m")
+        r = ManagedRunner(mon, threading.Event(), resume=True, log=lambda s: None)
+        r.rec = rec
+        r.decide("Use British spelling.", "you", "note")
+        done = r.reset_sessions()
+        self.assertEqual(sorted(done), ["boss", "critic", "writer"])
+        st = rec.state
+        for a in ("boss", "critic", "writer"):
+            self.assertIsNone(st["sessions"][a]["session_id"])
+            self.assertTrue(st["sessions"][a]["reset_at"])
+            self.assertEqual(len(st["sessions"][a]["previous"]) >= 1, True)
+            self.assertIn("fresh conversation", st["fwd"][a][0])
+            self.assertIn("British spelling", st["fwd"][a][0])
+        self.assertIn("Your plan and rubric", st["fwd"]["boss"][0])
+        self.assertIn("| 2 | Part 2 | done |", st["fwd"]["boss"][0])
+        self.assertIn("Your latest review", st["fwd"]["critic"][0])
+        self.assertEqual(st["managed"]["phase"], "done")  # the run's place is kept
+        self.assertEqual(cli.main(["reset-sessions", cfg_path, "--agent", "writer"]), 0)
 
     def test_managed_validation(self):
         m = managed()
@@ -892,7 +921,7 @@ class TestProjectFolder(unittest.TestCase):
         critic = mon.agent("critic")
         sp = critic.current_system_prompt()
         self.assertTrue(sp.startswith("You are the critic, a careful reviewer. I lead this work"), sp[:80])
-        self.assertIn("QUESTIONS FOR YOU:", sp)
+        self.assertIn("<question>", sp)
         self.assertNotIn("{{", sp)
         self.assertNotIn("Things to keep in mind", sp)  # the memory stub is only a comment
         (d / "agents/critic/memory.md").write_text("<!-- note -->\nPrefer short reviews.")

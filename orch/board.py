@@ -61,18 +61,21 @@ class Board:
                 continue
             out = t.get("output") or ""
             row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
-                                         "duration_s", "started_at", "ended_at", "milestone", "asked")}
+                                         "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder")}
             row["output"] = out[:30000]
             row["cost"] = (t.get("meta") or {}).get("total_cost_usd")  # a session's running total; see _turn_costs
             row["session_id"] = t.get("session_id")
             if t.get("role") == "verifier":
-                items = checklist_items(out)
+                from . import tags as T
+                ck = T.bodies(out, "checklist")
+                items = checklist_items("\n".join(ck) if ck else out)  # older runs: lines anywhere
                 if items and t.get("purpose") == "verify":  # briefs and amends list items still to do, not progress
                     row["checklist"] = [sum(1 for d, _ in items if d), len(items)]
                     series.append({"turn": t["turn_id"], "milestone": t.get("milestone"),
                                    "done": row["checklist"][0], "total": row["checklist"][1],
                                    "purpose": t.get("purpose")})
-                m = re.findall(r"VERDICT:\s*\**\s*(PASS|FAIL)", out, re.I)
+                v = T.value(out, "verdict")
+                m = [v] if v in ("PASS", "FAIL") else re.findall(r"VERDICT:\s*\**\s*(PASS|FAIL)", out, re.I)
                 if m:
                     row["verdict"] = m[-1].upper()
             turns.append(row)
@@ -173,9 +176,14 @@ class Board:
                 message = render(self.mon.controller.templates["manager_question_chat"], **values).strip()
         else:
             shown = message
-        sid = next((c.get("session_id") for c in reversed(last) if c.get("session_id")), None) \
-            or (st.get("sessions", {}).get(mgr.name) or {}).get("session_id")
-        if not sid:
+        sess = st.get("sessions", {}).get(mgr.name) or {}
+        since = sess.get("reset_at") or ""  # a cleared session is not resumed from an older chat
+        sid = next((c.get("session_id") for c in reversed(last) if c.get("session_id") and (c.get("ts") or "") > since),
+                   None) or sess.get("session_id")
+        if not sid and since:  # cleared: the chat starts the new session, with the handover the run would give it
+            handover = "\n\n".join((st.get("fwd") or {}).get(mgr.name) or [])
+            message = (handover + "\n\n---\n\n" + message).strip() if handover else message
+        elif not sid:
             return {"error": f"{mgr.called} has not started yet; try again in a moment"}
         cid = f"chat-{len(last) + 1:03d}-{int(time.time())}"
         tag = {"qid": qid, "settle": True} if settle else ({"qid": qid} if qid else {})
@@ -201,14 +209,14 @@ class Board:
                                         "ts": now_iso(), "session_id": new_sid, "cost": cost, **tag})
             if settle and status == "ok" and text.strip():  # the agreed answer goes to the run like any answer
                 self.control({"kind": "answer", "qid": qid, "message": text.strip(), "via": "conversation"})
-            from .managed import manager_pause, note_blocks  # "NOTE FOR critic: ..." -> that agent's next turn
+            from . import tags as T
+            from .managed import manager_pause
             pause = manager_pause(text) if status == "ok" else ""
-            if pause:  # the manager pauses the work from the chat
+            if pause:  # the manager stops the run from the chat
                 self.control({"kind": "pause", "message": pause})
-            for who, body in note_blocks(text or "", self.mon.controller.note_pattern, to_end=True):
-                who = re.sub(r"^the\s+", "", who.lower())
+            for attrs, body in T.blocks(text or "", "message"):  # <message to="critic"> -> that agent's next turn
                 for a in self.mon.agents:
-                    if who in (a.name.lower(), re.sub(r"^the\s+", "", a.called.lower())) and a.name != mgr.name:
+                    if body and a.name != mgr.name and T.addressed(attrs, a.name, a.called):
                         self.control({"to": [a.name], "message": body, "from": mgr.name})
 
         threading.Thread(target=work, daemon=True).start()

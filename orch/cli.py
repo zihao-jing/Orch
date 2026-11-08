@@ -377,6 +377,39 @@ def cmd_stop(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reset_sessions(a: argparse.Namespace) -> int:
+    """Clear the agents' conversations of the latest managed run; the run keeps its place and records."""
+    from .managed import ManagedRunner
+    from .recorder import Recorder
+    cfg = load_config(a.target)
+    mons = [m for m in cfg.monitors if not a.monitor or m.name in a.monitor]
+    if not mons:
+        print("no monitors selected")
+        return 1
+    rc = 0
+    for m in mons:
+        if m.controller.mode != "managed":
+            print(f"{m.name}: only managed runs have sessions to reset")
+            rc = 1
+            continue
+        rec = Recorder.latest(m.output_dir, m.name)
+        if rec is None:
+            print(f"{m.name}: no run yet")
+            rc = 1
+            continue
+        if rec.state.get("status") in ("running", "awaiting_approval", "waiting_job") and not a.force:
+            print(f"{m.name}: the run looks active ({rec.state.get('status')}); stop it first (Ctrl-C or `orch stop`), "
+                  f"or add --force if it is not running")
+            rc = 1
+            continue
+        r = ManagedRunner(m, threading.Event(), resume=True, log=print)
+        r.rec = rec
+        done = r.reset_sessions(a.agent or None)
+        print(f"{m.name}: fresh sessions for {', '.join(done) or 'nobody'} in {rec.run_dir.name}; "
+              f"each gets a handover on its next turn. Continue with `orch run {a.target} --resume`.")
+    return rc
+
+
 def cmd_inject(a: argparse.Namespace) -> int:
     runs = resolve_runs(a.target, a.monitor)
     if not runs:
@@ -465,6 +498,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--turn", help="turn id (prefix ok), e.g. r002-t01")
     p.add_argument("--width", type=int, default=90)
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("reset-sessions", help="managed mode: clear the agents' conversations and carry on from where "
+                                              "the run is (each agent gets a handover)")
+    p.add_argument("target", help="config or project folder")
+    p.add_argument("-m", "--monitor", action="append")
+    p.add_argument("--agent", action="append", help="only this agent (repeatable); default: all three roles")
+    p.add_argument("--force", action="store_true", help="even if the run's status says it is still active")
+    p.set_defaults(func=cmd_reset_sessions)
 
     p = sub.add_parser("stop", help="ask a running monitor to stop after its current turn")
     p.add_argument("target")

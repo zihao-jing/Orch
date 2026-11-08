@@ -23,6 +23,7 @@ Nothing in the agents' messages mentions a workflow; relayed text reads like a n
 from __future__ import annotations
 
 import json
+import random
 import os
 import re
 import sys
@@ -30,30 +31,27 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import jobs as _jobs
+from . import tags as T
 
 from .backends import StopRequested
 from .config import AgentConfig
-from .controller import MonitorRunner, checklist_state, parse_options, resolve_choice, strip_checklist, \
-    trailing_question, truncate
+from .controller import MonitorRunner, checklist_state, parse_options, resolve_choice, truncate
 from .recorder import now_iso
 
-_WAIT = r"^\W*WAITING\s+(?:FOR|ON)\s+([^:\n]+?)\s*:"  # the critic: nothing to do until a human task is done
-_JOB = r"^\W*WAITING\s+ON\s+(?:A\s+|THE\s+|MY\s+)?(?:JOBS?|PROCESS(?:ES)?|RUNS?)\b[^\n]*"  # the worker: a job still runs
-_NO_WAIT = r"^\W*NO\s+WAIT\b[^\n]*"  # the worker: a process it started that the review should not wait for
-
-
-_DEC_PAUSE = re.compile(r"\n*\s*DECISION:\s*\**\s*PAUSE\**\s*", re.I)
-
-
 def manager_pause(text: str) -> str:
-    """A pause the manager calls itself: its `WAITING FOR YOU:` paragraph(s), or, when it ends with
-    `DECISION: PAUSE`, the whole reply without that line. Empty when there is none."""
-    waits = note_blocks(text or "", _WAIT)
-    if waits:
-        return "\n\n".join(b for _w, b in waits)
-    if _DEC_PAUSE.search(text or ""):
-        return _DEC_PAUSE.sub("\n", text).strip() or "Paused by the manager."
+    """A pause the manager calls: its <pause> block(s), or, with <decision>PAUSE</decision>, the reply outside the
+    tags. Empty when there is none."""
+    p = T.bodies(text or "", "pause")
+    if p:
+        return "\n\n".join(p)
+    if T.value(text or "", "decision") == "PAUSE":
+        return T.outside(text) or "Paused by the manager."
     return ""
+
+
+def checklist_of(text: str) -> Tuple[int, int]:
+    """(done, open) items of the <checklist> block(s) in a reply; (0, 0) without one."""
+    return checklist_state("\n".join(T.bodies(text or "", "checklist")))
 
 
 def pid_alive(pid: int) -> bool:
@@ -73,8 +71,6 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-_VERDICT_LINE = re.compile(r"\n*\s*VERDICT:\s*\**\s*\w+\**\s*$", re.I)
-_SCORE = re.compile(r"(?:overall|total|final)[^\n\d]{0,40}?(\d+(?:\.\d+)?)\s*(?:/|out of)\s*(\d+(?:\.\d+)?)", re.I)
 
 
 # --------------------------------------------------------------------------- parsing helpers
@@ -113,11 +109,12 @@ def parse_milestones(text: str) -> List[Dict[str, str]]:
 
 
 def parse_score(text: str) -> Optional[float]:
-    """'Overall score: 4.2/5' -> 4.2 (scaled to 5 when given out of 10/100)."""
-    hits = list(_SCORE.finditer(text or ""))
-    if not hits:
+    """<score>4.2</score> (or 4.2/5, 8.4/10) -> 4.2 out of 5."""
+    vals = T.bodies(text or "", "score")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:/|out of)?\s*(\d+(?:\.\d+)?)?", vals[-1]) if vals else None
+    if not m:
         return None
-    v, top = float(hits[-1].group(1)), float(hits[-1].group(2))
+    v, top = float(m.group(1)), float(m.group(2) or 5)
     return round(v * 5.0 / top, 2) if top and top != 5 else v
 
 
@@ -143,40 +140,11 @@ def parse_criteria(text: str) -> List[List[Any]]:
     return rows
 
 
-_NOTE_STOP = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,}|#{1,6}\s|\W*(?:NOTES?|QUESTIONS?)\s+FOR\b|\W*WAITING\s+(?:FOR|ON)\b|\W*(?:DECISION|VERDICT)\s*:|"
-                        r"[*_]*\s*(?:review|feedback|instructions?|reply|message)?\s*(?:for|to)\s+(?:the\s+)?[\w-]+\s*:[*_]*\s*$)",
-                        re.I)
-
-
 def _clip(text: str, limit: int) -> str:
     """The start of a text, cut at a word, with a pointer to the rest."""
     if len(text) <= limit:
         return text
     return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:") + " … (in full in the decisions file)"
-
-
-def note_blocks(text: str, pattern: str, to_end: bool = False) -> List[Tuple[str, str]]:
-    """[(addressee, note)] for every 'NOTE FOR name: ...'. A note is its first paragraph plus a list it introduces
-    ("...:" then bullets); ``to_end`` (a chat reply, where the note comes last) takes everything up to a divider,
-    heading or the next label."""
-    out = []
-    for m in re.finditer(pattern, text or "", re.I | re.M):
-        paras = text[m.end():].split("\n\n")
-        keep = [paras[0]]
-        for p in paras[1:]:
-            if not p.strip() or _NOTE_STOP.match(p):
-                break
-            listy = bool(re.match(r"\s*([-*+]|\d+[.)])\s", p))
-            prev = keep[-1].rstrip()
-            if to_end or (listy and (prev.endswith(":") or len(keep) > 1)):  # in a run reply: only the list it introduces
-                keep.append(p)
-            else:
-                break
-        out.append((m.group(1).strip(" *_"), "\n\n".join(keep).strip()))
-    return out
-
-
-# --------------------------------------------------------------------------- runner
 
 
 class ManagedRunner(MonitorRunner):
@@ -221,6 +189,19 @@ class ManagedRunner(MonitorRunner):
         i = self.mg.get("ms", 0)
         return ms[i] if i < len(ms) else None
 
+    def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str, seq: Optional[int] = None,
+             extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Now and then (`tag_reminder`, a probability per turn) a short reminder of the tags is added to the
+        message. It only reminds; nothing is required of the agent because of it."""
+        role = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(agent.role)
+        p = self.mon.controller.tag_reminder
+        if role and p > 0 and random.random() < p:
+            note = self.mtpl(f"tag_reminder_{role}").strip()
+            if note:
+                prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
+                extra = {**(extra or {}), "tag_reminder": True}
+        return super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
+
     def say(self, agent: AgentConfig, prompt: str, purpose: str) -> Dict[str, Any]:
         """One turn of one agent, tagged with the milestone it belongs to."""
         mg = self.mg
@@ -238,10 +219,9 @@ class ManagedRunner(MonitorRunner):
         return r
 
     def notes_up(self, text: str) -> List[str]:
-        """'NOTE FOR YOU: ...' (or 'NOTE FOR <manager>: ...') paragraphs in a critic reply: FYIs for the manager."""
-        mgr = re.sub(r"^the\s+", "", self.manager.called.lower())
-        return [body for who, body in note_blocks(text, self.mon.controller.note_pattern)
-                if re.sub(r"^the\s+", "", who.lower()) in ("you", "me", mgr, self.manager.name.lower()) and body]
+        """<message to="manager"> blocks in a critic reply: things the manager should know."""
+        m = self.manager
+        return [b for a, b in T.blocks(text, "message") if b and T.addressed(a, m.called, m.name, "manager")]
 
     def sync_chat_session(self, agent: AgentConfig) -> None:
         """If my board chat moved the manager to a new session id, continue from there."""
@@ -249,7 +229,9 @@ class ManagedRunner(MonitorRunner):
             rows = [json.loads(x) for x in (self.rec.run_dir / "chat.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
         except OSError:
             return
-        sid = next((r.get("session_id") for r in reversed(rows) if r.get("session_id")), None)
+        since = (self.st["sessions"].get(agent.name) or {}).get("reset_at") or ""
+        sid = next((r.get("session_id") for r in reversed(rows) if r.get("session_id") and (r.get("ts") or "") > since),
+                   None)
         if sid and sid != (self.st["sessions"].get(agent.name) or {}).get("session_id"):
             self.rec.update_session(agent.name, session_id=sid)
 
@@ -269,25 +251,12 @@ class ManagedRunner(MonitorRunner):
 
     # ------------------------------------------------------------------ questions
 
-    def ask_block(self, text: str, role: str) -> str:
-        """The question block of a reply (empty if it asks nothing of the level above)."""
-        c = self.mon.controller
-        text = text or ""
-        m = re.search(c.question_pattern, text, re.I | re.M) or re.search(c.human_pattern, text, re.I | re.M)
-        if m:
-            start = text.rfind("\n", 0, m.start()) + 1
-            paras = text[start:].split("\n\n")
-            block = paras[0]
-            if len(paras) > 1 and parse_options(paras[1]) and not parse_options(paras[0]):
-                block += "\n" + paras[1]
-            return block.strip()
-        if role == "worker":
-            return trailing_question(text)
-        return ""
-
-    @staticmethod
-    def without(text: str, block: str) -> str:
-        return re.sub(r"\n{3,}", "\n\n", (text or "").replace(block, "")).strip() if block else (text or "").strip()
+    def ask_block(self, text: str, role: str = "") -> str:
+        """The <question> blocks of a reply as one text (empty if it asks nothing of the level above)."""
+        qs = T.bodies(text, "question")
+        if len(qs) == 1:
+            return qs[0]
+        return "\n\n".join(f"{n}. {q}" for n, q in enumerate(qs, 1))
 
     def new_question(self, frm: AgentConfig, to: str, text: str, turn: str, parent: Optional[List[str]] = None,
                      assumption: str = "") -> Dict[str, Any]:
@@ -427,6 +396,89 @@ class ManagedRunner(MonitorRunner):
                 self.decide(x["message"], "you", "note to " + ", ".join(x["to"] or ["all"]))
         return MonitorRunner.human_text(agent, msgs, annotate)
 
+    def last_output(self, agent: str, purposes: Tuple[str, ...]) -> str:
+        """The newest reply of an agent in one of these kinds of turn ('' if none)."""
+        for p in sorted((self.rec.run_dir / "rounds").glob("r*/t*.json"), reverse=True):
+            if p.name.endswith(".input.json"):
+                continue
+            try:
+                t = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if t.get("agent") == agent and t.get("purpose") in purposes and t.get("output"):
+                return t["output"]
+        return ""
+
+    def handover(self, a: AgentConfig) -> str:
+        """What an agent needs to carry on in a fresh session: where the run is, its current instructions and the
+        decisions so far."""
+        mg, ms = self.mg, (self.cur() or {})
+        parts = []
+        if ms:
+            parts.append(f"Where we are: milestone {mg.get('ms', 0) + 1} of {len(mg.get('milestones') or [])}"
+                         f" (\"{ms.get('title', '')}\"), round {mg.get('ms_round', 0)} of it."
+                         if a.role == "manager" else f"Where we are: round {mg.get('ms_round', 0)} of the current work.")
+        w = mg.get("wait") or {}
+        if mg.get("phase") == "wait" or (mg.get("gate") or {}).get("kind") == "wait":
+            parts.append("The whole run is paused until I act on this:\n\n" + (w.get("text") or ""))
+        if a.role == "manager":
+            parts.append("The goal:\n\n" + (self.mon.goal or "").strip())
+            if mg.get("plan_text"):
+                parts.append("Your plan and rubric, as I approved them:\n\n" + mg["plan_text"].strip())
+            rows = [f"| {i + 1} | {m.get('title', '')} | {m.get('status', '')} | {m.get('score') if m.get('score') is not None else ''} |"
+                    for i, m in enumerate(mg.get("milestones") or [])]
+            if rows:
+                parts.append("| # | milestone | status | score |\n|---|---|---|---|\n" + "\n".join(rows))
+            last = self.last_output(self.critic.name, ("report", "checkin"))
+            if last:
+                parts.append(f"{self.critic.called}'s latest report or update:\n\n" + _clip(self.clean_report(last), 4000))
+        elif a.role == "verifier":
+            if mg.get("note"):
+                parts.append(f"{self.manager.called}'s instruction for the current work:\n\n" + mg["note"].strip())
+            if mg.get("guidance"):
+                parts.append(f"{self.manager.called}'s latest guidance:\n\n" + mg["guidance"].strip())
+            last = self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
+            if last:
+                parts.append("Your latest review (keep your checklist items as they are):\n\n" + _clip(last, 6000))
+        else:
+            work = (mg.get("work") or {}).get(a.name) or {}
+            if work.get("output"):
+                parts.append("Your latest report:\n\n" + _clip(work["output"], 4000))
+            parts.append(f"{self.critic.called}'s latest instructions come with your next message.")
+        qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
+        if qs and a.role != "worker":
+            parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
+        dec = self.decisions_text()
+        if dec:
+            parts.append(dec)
+        return self.mtpl("session_reset", state="\n\n".join(parts)).strip()
+
+    def clean_report(self, text: str) -> str:
+        return T.without_markup(text, drop=("checklist", "verdict"))
+
+    def reset_sessions(self, names: Optional[List[str]] = None) -> List[str]:
+        """Clear these agents' conversations (all by default): the run keeps its place, records and decisions, and
+        each agent starts a new session with a handover of what it needs."""
+        done = []
+        for a in self.mon.agents:
+            if names and a.name not in names:
+                continue
+            if a.role not in ("manager", "verifier", "worker"):
+                continue
+            sess = self.st["sessions"].get(a.name) or {}
+            prev = {k: v for k, v in sess.items() if k != "previous"}
+            self.rec.update_session(a.name, session_id=None, turns=0, reset_at=now_iso(),
+                                    previous=(sess.get("previous") or []) + ([prev] if prev.get("session_id") else []))
+            fwd = [x for x in (self.st.setdefault("fwd", {}).get(a.name) or [])
+                   if not x.startswith(("Your last turn was cut off", "We are starting a new part", "You are taking over"))]
+            self.st["fwd"][a.name] = [self.handover(a)] + fwd
+            self.rec.event("session_reset", agent=a.name, session_id=sess.get("session_id"))
+            done.append(a.name)
+        if self.mg.get("fresh_for") is None:
+            self.mg["fresh_for"] = self.mg.get("ms")  # no second fresh start for this milestone
+        self.rec.save()
+        return done
+
     def fresh_sessions(self) -> None:
         """Agents set to `fresh_session: milestone` start each milestone in a new session (once per milestone)."""
         mg = self.mg
@@ -444,30 +496,27 @@ class ManagedRunner(MonitorRunner):
         mg["fresh_for"] = mg.get("ms")
         self.rec.save()
 
-    def for_me(self, rest: str) -> str:
-        """What follows the manager's question that is meant for me (its recommendation, context), up to the
-        first divider or the part addressed to the critic, which goes to the critic and not onto my question."""
-        name = re.escape(re.sub(r"^the\s+", "", self.critic.called, flags=re.I))
-        stop = re.search(rf"^\s*(?:-{{3,}}|\*{{3,}}|_{{3,}}|#{{1,6}}\s|[*_]*\s*(?:reply|message|answer|notes?|instructions?)?\s*"
-                         rf"(?:to|for)\s+(?:the\s+)?(?:{name}|critic)\b|NOTES?\s+FOR\b)", rest or "", re.I | re.M)
-        return (rest[:stop.start()] if stop else rest or "").strip()
+    @staticmethod
+    def for_me(text: str) -> str:
+        """The part of a manager reply that is for me: everything outside the tags."""
+        return T.outside(text)
 
-    def after_manager(self, r: Dict[str, Any], parent: Optional[List[str]] = None) -> str:
-        """Record the manager's questions for me (non-blocking), pass on its notes; return the rest."""
+    def after_manager(self, r: Dict[str, Any], parent: Optional[List[str]] = None, relay: bool = True) -> str:
+        """Record the manager's questions for me (one per <question>, non-blocking), pass on its messages (unless the
+        caller takes the message for the critic itself) and note a pause it calls; return its whole reply."""
         text = r.get("output") or ""
-        block = self.ask_block(text, "manager")
-        rest = self.without(text, block)
-        if block:
-            self.new_question(self.manager, "human", block, r["turn_id"], parent,
-                              assumption=truncate(self.for_me(rest), 1500))
-        for who, note in note_blocks(rest, self.mon.controller.note_pattern):
-            a = self.find_agent(who)
-            if a and a.name != self.manager.name:
-                self.forward(a, self.mtpl("relay_note", note=note).strip())
-        pause = manager_pause(rest) if r.get("purpose") != "pause" else ""  # it pauses the work itself (before the next round)
+        mine = truncate(self.for_me(text), 1500)
+        for q in T.bodies(text, "question"):
+            self.new_question(self.manager, "human", q, r["turn_id"], parent, assumption=mine)
+        if relay:
+            for attrs, body in T.blocks(text, "message"):
+                a = self.find_agent(attrs.get("to", ""))
+                if a and a.name != self.manager.name and body:
+                    self.forward(a, self.mtpl("relay_note", note=body).strip())
+        pause = manager_pause(text) if r.get("purpose") != "pause" else ""  # it stops the run itself
         if pause:
             self.mg["pause_req"] = {"text": pause, "turn": r["turn_id"]}
-        return rest
+        return text
 
     def find_agent(self, who: str) -> Optional[AgentConfig]:
         w = re.sub(r"^the\s+", "", who.lower().strip())
@@ -495,36 +544,29 @@ class ManagedRunner(MonitorRunner):
         for w in self.workers:
             fb[w.name] = (fb.get(w.name, "") + "\n\n" + text).strip() if append and fb.get(w.name) else text
 
-    def for_critic(self, text: str) -> str:
-        """The part of a manager reply meant for the critic (after a 'For <critic>:' line), else all of it
-        without the score table and score lines."""
-        name = re.escape(re.sub(r"^the\s+", "", self.critic.called, flags=re.I))
-        hits = list(re.finditer(rf"^\W*(?:message\s+|note\s+)?(?:for|to)\s+(?:the\s+)?{name}\s*:\**[ \t]*", text or "",
-                                re.I | re.M))
-        if hits:
-            return text[hits[-1].end():].strip()
-        keep = [ln for ln in (text or "").split("\n")
-                if not ln.strip().startswith("|") and not re.search(r"\b(overall|total)\b.*\d\s*/\s*\d", ln, re.I)]
+    def for_critic(self, text: str, fallback: bool = True) -> str:
+        """What a manager reply passes to the critic: its <message to="critic"> blocks; without one (and with
+        `fallback`), the reply outside the tags, minus score tables."""
+        c = self.critic
+        msgs = [b for a, b in T.blocks(text, "message") if b and T.addressed(a, c.called, c.name, "critic")]
+        if msgs:
+            return "\n\n".join(msgs)
+        if not fallback:
+            return ""
+        keep = [ln for ln in T.outside(text).split("\n") if not ln.strip().startswith("|")]
         return re.sub(r"\n{3,}", "\n\n", "\n".join(keep)).strip()
 
     def clean_critic(self, text: str) -> str:
-        """What the worker gets from a critic reply: no verdict line, no checklist, no questions upward."""
-        t = _VERDICT_LINE.sub("", text or "").strip()
-        t = self.without(t, self.ask_block(t, "verifier"))
-        for _who, body in note_blocks(t, _WAIT):
-            t = re.sub(r"^\W*WAITING\s+(?:FOR|ON)[^:\n]*:\s*" + re.escape(body) + r"\s*", "", t, flags=re.I | re.M).strip()
-        for note in self.notes_up(t):
-            t = re.sub(r"^\W*NOTES? FOR[^:\n]*:\s*" + re.escape(note) + r"\s*", "", t, flags=re.I | re.M).strip()
-        if self.mon.controller.checklist:
-            t = strip_checklist(t) or t
-        # a reply with its own "Review for <worker>" / "For <worker>:" section: only that section goes down;
-        # what comes before it is the critic talking to the manager (e.g. about a relayed answer)
-        names = {re.sub(r"^the\s+", "", n, flags=re.I) for w in self.workers for n in (w.called, w.name)} | {"worker"}
-        alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
-        m = re.search(rf"^[#*_\s]*(?:review|feedback|notes?|message|instructions?)?\s*(?:for|to)\s+(?:the\s+)?(?:{alt})[\s:*_]*\n", t, re.I | re.M)
-        if m and t[m.end():].strip():
-            t = t[m.end():].strip()
-        return re.sub(r"^(?:\s*(?:-{3,}|\*{3,}|_{3,})\s*\n)+", "", t).strip()
+        """What the worker gets from a critic reply: the text outside the tags, plus any <message to="worker">."""
+        names = [n for w in self.workers for n in (w.called, w.name)] + ["worker"]
+        extra = [b for a, b in T.blocks(text, "message") if b and T.addressed(a, *names)]
+        return "\n\n".join([x for x in [T.outside(text)] + extra if x]).strip()
+
+    def verdict(self, r: Dict[str, Any]) -> str:
+        if r.get("status") != "ok":
+            return "ERROR"
+        v = T.value(r.get("output") or "", "verdict")
+        return v if v in ("PASS", "FAIL") else "UNKNOWN"
 
     # ------------------------------------------------------------------ live terminal input & control files
 
@@ -690,7 +732,7 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
                                              milestone=ms["text"], human_messages="",
                                              decisions=self.decisions_text()), "kickoff")
-        mg.update(note=self.for_critic(self.after_manager(r)), ms_round=0, limit=False, phase="brief")
+        mg.update(note=self.for_critic(self.after_manager(r, relay=False)), ms_round=0, limit=False, phase="brief")
         return None
 
     def ph_brief(self, mg: Dict[str, Any]) -> Optional[str]:
@@ -767,18 +809,12 @@ class ManagedRunner(MonitorRunner):
         jobs: Dict[str, Dict[str, Any]] = {}
         if c.job_wait > 0:
             outs = "\n".join(r.get("output") or "" for r in recs)
-            skip = {int(x) for ln in re.findall(_NO_WAIT, outs, re.I | re.M) for x in re.findall(r"\d+", ln)}
+            skip = {int(a["pid"]) for a, _b in T.blocks(outs, "no-wait") if str(a.get("pid", "")).isdigit()}
             found = [j for j in _jobs.detect(getattr(self, "_procs", {}) or {},
                                              {self.mon.agent(r["agent"]).working_dir or self.mon.working_dir for r in recs},
                                              c.job_ignore)
                      if j["pid"] not in skip]  # orch finds them itself
             self._procs = {}
-            for r in recs:
-                lines = re.findall(_JOB, r.get("output") or "", re.I | re.M)  # still honoured when a worker says so
-                pids = sorted({int(x) for ln in lines for x in re.findall(r"\bpids?\D{0,3}(\d+)", ln, re.I)} - skip)
-                live = [x for x in pids if pid_alive(x)]
-                if live:
-                    jobs[r["agent"]] = {"pids": live, "lines": [ln.strip() for ln in lines], "cmds": {}}
             for j in found:
                 if any(j["pid"] in x["pids"] for x in jobs.values()):
                     continue
@@ -868,7 +904,7 @@ class ManagedRunner(MonitorRunner):
             self.end_round(summary, "critic error / no verdict → stop", verdicts={v.name: vd})
             return "failed"
         if vd == "PASS" and c.checklist:
-            done, open_ = checklist_state(r.get("output") or "")
+            done, open_ = checklist_of(r.get("output") or "")
             if open_ or not done:
                 vd = "FAIL"
                 summary["checklist_overruled"] = [v.name]
@@ -882,10 +918,10 @@ class ManagedRunner(MonitorRunner):
         passed = vd == "PASS"
         if not passed:
             self.worker_feedback(self.clean_critic(r["output"]))
-        wait = [] if passed else note_blocks(r.get("output") or "", _WAIT)
+        wait = [] if passed else T.bodies(r.get("output") or "", "pause")
         nxt = "report" if passed else ("pause" if wait else "work")  # a proposed pause goes to the manager
         if wait:
-            mg["wait"] = {"who": wait[0][0], "text": "\n\n".join(b for _w, b in wait), "turn": r["turn_id"]}
+            mg["wait"] = {"who": self.critic.called, "text": "\n\n".join(wait), "turn": r["turn_id"]}
         mg["phase"] = nxt
         n = c.checkin_every
         if nxt == "work" and n and mg.get("ms_round", 0) % n == 0:
@@ -898,20 +934,20 @@ class ManagedRunner(MonitorRunner):
         return None
 
     def ph_pause(self, mg: Dict[str, Any]) -> Optional[str]:
-        """The critic proposes pausing until a human task is done; the manager decides."""
+        """The critic proposes stopping the whole run until a person acts; the manager decides."""
         w = mg.get("wait") or {}
         r = self.say(self.manager, self.mtpl("manager_pause", proposal=w.get("text", ""), human_messages=""), "pause")
         out = r.get("output") or ""
-        if re.search(r"DECISION:\s*\**\s*PAUSE", out, re.I):
-            rest = self.after_manager(r)
-            msg = re.sub(r"\n*\s*DECISION:\s*\**\s*PAUSE\**\s*", "\n", self.for_me(rest), flags=re.I).strip()
+        if T.value(out, "decision") == "PAUSE" or (T.bodies(out, "pause") and T.value(out, "decision") != "CONTINUE"):
+            self.after_manager(r)
+            msg = "\n\n".join(T.bodies(out, "pause")) or self.for_me(out)
             mg["wait"] = {**w, "who": "the manager agrees", "text": msg or w.get("text", ""), "proposal": w.get("text", ""),
                           "turn": r["turn_id"]}
             mg["phase"] = "wait"
             return None
-        self.after_manager(r)
+        self.after_manager(r, relay=False)
         mg.pop("pause_req", None)  # it decided to continue
-        guidance = re.sub(r"\n*\s*DECISION:\s*\**\s*\w+\**\s*$", "", self.for_critic(out), flags=re.I).strip()
+        guidance = self.for_critic(out)
         mg.pop("wait", None)
         c = self.say(self.critic, self.mtpl("critic_continue", guidance=guidance, human_messages=""), "guidance")
         self.worker_feedback(self.clean_critic(c["output"]))
@@ -952,23 +988,23 @@ class ManagedRunner(MonitorRunner):
             mg["phase"] = mg.get("after") or "work"
             return None
         r = self.say(self.manager, self.mtpl("manager_question", question=q["text"], human_messages=""), "answer")
-        text = self.after_manager(r, parent=[q["id"]])
+        text = self.after_manager(r, parent=[q["id"]], relay=False)
         if self.open_qs(self.manager.name, "human") and any(q["id"] in x["parent"] for x in self.open_qs(self.manager.name)):
             self.settle(q, "", "", r["turn_id"], status="passed_up")  # gone up to me; the manager's guess is in `text`
         else:
-            self.settle(q, self.manager.name, text, r["turn_id"])
+            self.settle(q, self.manager.name, self.for_critic(text), r["turn_id"])
             self.decide(f"{self.short_question(q['text'])}: {truncate(self.for_critic(text), 1200)}", self.manager.called, q["id"])
-        mg.update(answer_text=text, phase="amend")
+        mg.update(answer_text=self.for_critic(text), phase="amend")
         return None
 
     def ph_amend(self, mg: Dict[str, Any]) -> Optional[str]:
         r = self.say(self.critic, self.mtpl("critic_answer", answer=mg.get("answer_text", "")), "amend")
         after = mg.get("after") or "work"
-        vd = self.verdict(r) if re.search(r"VERDICT:", r.get("output") or "", re.I) else None
+        vd = self.verdict(r) if T.value(r.get("output") or "", "verdict") else None
         if after == "report" and vd == "FAIL":
             after = "work"
         elif after == "work" and vd == "PASS":
-            done, open_ = checklist_state(r.get("output") or "")
+            done, open_ = checklist_of(r.get("output") or "")
             if not self.mon.controller.checklist or (done and not open_):
                 after = "report"
         if after == "work":
@@ -991,28 +1027,26 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_review", n=mg["ms"] + 1, title=ms["title"],
                                              report=mg.get("report", ""), human_messages=""), "review")
         out = r.get("output") or ""
-        acc = [x.end() for x in re.finditer(c.accept_pattern, out, re.I)]
-        rev = [x.end() for x in re.finditer(c.revise_pattern, out, re.I)]
-        if not acc and not rev:
-            r = self.say(self.manager, "Please end your reply with one line: `DECISION: ACCEPT` or `DECISION: REVISE`.",
-                         "review")
+        dec = T.value(out, "decision")
+        if dec not in ("ACCEPT", "REVISE"):
+            r = self.say(self.manager, "Please end your reply with `<decision>ACCEPT</decision>` or "
+                                       "`<decision>REVISE</decision>`.", "review")
             out = r.get("output") or ""
-            acc = [x.end() for x in re.finditer(c.accept_pattern, out, re.I)]
-            rev = [x.end() for x in re.finditer(c.revise_pattern, out, re.I)]
-        accept = bool(acc) and (max(acc) > (max(rev) if rev else -1))
+            dec = T.value(out, "decision")
+        accept = dec == "ACCEPT"
         score, crit = parse_score(out), parse_criteria(out)
         if accept and c.min_score is not None and score is not None and score < c.min_score:
             accept = False
             self.rec.progress(f"manager accepted at {score}/5, below min_score {c.min_score} → REVISE")
             r = self.say(self.manager, f"Your overall score of {score}/5 is below the {c.min_score}/5 we agreed on. "
                                        f"What should {self.critic.called} do next?", "review")
-        text = re.sub(r"\n*\s*DECISION:\s*\**\s*\w+\**\s*$", "", self.after_manager(r), flags=re.I).strip()
+        text = self.after_manager(r, relay=False)
         self.st.setdefault("reviews", []).append(
             {"milestone": mg["ms"], "turn": r["turn_id"], "score": score, "criteria": crit,
              "decision": "ACCEPT" if accept else "REVISE", "round": self.st.get("round", 0), "at": now_iso()})
         ms["score"], ms["criteria"] = score, crit
         if accept or mg.get("limit"):
-            ms.update(status="awaiting_ok", summary=text, summary_turn=r["turn_id"], accepted=accept)
+            ms.update(status="awaiting_ok", summary=self.for_me(text), summary_turn=r["turn_id"], accepted=accept)
             gate = c.approve_milestones or not accept
             mg.update(phase="gate" if gate else "next", guidance="" if accept else self.for_critic(text))
         else:
@@ -1044,7 +1078,7 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment),
                      "feedback")
         ms.update(status="active")
-        mg.update(guidance=self.for_critic(self.after_manager(r)), ms_round=0, limit=False, phase="guidance")
+        mg.update(guidance=self.for_critic(self.after_manager(r, relay=False)), ms_round=0, limit=False, phase="guidance")
         return None
 
     def ph_next(self, mg: Dict[str, Any]) -> Optional[str]:
