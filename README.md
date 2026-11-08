@@ -2,17 +2,22 @@
 
 A general-purpose orchestrator for teams of CLI coding agents (Claude Code, Codex, or anything you can call from a shell).
 
-One config file declares any number of **monitors**. Each monitor is independent: it has its own workspace and working directory, an overall goal, a **controller** with instructions, and a roster of **agents** (workers, verifiers, or any custom role), each with its own system prompt and backend. The controller starts the agents in the workspace, **keeps each agent's session alive across turns**, routes tasks and feedback between them, and records every round and turn to an **output directory** for humans to inspect.
+A project keeps its team in its own `.orch/` folder: one folder per agent, usually a **manager** (owns the goal,
+the milestones and the rubric, and talks to me), a **critic** (turns each milestone into instructions and reviews
+every change) and a **worker** (does the work in the repository). orch starts the agents in the project,
+**keeps each agent's session alive across turns**, passes messages between them, waits for me only where I asked
+to approve something, and records every round and turn under `.orch/runs/` for me to inspect, on a local board or
+in the terminal.
 
 ```
-           ┌──────────── monitor "api-feature" (thread) ─────────────┐
-config ──▶ │ controller ──task──▶ implementer ─┐                     │ ──▶ orch-runs/api-feature/<run>/
-           │     ▲                docs ────────┼─reports─▶ reviewer  │       state.json  events.jsonl
-           │     └──────────── feedback (FAIL) ◀───────────┘         │       progress.md report.html
-           └──────────────────────────────────────────────────────────┘       rounds/r001/t01-implementer.{json,input.md,output.md}
-           ┌──────────── monitor "research-notes" (thread) ──────────┐
-           │ LLM controller ──JSON directive──▶ reader / writer / critic … │
-           └──────────────────────────────────────────────────────────┘
+              me ◀──── plan, milestone gates, questions, pauses ────┐
+              │                                                      │
+              ▼ approvals, answers, chat                             │
+<project>/.orch/agents/                                              │
+  manager/ ── milestone instruction ──▶ critic/ ── brief, review ──▶ worker/
+     ▲                                    │  ▲                          │
+     └──────── reports, questions ────────┘  └──── summary, questions ──┘
+                                                                     ──▶ .orch/runs/<project>/<run>/
 ```
 
 ## Quick start
@@ -20,112 +25,97 @@ config ──▶ │ controller ──task──▶ implementer ─┐          
 ```bash
 cd Orch
 pip install -e .            # or: pip install pyyaml  and use `python -m orch`
-python -m unittest discover tests                      # 17 tests, mock backend, no API calls
-orch run examples/mock-demo.yaml                       # dry demo, then open examples/demo-runs/index.html
+python -m unittest discover tests     # mock backend, no API calls
 
-orch init my.yaml           # annotated example config
-orch validate my.yaml       # resolves paths, checks roles/routing, prints the plan
-orch run my.yaml            # runs all enabled monitors concurrently
-orch run my.yaml --dry-run  # same flow with every agent replaced by the mock
+cd ~/code/my-project
+orch init . --project       # scaffolds .orch/agents/{manager,critic,worker}/
+$EDITOR .orch/agents/manager/goal.md
+orch validate               # resolves the folders, shows each agent's prompt, memory and settings
+orch run --serve --open     # runs it, with the board at http://127.0.0.1:8765
+orch run --dry-run          # the same flow with every agent replaced by the mock
 ```
 
-Python 3.9+ is required. PyYAML is only needed for YAML configs; JSON works with the standard library alone, and TOML works on Python 3.11+. To use the `claude` backend, the `claude` CLI must be installed and logged in.
+Commands default to `./.orch`, so in the project root no path is needed. Python 3.9+ is required, and PyYAML for
+the `agent.yaml` files. To use the `claude` backend, the `claude` CLI must be installed and logged in.
 
-## Setting up a new project
+## Setting up a project (`.orch/`)
 
-All settings go in one YAML file. Run `orch init my-project.yaml` to get an annotated starting point, edit it, then run `orch validate my-project.yaml` and `orch run my-project.yaml`.
+There is no separate project file: the team is the set of agent folders.
 
-| You want to set… | Where in the YAML |
-|---|---|
-| **Where results are recorded** | top-level `output_dir:` (relative to the YAML file), or a per-monitor `output_dir:` override |
-| Which project the agents work on | `monitors[].workspace` (project root) and `monitors[].working_dir` (agents' cwd, relative to workspace) |
-| **The shared goal every agent sees** | `monitors[].goal` (or `goal_file: goal.md`) |
-| Rules for the whole team | `monitors[].controller.instructions` — included in every worker's/verifier's first prompt and the LLM controller's |
-| **Each agent's own prompt** | `agents[].system_prompt` (persona/rules, or `system_prompt_file:`), `agents[].task` (its round-1 job), `agents[].description` |
-| The LLM controller's own prompt | `controller.agent.system_prompt` (added after the built-in controller protocol) |
-| **Model and effort, for everyone** | top-level `defaults.backend_options.model` / `.effort` |
-| **Model and effort, per agent** | `agents[].backend_options: {model: opus, effort: high}` — overrides the defaults for that agent only |
-| Model and effort for the LLM controller | `controller.agent.backend_options` |
-| Tool permissions | `backend_options.permission_mode` and `allowed_tools` (defaults or per agent) |
-| The exact wording of routed prompts | `controller.templates` (see `orch/templates.py` for the names and `{{placeholders}}`) |
+```
+<project>/.orch/
+  agents/
+    manager/
+      agent.yaml         role, backend, model … and the settings for the run as a whole
+      goal.md            the goal (only the manager reads it)
+      system_prompt.md   this agent's prompt in this project (starts as a copy of the role's default)
+      memory.md          this project's notes and preferences (also memory/*.md)
+    critic/   agent.yaml  system_prompt.md  memory.md
+    worker/   agent.yaml  system_prompt.md  memory.md
+  runs/                  run logs (gitignored)
+```
 
-Settings merge in this order, with later ones winning: top-level `defaults:` → the monitor's `defaults:` → the agent's own keys. `backend_options` dictionaries are merged key by key, so an agent that sets only `effort` still inherits `model` from the defaults.
-
-With the `claude` backend, `model` is any value `claude --model` accepts (`haiku`, `sonnet`, `opus`, or a full model ID), and `effort` is `low`, `medium`, `high`, `xhigh` or `max`.
-
-A minimal new project:
+Each `agent.yaml` holds that agent's own settings plus the run settings that belong to its role:
 
 ```yaml
-output_dir: ~/orch-logs/my-app            # where every round/turn is recorded
-
-defaults:
-  backend: claude
-  backend_options: { model: sonnet, effort: medium, permission_mode: acceptEdits,
-                     allowed_tools: [Read, Edit, Write, Glob, Grep, Bash] }
-
-monitors:
-  - name: my-app
-    workspace: ~/code/my-app
-    goal: Add CSV export to the reports page, with tests.
-    max_rounds: 4
-    controller:
-      mode: pipeline
-      instructions: Follow the existing code style. Run `npm test` before reporting.
-    agents:
-      - name: coder
-        role: worker
-        system_prompt: You are a senior TypeScript engineer.
-        task: Implement CSV export and its tests.
-        backend_options: { model: opus, effort: high }
-      - name: reviewer
-        role: verifier
-        system_prompt: You are a strict reviewer. Run the tests yourself. Never edit files.
-        backend_options: { effort: low, allowed_tools: [Read, Glob, Grep, Bash] }
+# .orch/agents/manager/agent.yaml
+role: manager
+backend: claude
+backend_options: {model: opus, effort: medium, permission_mode: auto}
+timeout: 2400
+goal_file: goal.md
+max_rounds: 100             # rounds in all milestones together; keep it well above milestone_rounds
+approve_plan: true          # wait for my OK on the milestone plan
+approve_milestones: true    # and after each milestone the manager accepts
 ```
 
-## Controller modes
-
-| | `pipeline` (deterministic) | `llm` (an agent decides) |
-|---|---|---|
-| Round 1 | every worker gets `goal + instructions + its task` | controller gets goal, instructions, roster |
-| Each round | workers work → every verifier inspects the workspace → `VERDICT: PASS/FAIL` | controller replies with JSON `{"dispatch":[{"agent","message"}], "done", "parallel"}` → those turns run → results go back to the controller |
-| Routing | FAIL feedback goes to `feedback_to` (default: the workers the verifier `reviews`, default: all). Workers with no new feedback skip the round. | Decided by the controller. Invalid JSON or unknown agents get one automatic repair turn. |
-| Done when | verifiers pass (`require: all` or `any`) | controller sets `done: true` (and writes `final_report`) |
-| Stops at | `max_rounds` | `max_rounds` |
-
-Every agent, including the LLM controller, keeps **one session for the whole run**. Later turns resume it (`claude --resume <id>`), so agents remember earlier work and feedback.
-
-### Project folders (`.orch/`)
-
-A project keeps its agents in `<project>/.orch/agents/`, one folder per agent; there is no separate project file
-(`orch init <root> --project` scaffolds a manager, a critic and a worker):
-
-```
-.orch/
-  agents/<name>/
-    agent.yaml       role (manager | critic | worker), display_name, backend, backend_options, timeout …
-                     plus the run settings that belong to this agent, e.g.
-                       manager: goal_file, max_rounds, approve_plan, approve_milestones, min_score, protocol, tag_reminder
-                       critic:  checklist, checklist_nudge, milestone_rounds, checkin_every, job_wait, job_ignore
-                       worker:  snapshot, fresh_session
-    goal.md          manager: the goal (only the manager reads it)
-    memory.md, memory/*.md   this project's notes and preferences, added after the system prompt
-                     ("Things to keep in mind:"; HTML comments are ignored)
-    system_prompt.md this agent's prompt in this project: starts as a copy of the role's default
-                     (orch/prompts/<role>.md) and can be adapted freely
-  runs/              run logs (gitignored)
+```yaml
+# .orch/agents/critic/agent.yaml
+role: critic
+backend: claude
+backend_options: {model: opus, effort: medium, permission_mode: auto}
+checklist: true             # a PASS only counts when every checklist item is [x]
+milestone_rounds: 25        # rounds per milestone before the manager looks at it anyway
+checkin_every: 2            # a short update for the manager every 2 rounds (0 = off)
 ```
 
-Each role has a generic default prompt in orch (`orch/prompts/manager.md`, `critic.md`, `worker.md`);
-`orch init --project` copies it into every agent folder, where the project can adapt it (if the file is missing,
-the default is used). `{{manager}}`, `{{critic}}` and `{{worker}}` are filled in from the display names. Prompt and memory files are re-read before every turn, so edits reach a running run (Codex agents read
-them once, at the start of their session). Workers get no task file: their instructions come from the critic.
-`orch validate` shows which prompt and memory each agent uses; a setting given by two agents with different
-values is an error. Commands default to `./.orch`.
+```yaml
+# .orch/agents/worker/agent.yaml
+role: worker
+backend: claude
+backend_options: {model: sonnet, effort: medium, permission_mode: auto}
+timeout: 7200               # per turn; long jobs run in the background, and orch waits for them between turns
+fresh_session: milestone    # a new session for each milestone
+```
 
-### `managed` mode: me ↔ manager ↔ critic ↔ worker
+| You want to set… | Where |
+|---|---|
+| **The goal** | `manager/goal.md` (`goal_file:` in `manager/agent.yaml`) |
+| **Model, effort, backend of one agent** | `backend`, `backend_options: {model, effort}` in that agent's `agent.yaml` |
+| Tool permissions | `backend_options.permission_mode` / `allowed_tools` in that agent's `agent.yaml` |
+| **An agent's prompt** | its `system_prompt.md` (missing: the role default in `orch/prompts/<role>.md`) |
+| Project notes and preferences | its `memory.md` and `memory/*.md`, added after the prompt ("Things to keep in mind:"; HTML comments are ignored) |
+| Display names used in messages | `display_name:` in each `agent.yaml`; fills `{{manager}}`, `{{critic}}`, `{{worker}}` in the prompts |
+| Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `tag_reminder` |
+| Rounds per milestone, checklist, check-ins, job waiting | `critic/agent.yaml`: `milestone_rounds`, `checklist`, `checklist_nudge`, `checkin_every`, `job_wait`, `job_ignore` |
+| Fresh sessions, saved versions of files | `worker/agent.yaml`: `fresh_session`, `snapshot` |
+| Where runs are recorded | `output_dir:` in any `agent.yaml` (default `.orch/runs`) |
+| The agents' working directory | `working_dir:` per agent (relative to the project root) |
+| The exact wording of routed prompts | `templates:` (see `orch/templates.py` for the names and `{{placeholders}}`) |
 
-Three layers of review, so each layer above reads less. Agents: exactly one `role: manager`, one `role: verifier` (the critic), one or more `role: worker`. Give them `display_name`s; relayed messages use them ("Alex wrote: …"), and no prompt mentions a workflow.
+A run setting may sit in any agent's file, but it is set once: two agents giving it different values is an error.
+With the `claude` backend, `model` is any value `claude --model` accepts (`haiku`, `sonnet`, `opus`, or a full
+model ID), and `effort` is `low`, `medium`, `high`, `xhigh` or `max`.
+
+`orch init --project` copies each role's default prompt into the agent folder, where the project can adapt it
+freely. Prompt and memory files are re-read before every turn, so edits reach a running run (Codex agents read them
+once, at the start of their session); `agent.yaml` changes take effect on `orch run --resume`. Workers get no task
+file: their instructions come from the critic. `orch validate` shows which prompt and memory each agent uses.
+A folder without a manager runs in `pipeline` mode (see *Other setups* below).
+
+## How the team works (`managed` mode): me ↔ manager ↔ critic ↔ worker
+
+Three layers of review, so each layer above reads less. Agents: exactly one `role: manager`, one `role: critic` (or `verifier`), one or more `role: worker`. Give them `display_name`s; relayed messages use them ("Alex wrote: …"), and no prompt mentions a workflow.
 
 | step | who | what |
 |---|---|---|
@@ -203,9 +193,77 @@ together. `job_wait` (seconds, default 21600; 0 = off) caps the wait, after whic
 `job_ignore` (regexes on the command line) and a worker's `<no-wait pid="…"/>` exclude long-lived helpers.
 **Review now** on the board skips the wait.
 
-**The board** — `orch run cfg.yaml --serve [--open]`, or `orch serve cfg.yaml` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Without the board: `orch approve <run|cfg> [--note … | --revise …]`, `orch answer <run|cfg> Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
+**The board** — `orch run --serve [--open]`, or `orch serve` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Without the board: `orch approve [--note … | --revise …]`, `orch answer . Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
 
-## Config reference
+## Steering and inspecting a live run
+
+```bash
+orch status .orch/runs --latest                # one line per run
+orch show .                                    # rounds, verdicts, one line per turn
+orch show . --turn r002-t01                    # one turn in full: input, output, stderr
+orch approve . --note "…"                      # approve the plan / milestone it waits on (or --revise "…")
+orch answer . Q3 "B"                           # answer a question to me
+orch stop .                                    # stops after terminating the current turn (resume re-sends it)
+orch run --resume --serve                      # continue the same run, same agent sessions
+orch reset-sessions .                          # with the run stopped: fresh conversations, same run state
+orch report .orch/runs                         # regenerate HTML
+```
+
+Pressing Ctrl-C in `orch run` stops cleanly: running agent processes are terminated and the run is marked
+`stopped`, so `--resume` can pick it up later.
+
+## What gets recorded
+
+```
+.orch/runs/index.html                          every run (auto-refreshes while running)
+.orch/runs/<project>/<run-id>/
+  config.json        resolved config snapshot (env values omitted)
+  state.json         status, phase, milestone, rounds, sessions {agent: session_id, turns}, questions, cost
+  events.jsonl       append-only event log (run/round/turn started/finished, human messages, errors)
+  progress.md        human-readable running log with verdicts and decisions
+  decisions.md       the decisions register (S1, S2 …)
+  report.html        full viewer: every round → every turn's input, output, system prompt, stderr, timing …
+  rounds/r002/round.json                       decision, verdicts, routing
+  rounds/r002/t01-worker.json                  full turn record (written as "running" first, then final)
+  rounds/r002/t01-worker.input.md / .output.md
+  inbox/             messages waiting for the next turn (consumed → inbox/consumed/)
+```
+
+## Running a long project: lessons from real runs
+
+- **Two round limits.** `milestone_rounds` (critic) is per milestone: at the limit the manager reviews anyway.
+  `max_rounds` (manager) counts every round of the whole run; keep it well above `milestone_rounds`, or the run
+  stops in the middle of a milestone (orch warns about this, and the stop message says which limit was hit).
+  Raising either takes effect on `orch run --resume`.
+- **Changing models or backends mid-run** (for cost, or Codex ↔ Claude): edit the agent's `agent.yaml` and resume.
+  A changed backend can't resume the old session, so the agent starts a new one with a handover note.
+- **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` sends it again in the same session,
+  so a restart costs at most one repeated turn. The cheapest moment is just after a worker turn ends with nothing
+  waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
+- **Cost.** Long sessions get dearer per turn because each turn re-reads the history: use `fresh_session:
+  milestone` for workers, a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
+- **Idle rounds.** If the work waits on people, make sure the pause gets used (the board's *Needs you* shows it);
+  a worker that keeps answering "holding" is spending rounds.
+
+## Other setups: one config file, `pipeline` and `llm` modes
+
+Instead of a `.orch/` folder, a single YAML (or JSON, or TOML on Python 3.11+) file can declare any number of
+independent **monitors**, each with its own workspace, goal, controller and agents, run concurrently. This is
+useful for running several small workflows together, or for the simpler `pipeline` and `llm` controllers.
+`orch init my.yaml` writes an annotated example, and every command takes the file in place of the project folder
+(`orch validate my.yaml`, `orch run my.yaml`, `orch run examples/mock-demo.yaml` for a dry demo).
+
+| | `pipeline` (deterministic) | `llm` (an agent decides) |
+|---|---|---|
+| Round 1 | every worker gets `goal + instructions + its task` | controller gets goal, instructions, roster |
+| Each round | workers work → every verifier inspects the workspace → `VERDICT: PASS/FAIL` | controller replies with JSON `{"dispatch":[{"agent","message"}], "done", "parallel"}` → those turns run → results go back to the controller |
+| Routing | FAIL feedback goes to `feedback_to` (default: the workers the verifier `reviews`, default: all). Workers with no new feedback skip the round. | Decided by the controller. Invalid JSON or unknown agents get one automatic repair turn. |
+| Done when | verifiers pass (`require: all` or `any`) | controller sets `done: true` (and writes `final_report`) |
+| Stops at | `max_rounds` | `max_rounds` |
+
+Settings merge in this order, with later ones winning: top-level `defaults:` → the monitor's `defaults:` → the
+agent's own keys. `backend_options` dictionaries are merged key by key, so an agent that sets only `effort` still
+inherits `model` from the defaults.
 
 ```yaml
 output_dir: ./orch-runs
@@ -220,7 +278,7 @@ monitors:
     output_dir: ...                 # optional per-monitor override
     defaults: {...}                 # monitor-level defaults, merged over the top-level ones
     controller:
-      mode: pipeline | llm
+      mode: pipeline | llm | managed
       instructions: | ...           # or instructions_file:
       parallel: false               # run agents in the same stage concurrently
       require: all | any            # pipeline
@@ -245,7 +303,11 @@ monitors:
         env: {KEY: value}           # recorded by key name only
 ```
 
-### Backends
+With a file, the steering commands take the output directory and a monitor name, e.g.
+`orch show orch-runs -m api-feature`, `orch inject orch-runs/api-feature "Use pytest" --to implementer`,
+`orch run my.yaml -m api-feature --resume`.
+
+## Backends
 
 * **claude**: runs `claude -p --output-format json` with the prompt on stdin. The first turn uses `--session-id <uuid>`, and later turns use `--resume <uuid>`. The system prompt is passed with `--append-system-prompt`, or with `--system-prompt` if you set `system_prompt_mode: replace`. Options: `model`, `effort`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `add_dirs`, `max_turns`, `mcp_config`, `extra_args`, `executable`. Cost, number of turns and error flags are recorded for each turn.
   Agents run with no one watching, so set `permission_mode` (for example `acceptEdits`) and `allowed_tools`. Use `bypassPermissions` only in a sandbox.
@@ -255,54 +317,6 @@ monitors:
   * `prompt_via: stdin|arg|file`
   * `output_format: text|json` together with `output_field` and `session_field`, or `session_regex`
 * **mock**: a deterministic fake for dry runs and tests. Options: `delay`, `script`, `pass_after`, `done_after`, `fail_turns`, `write_file`.
-
-## What gets recorded
-
-```
-<output_dir>/index.html                       every monitor and run (auto-refreshes while running)
-<output_dir>/<monitor>/<run-id>/
-  config.json        resolved config snapshot (env values omitted)
-  state.json         status, current round, sessions {agent: session_id, turns}, round summaries,
-                     pending feedback, turn counts, total cost
-  events.jsonl       append-only event log (run/round/turn started/finished, human messages, errors)
-  progress.md        human-readable running log with verdicts and decisions
-  report.html        full viewer: every round → every turn's input, output, system prompt, stderr,
-                     command line, session id, timing, exit code, attempts
-  rounds/r002/round.json                      decision, verdicts / controller directive, routing
-  rounds/r002/t01-implementer.json            full turn record (written as "running" first, then final)
-  rounds/r002/t01-implementer.input.md / .output.md
-  inbox/             human messages waiting for the next round (consumed → inbox/consumed/)
-```
-
-## Steering and inspecting a live run
-
-```bash
-orch status orch-runs --latest                 # one line per monitor
-orch show orch-runs -m api-feature             # rounds, verdicts, one line per turn
-orch show orch-runs/api-feature --turn r002-t01   # one turn in full: input, output, stderr
-orch inject orch-runs/api-feature "Use pytest, not unittest" --to implementer
-orch stop orch-runs/api-feature                # stops after terminating the current turn (resume re-sends it)
-orch run my.yaml -m api-feature --resume       # continue the same run, same agent sessions
-orch report orch-runs                          # regenerate HTML
-```
-
-Pressing Ctrl-C in `orch run` stops every monitor cleanly: running agent processes are terminated and each run is marked `stopped`, so `--resume` can pick it up later.
-
-## Running a long project: lessons from real runs
-
-- **Two round limits.** `milestone_rounds` (critic) is per milestone: at the limit the manager reviews anyway.
-  `max_rounds` (manager) counts every round of the whole run; keep it well above `milestone_rounds`, or the run
-  stops in the middle of a milestone (orch warns about this, and the stop message says which limit was hit).
-  Raising either takes effect on `orch run --resume`.
-- **Changing models or backends mid-run** (for cost, or Codex ↔ Claude): edit the agent's `agent.yaml` and resume.
-  A changed backend can't resume the old session, so the agent starts a new one with a handover note.
-- **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` sends it again in the same session,
-  so a restart costs at most one repeated turn. The cheapest moment is just after a worker turn ends with nothing
-  waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
-- **Cost.** Long sessions get dearer per turn because each turn re-reads the history: use `fresh_session:
-  milestone` for workers, a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
-- **Idle rounds.** If the work waits on people, make sure the pause gets used (the board's *Needs you* shows it);
-  a worker that keeps answering "holding" is spending rounds.
 
 ## Layout
 
