@@ -140,6 +140,10 @@ def parse_criteria(text: str) -> List[List[Any]]:
     return rows
 
 
+def _cap(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
 def _clip(text: str, limit: int) -> str:
     """The start of a text, cut at a word, with a pointer to the rest."""
     if len(text) <= limit:
@@ -431,12 +435,12 @@ class ManagedRunner(MonitorRunner):
                 parts.append("| # | milestone | status | score |\n|---|---|---|---|\n" + "\n".join(rows))
             last = self.last_output(self.critic.name, ("report", "checkin"))
             if last:
-                parts.append(f"{self.critic.called}'s latest report or update:\n\n" + _clip(self.clean_report(last), 4000))
+                parts.append(_cap(f"{self.critic.called}'s latest report or update:\n\n") + _clip(self.clean_report(last), 4000))
         elif a.role == "verifier":
             if mg.get("note"):
-                parts.append(f"{self.manager.called}'s instruction for the current work:\n\n" + mg["note"].strip())
+                parts.append(_cap(f"{self.manager.called}'s instruction for the current work:\n\n") + mg["note"].strip())
             if mg.get("guidance"):
-                parts.append(f"{self.manager.called}'s latest guidance:\n\n" + mg["guidance"].strip())
+                parts.append(_cap(f"{self.manager.called}'s latest guidance:\n\n") + mg["guidance"].strip())
             last = self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
             if last:
                 parts.append("Your latest review (keep your checklist items as they are):\n\n" + _clip(last, 6000))
@@ -444,7 +448,7 @@ class ManagedRunner(MonitorRunner):
             work = (mg.get("work") or {}).get(a.name) or {}
             if work.get("output"):
                 parts.append("Your latest report:\n\n" + _clip(work["output"], 4000))
-            parts.append(f"{self.critic.called}'s latest instructions come with your next message.")
+            parts.append(_cap(f"{self.critic.called}'s latest instructions come with your next message."))
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
         if qs and a.role != "worker":
             parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
@@ -470,7 +474,8 @@ class ManagedRunner(MonitorRunner):
             self.rec.update_session(a.name, session_id=None, turns=0, reset_at=now_iso(),
                                     previous=(sess.get("previous") or []) + ([prev] if prev.get("session_id") else []))
             fwd = [x for x in (self.st.setdefault("fwd", {}).get(a.name) or [])
-                   if not x.startswith(("Your last turn was cut off", "We are starting a new part", "You are taking over"))]
+                   if not x.startswith(("Your last turn was cut off", "We are starting a new part", "You are taking over",
+                                        "This is a fresh conversation"))]
             self.st["fwd"][a.name] = [self.handover(a)] + fwd
             self.rec.event("session_reset", agent=a.name, session_id=sess.get("session_id"))
             done.append(a.name)
