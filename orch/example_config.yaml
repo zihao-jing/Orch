@@ -1,0 +1,111 @@
+# Orch config — one file, any number of independent monitors.
+# Paths are relative to this file; ~ and $VARS are expanded.
+# Long text can live in files: goal_file, instructions_file, system_prompt_file, task_file, description_file.
+
+output_dir: ./orch-runs            # every round, session and turn is recorded here (see index.html)
+
+defaults:                          # applied to every agent (monitor-level `defaults:` override these)
+  backend: claude                  # claude | codex | command | mock
+  timeout: 1800                    # seconds per turn
+  retries: 1                       # extra attempts when a turn errors or times out
+  backend_options:
+    model: sonnet
+    effort: medium                 # low | medium | high | xhigh | max
+    permission_mode: acceptEdits   # non-interactive: agents can edit files without prompting
+    allowed_tools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"]
+
+monitors:
+  # ------------------------------------------------------------------------
+  # Monitor 1 — deterministic pipeline: workers → verifiers → feedback → ...
+  # ------------------------------------------------------------------------
+  - name: api-feature
+    workspace: ~/code/my-service           # project root
+    working_dir: .                          # agents' cwd, relative to workspace
+    max_rounds: 4
+    goal: |
+      Add a GET /health endpoint that returns {"status":"ok","version":<package version>}
+      with tests, and document it in README.md.
+
+    controller:
+      mode: pipeline
+      require: all                          # all verifiers must PASS (or: any)
+      parallel: false                       # run same-stage agents concurrently?
+      stop_on_error: false
+      instructions: |
+        Keep changes minimal and idiomatic for this codebase. Do not touch unrelated files.
+        Tests must pass with the project's normal test command.
+      # templates:                          # override any prompt template (see orch/templates.py)
+      #   worker_feedback: |
+      #     Round {{round}}. Fix these:\n{{feedback}}
+
+    agents:
+      - name: implementer
+        role: worker
+        description: Writes the production code.
+        system_prompt: |
+          You are a senior backend engineer. Make focused, well-tested changes.
+        task: Implement the endpoint and its tests.
+        backend_options: { model: opus, effort: high }   # per-agent override of defaults
+
+      - name: docs
+        role: worker
+        description: Keeps documentation accurate.
+        system_prompt: You are a meticulous technical writer.
+        task: Document the new endpoint in README.md once it exists (check the code).
+        backend_options: { model: haiku }
+
+      - name: reviewer
+        role: verifier
+        description: Reviews code and runs the tests.
+        reviews: [implementer, docs]        # whose reports it sees (default: all workers)
+        feedback_to: [implementer, docs]    # who gets its feedback on FAIL (default: reviews)
+        system_prompt: |
+          You are a strict code reviewer. Run the test suite yourself. Never edit files.
+        backend_options:
+          allowed_tools: ["Read", "Glob", "Grep", "Bash"]
+
+  # ------------------------------------------------------------------------
+  # Monitor 2 — an LLM controller decides routing each round
+  # ------------------------------------------------------------------------
+  - name: research-notes
+    enabled: false                          # `orch run` skips it unless `-m research-notes`
+    workspace: ~/notes/topic-x
+    max_rounds: 6
+    goal: Produce notes/summary.md — a sourced 1-page summary of the papers in papers/.
+
+    controller:
+      mode: llm
+      parallel: true
+      instructions: |
+        First have the reader extract key claims from each paper, then have the writer draft,
+        then the critic check every claim against the source. Loop writer↔critic until clean.
+      agent:                                # the controller is itself an agent with its own session
+        backend: claude
+        backend_options: { model: opus, allowed_tools: ["Read", "Glob", "Grep"] }
+        system_prompt: Be decisive; do not dispatch agents whose work is already done.
+
+    agents:
+      - name: reader
+        role: researcher
+        description: Reads PDFs/markdown in papers/ and extracts claims with page refs.
+      - name: writer
+        role: writer
+        description: Drafts and revises notes/summary.md.
+      - name: critic
+        role: verifier
+        description: Checks every claim in the summary against its source. Never edits.
+
+  # ------------------------------------------------------------------------
+  # Wrapping any other CLI agent with the generic `command` backend
+  # ------------------------------------------------------------------------
+  # - name: other-cli
+  #   workspace: ~/code/thing
+  #   goal: ...
+  #   agents:
+  #     - name: worker
+  #       role: worker
+  #       backend: command
+  #       backend_options:
+  #         command: ["my-agent", "--session", "{session_id}", "--cwd", "{cwd}"]   # prompt on stdin
+  #         resume_command: ["my-agent", "--resume", "{session_id}"]
+  #         output_format: text            # or json + output_field / session_field

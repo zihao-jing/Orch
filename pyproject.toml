@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orch"
+version = "0.1.0"
+description = "General-purpose orchestrator for teams of CLI coding agents"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["pyyaml>=5.4"]
+
+[project.scripts]
+orch = "orch.cli:main"
+
+[tool.setuptools]
+packages = ["orch"]
+
+[tool.setuptools.package-data]
+orch = ["example_config.yaml", "board.html", "prompts/*.md"]

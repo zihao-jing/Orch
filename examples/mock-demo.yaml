@@ -1,0 +1,45 @@
+# Runs with no API keys: every agent is the built-in mock backend.
+#   python -m orch run examples/mock-demo.yaml
+# then open examples/demo-runs/index.html
+output_dir: ./demo-runs
+
+defaults:
+  backend: mock
+  backend_options: { delay: 0.3 }
+
+monitors:
+  - name: pipeline-demo
+    workspace: ./demo-workspace
+    goal: Build a tiny calculator module with tests.
+    max_rounds: 4
+    controller:
+      mode: pipeline
+      parallel: true
+      instructions: Keep it simple.
+    agents:
+      - name: coder
+        role: worker
+        task: Write calc.py.
+        backend_options: { write_file: worklog.txt, delay: 0.3 }
+      - name: tester
+        role: worker
+        task: Write test_calc.py.
+      - name: reviewer
+        role: verifier
+        backend_options: { pass_after: 3 }      # FAIL in rounds 1–2, PASS in round 3
+
+  - name: llm-demo
+    workspace: ./demo-workspace
+    goal: Same goal, but an LLM controller routes the work.
+    max_rounds: 5
+    controller:
+      mode: llm
+      parallel: true
+      agent: { backend: mock, backend_options: { done_after: 3 } }
+    agents:
+      - name: planner
+        role: planner
+      - name: builder
+        role: worker
+      - name: checker
+        role: verifier

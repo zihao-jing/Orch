@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# orch
+orch-runs/
+.orch/
+examples/demo-runs/
+examples/demo-workspace/*
+!examples/demo-workspace/.gitkeep
+.DS_Store
