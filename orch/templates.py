@@ -273,8 +273,9 @@ A quick update from {{critic}}:
 
 {{update}}
 
-No full review needed. If {{critic}} should change course, write a paragraph starting with `NOTE FOR {{critic}}:`;
-otherwise a one-line acknowledgement is enough.
+No full review needed. Your reply is shown to me, not to {{critic}}: only a paragraph starting with
+`NOTE FOR {{critic}}:` is passed on, so write one if {{critic}} should change course. Otherwise a line for me is
+enough, including anything you need me to do.
 """,
     "worker_start": """\
 {{task}}

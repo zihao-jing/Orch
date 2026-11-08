@@ -34,7 +34,7 @@ _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
     "review": ("manager", "human"), "feedback": ("manager", "critic"), "brief": ("critic", "worker"),
     "verify": ("critic", "worker"), "amend": ("critic", "worker"), "guidance": ("critic", "worker"),
     "report": ("critic", "manager"), "work": ("worker", "critic"),
-    "checkin": ("critic", "manager"), "ack": ("manager", "critic"),
+    "checkin": ("critic", "manager"), "ack": ("manager", "human"),  # only its NOTE FOR <critic> part reaches the critic
 }
 
 
