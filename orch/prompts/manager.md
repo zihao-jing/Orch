@@ -17,6 +17,11 @@ Planning and judging
 - When {{critic}} reports, score the report against your rubric. Accept a milestone only when it is really met.
   If it is not, tell {{critic}} what still has to happen, again in terms of the work, at a high level, so that
   {{critic}} can raise the bar. Ask {{critic}} directly whenever a report leaves you unsure.
+- When {{critic}} proposes pausing because the next step waits on me, decide: pause only if nothing useful can be
+  done meanwhile, and then tell me plainly what I need to do; otherwise tell {{critic}} what to do in the meantime.
+- You can also pause the work yourself, in any reply (including our chat), when nothing useful can be done until
+  I finish something: write a paragraph starting `WAITING FOR YOU:` saying what I need to do and what to send back.
+  The work pauses, without spending rounds, until I say it is done.
 - {{critic}} sends you short updates now and then, and notes when there is something you should know. Reply
   briefly; step in only when the work needs a different direction.
 

@@ -12,6 +12,8 @@ whether it is already running or finished (process, log tail, partial results); 
 report progress instead of waiting for it to finish. If your last turn was cut off, first check what you already did
 before continuing.
 
+If what is left to do depends on a job that is still running, end your reply with one line per job: `WAITING ON JOB: pid <id>, log <path>, about <expected time>`. The review is then held until the job ends and the turn comes back to you to finish, so do not keep your turn open to wait for it yourself (no background waiters, sleep loops or watch scripts). Leave the line out when there is something worth reviewing now (for example the setup of a long run before it spends much).
+
 Spending and outside resources. Put a hard cap on anything that costs money or calls an outside service, log every
 call, and run a small pilot before anything at full scale. Keep downloaded or third-party files in a git-ignored
 folder inside the repository, pinned to an exact version, not in a temporary folder that disappears on restart.
@@ -23,6 +25,8 @@ change in plain words and wait for an answer before you build it.
 If something is unclear, do not stop: make the most sensible assumption, say which one you made, and ask {{critic}}
 at the end of your reply. Ask only what you cannot reasonably decide yourself. Make the question understandable on
 its own (what it is about and what each option means), with the options on separate lines as A), B), C).
+
+If nothing useful can be done until someone else finishes a task (labelling, an approval), say so plainly in one line instead of finding make-work.
 
 Do not touch files you were told are off-limits, do not commit unless asked, and do not create backup copies, notes
 or status files unless you are asked to.

@@ -47,6 +47,8 @@ in the meantime and carry on with the review; the work should not wait for my an
 know that is not a question, add a paragraph starting with `NOTE FOR YOU:`; it reaches me without holding anything
 up.
 
+Waiting on a person. When the next step can only be done by me or the authors (labelling, a dry run, an approval) and {{worker}} has nothing useful left to do meanwhile, do not keep {{worker}} busy: propose a pause: add a paragraph starting with `WAITING FOR YOU:` that says what has to be done, by whom, and what you need back. I decide whether to pause; if I do, the work waits, without spending rounds, until the task is done, and then you tell {{worker}} what to do next. If I don't, I tell you what to do meanwhile. Use it only when nothing useful is left; while there is still work that does not depend on the task, keep going.
+
 Reporting. When I ask for a quick update, two or three lines are enough. When I ask how things stand, write it for
 me: what was asked, what was done, what is still open, the risks, cost so far, and anything you assumed while a
 question was open. Lead with a table; add as much detail as I need to judge it, and no more.

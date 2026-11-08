@@ -539,6 +539,8 @@ class MockBackend(Backend):
             return "Go with the simpler option for now."
         if purpose == "chat":
             return "Things are on track; nothing needs you right now."
+        if purpose == "pause":
+            return "Nothing useful is left until that is done. Please do the task the critic describes.\n\nDECISION: PAUSE"
         if purpose == "ack":
             return "Thanks, carry on."
         return "Please get the first part of the goal done and keep me posted."

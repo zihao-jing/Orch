@@ -34,7 +34,7 @@ _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
     "review": ("manager", "human"), "feedback": ("manager", "critic"), "brief": ("critic", "worker"),
     "verify": ("critic", "worker"), "amend": ("critic", "worker"), "guidance": ("critic", "worker"),
     "report": ("critic", "manager"), "work": ("worker", "critic"),
-    "checkin": ("critic", "manager"), "ack": ("manager", "human"),  # only its NOTE FOR <critic> part reaches the critic
+    "checkin": ("critic", "manager"), "ack": ("manager", "human"), "pause": ("manager", "human"),  # only its NOTE FOR <critic> part reaches the critic
 }
 
 
@@ -201,7 +201,10 @@ class Board:
                                         "ts": now_iso(), "session_id": new_sid, "cost": cost, **tag})
             if settle and status == "ok" and text.strip():  # the agreed answer goes to the run like any answer
                 self.control({"kind": "answer", "qid": qid, "message": text.strip(), "via": "conversation"})
-            from .managed import note_blocks  # "NOTE FOR critic: ..." -> that agent's next turn
+            from .managed import manager_pause, note_blocks  # "NOTE FOR critic: ..." -> that agent's next turn
+            pause = manager_pause(text) if status == "ok" else ""
+            if pause:  # the manager pauses the work from the chat
+                self.control({"kind": "pause", "message": pause})
             for who, body in note_blocks(text or "", self.mon.controller.note_pattern, to_end=True):
                 who = re.sub(r"^the\s+", "", who.lower())
                 for a in self.mon.agents:
@@ -299,6 +302,8 @@ def _handler(boards: Dict[str, Board]):
                 return self.js(b.chat(msg, qid=body.get("qid"), settle=settle))
             if u.path == "/api/answer":
                 b.control({"kind": "answer", "qid": body.get("qid"), "message": msg})
+            elif u.path == "/api/job":
+                b.control({"kind": "job"})
             elif u.path == "/api/gate":
                 b.control({"kind": "gate", "gate": body.get("gate"), "message": msg,
                            "decision": "approve" if body.get("decision") == "approve" else "revise"})

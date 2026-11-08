@@ -228,7 +228,7 @@ function table(rows){
   return '<div class="tw"><table><tr>' + head.map(c=>'<th>'+inline(c)+'</th>').join('') + '</tr>' +
     body.map(r => '<tr>' + r.map(c => `<td${num(c)?' class="num"':''}>${inline(c)}</td>`).join('') + '</tr>').join('') + '</table></div>';
 }
-const STATUS = {running:['p-run','● running'], awaiting_approval:['p-you','⏸ waiting for you'], completed:['p-good','✓ completed'],
+const STATUS = {running:['p-run','● running'], awaiting_approval:['p-you','⏸ waiting for you'], waiting_job:['p-run','⏳ waiting for a job'], completed:['p-good','✓ completed'],
   failed:['p-crit','✕ failed'], stopped:['p-warn','■ stopped'], max_rounds_reached:['p-warn','! round limit'], needs_human:['p-you','? needs you'], starting:['p-run','starting']};
 const pill = (cls, txt) => `<span class="pill ${cls}">${esc(txt)}</span>`;
 const stPill = s => { const x = STATUS[s] || ['', s || '…']; return pill(x[0], x[1]); };
@@ -286,7 +286,7 @@ function renderTiles(mg){
   const qs = D.questions||[], mss = mg.milestones||[], done = mss.filter(m=>m.status==='done').length;
   const run = running()[0];
   const nowTxt = run ? `<span class="dot live"></span> <b>${esc(called(run.agent))}</b>&nbsp;is ${esc(DOING[run.purpose]||run.purpose)}`
-                     : (D.status === 'awaiting_approval' ? 'Waiting for your OK' : esc(D.status||''));
+                     : D.status === 'waiting_job' ? 'Waiting for the worker\'s job to finish' : (D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? 'Paused until your task is done' : 'Waiting for your OK') : esc(D.status||''));
   const QA = D.queued_answers || {}, live = qs.filter(q => q.status === 'open' && !QA[q.id]);  // settled-but-queued counts as done
   const openQ = live.length, mine = live.filter(q => q.to === 'human').length;
   const tiles = [
@@ -303,11 +303,16 @@ function renderNeeds(mg){
   const QA = D.queued_answers || {};
   const g = mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !QA[q.id]);  // settled ones leave
   const threads = Object.fromEntries(mine.map(q => [q.id, qThread(q.id)]));
-  const sig = JSON.stringify([g && g.key, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status))]);
+  const job = mg.job, sig = JSON.stringify([job && job.since, g && g.key, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status))]);
   const el = $('needs'); if (el._sig === sig) return; el._sig = sig;
   const typed = {}; el.querySelectorAll('textarea,input').forEach(x => { if (x.id) typed[x.id] = x.value; });
-  if (!g && !mine.length){ el.innerHTML = ''; return; }
-  let h = '<div class="card needs"><h2>Needs you</h2>';
+  if (!g && !mine.length && !job){ el.innerHTML = ''; return; }
+  let h = '<div class="card needs"><h2>' + (g || mine.length ? 'Needs you' : 'Waiting for a job') + '</h2>';
+  if (job){
+    const ls = Object.entries(job.agents||{}).map(([a, j]) => `<li><b>${esc(called(a))}</b>: ${inline((j.lines||[]).join('; '))}</li>`).join('');
+    h += `<div style="font-weight:600;margin-bottom:4px">⏳ The worker is waiting on its job, so the critic's review is held until it ends (since ${tm(job.since)})</div>
+      <ul>${ls}</ul><div class="row"><button data-job="1">▶ Review now, don't wait</button></div>`;
+  }
   if (g){
     h += `<div style="font-weight:600;margin-bottom:4px">⏸ ${esc(g.title)}</div>`;
     if (g.kind === 'plan'){
@@ -317,7 +322,11 @@ function renderNeeds(mg){
     } else {
       h += `<div class="md">${md(g.text)}</div>`;
     }
-    h += `<div class="row"><textarea id="gate-msg" rows="2" placeholder="Optional: what still needs work, or a note for the manager"></textarea></div>
+    h += g.kind === 'wait'
+      ? `<div class="ink2" style="font-size:12px">The worker and the critic are paused; no rounds are spent while you work on this.</div>
+      <div class="row"><textarea id="gate-msg" rows="2" placeholder="What you did, where the files are, anything the critic should know"></textarea></div>
+      <div class="row"><button class="ok" data-gate="approve">✓ Done, carry on</button></div>`
+      : `<div class="row"><textarea id="gate-msg" rows="2" placeholder="Optional: what still needs work, or a note for the manager"></textarea></div>
       <div class="row"><button class="ok" data-gate="approve">✓ Approve</button><button data-gate="revise">↺ Send back with my note</button></div>`;
   }
   mine.forEach(q => {
@@ -356,6 +365,7 @@ document.addEventListener('keydown', e => { const t = e.target;
   if (t.id && t.id.startsWith('qa-') && e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); qSend(t.id.slice(3), t.value.trim()); } });
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.job){ b.disabled = true; await post('/api/job', {}); }
   if (b.dataset.gate){ const msg = ($('gate-msg')||{}).value || '';
     if (b.dataset.gate === 'revise' && !msg.trim() && !confirm('Send it back without a note?')) return;
     b.disabled = true; await post('/api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}); }

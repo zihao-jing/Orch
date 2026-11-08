@@ -116,6 +116,7 @@ class ControllerConfig:
     approve_plan: bool = True  # pause for my OK on the manager's milestone plan
     approve_milestones: bool = True  # pause for my OK after the manager accepts each milestone
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
+    job_wait: int = 21600  # seconds the critic waits for a job the worker says it is waiting on (0 = never wait)
     checkin_every: int = 0  # every N worker/critic rounds the critic sends the manager a short update (0 = off)
     # a reply holding a line like this sends questions one level up (worker -> critic -> manager -> me)
     question_pattern: str = r"^\W*QUESTIONS? FOR\b"
@@ -297,7 +298,7 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "stop_on_error", "max_report_chars", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
-             "checkin_every")
+             "checkin_every", "job_wait")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -418,7 +419,7 @@ def load_config(path: str) -> Config:
                       "stop_on_error", "max_report_chars", "templates", "agent",
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
-                      "note_pattern", "accept_pattern", "revise_pattern", "checkin_every"}
+                      "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
@@ -444,6 +445,7 @@ def load_config(path: str) -> Config:
             approve_milestones=bool(craw.get("approve_milestones", True)),
             min_score=float(craw["min_score"]) if craw.get("min_score") is not None else None,
             checkin_every=int(craw.get("checkin_every", 0) or 0),
+            job_wait=int(craw.get("job_wait", ControllerConfig.job_wait) or 0),
             **{k: str(craw[k]) for k in ("question_pattern", "note_pattern", "accept_pattern", "revise_pattern")
                if craw.get(k)},
         )

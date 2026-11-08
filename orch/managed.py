@@ -23,6 +23,7 @@ Nothing in the agents' messages mentions a workflow; relayed text reads like a n
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -33,6 +34,41 @@ from .config import AgentConfig
 from .controller import MonitorRunner, checklist_state, parse_options, resolve_choice, strip_checklist, \
     trailing_question, truncate
 from .recorder import now_iso
+
+_WAIT = r"^\W*WAITING\s+(?:FOR|ON)\s+([^:\n]+?)\s*:"  # the critic: nothing to do until a human task is done
+_JOB = r"^\W*WAITING\s+ON\s+(?:A\s+|THE\s+|MY\s+)?(?:JOBS?|PROCESS(?:ES)?|RUNS?)\b[^\n]*"  # the worker: a job still runs
+
+
+_DEC_PAUSE = re.compile(r"\n*\s*DECISION:\s*\**\s*PAUSE\**\s*", re.I)
+
+
+def manager_pause(text: str) -> str:
+    """A pause the manager calls itself: its `WAITING FOR YOU:` paragraph(s), or, when it ends with
+    `DECISION: PAUSE`, the whole reply without that line. Empty when there is none."""
+    waits = note_blocks(text or "", _WAIT)
+    if waits:
+        return "\n\n".join(b for _w, b in waits)
+    if _DEC_PAUSE.search(text or ""):
+        return _DEC_PAUSE.sub("\n", text).strip() or "Paused by the manager."
+    return ""
+
+
+def pid_alive(pid: int) -> bool:
+    try:  # a finished child of ours stays a zombie until reaped
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    except (ChildProcessError, OSError):
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
 
 _VERDICT_LINE = re.compile(r"\n*\s*VERDICT:\s*\**\s*\w+\**\s*$", re.I)
 _SCORE = re.compile(r"(?:overall|total|final)[^\n\d]{0,40}?(\d+(?:\.\d+)?)\s*(?:/|out of)\s*(\d+(?:\.\d+)?)", re.I)
@@ -104,7 +140,7 @@ def parse_criteria(text: str) -> List[List[Any]]:
     return rows
 
 
-_NOTE_STOP = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,}|#{1,6}\s|\W*(?:NOTES?|QUESTIONS?)\s+FOR\b|\W*(?:DECISION|VERDICT)\s*:|"
+_NOTE_STOP = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,}|#{1,6}\s|\W*(?:NOTES?|QUESTIONS?)\s+FOR\b|\W*WAITING\s+(?:FOR|ON)\b|\W*(?:DECISION|VERDICT)\s*:|"
                         r"[*_]*\s*(?:review|feedback|instructions?|reply|message)?\s*(?:for|to)\s+(?:the\s+)?[\w-]+\s*:[*_]*\s*$)",
                         re.I)
 
@@ -425,6 +461,9 @@ class ManagedRunner(MonitorRunner):
             a = self.find_agent(who)
             if a and a.name != self.manager.name:
                 self.forward(a, self.mtpl("relay_note", note=note).strip())
+        pause = manager_pause(rest) if r.get("purpose") != "pause" else ""  # it pauses the work itself (before the next round)
+        if pause:
+            self.mg["pause_req"] = {"text": pause, "turn": r["turn_id"]}
         return rest
 
     def find_agent(self, who: str) -> Optional[AgentConfig]:
@@ -469,6 +508,8 @@ class ManagedRunner(MonitorRunner):
         """What the worker gets from a critic reply: no verdict line, no checklist, no questions upward."""
         t = _VERDICT_LINE.sub("", text or "").strip()
         t = self.without(t, self.ask_block(t, "verifier"))
+        for _who, body in note_blocks(t, _WAIT):
+            t = re.sub(r"^\W*WAITING\s+(?:FOR|ON)[^:\n]*:\s*" + re.escape(body) + r"\s*", "", t, flags=re.I | re.M).strip()
         for note in self.notes_up(t):
             t = re.sub(r"^\W*NOTES? FOR[^:\n]*:\s*" + re.escape(note) + r"\s*", "", t, flags=re.I | re.M).strip()
         if self.mon.controller.checklist:
@@ -511,6 +552,10 @@ class ManagedRunner(MonitorRunner):
                     msgs.append(m)
             elif d.get("kind") == "gate":
                 self.st.setdefault("gate_queue", []).append(d)
+            elif d.get("kind") == "job":
+                self.mg["job_release"] = True
+            elif d.get("kind") == "pause" and d.get("message"):  # from a chat with the manager on the board
+                self.mg["pause_req"] = {"text": str(d["message"]), "turn": d.get("turn", "")}
         for qid, msgs in answers.items():
             if msgs and qid not in talked:
                 self.human_answer(qid, "\n\n".join(msgs))
@@ -586,6 +631,12 @@ class ManagedRunner(MonitorRunner):
             ph = mg.get("phase", "plan")
             if ph == "done":
                 return "completed"
+            if ph == "work" and mg.get("pause_req") and not mg.get("in_work"):  # the manager called a pause
+                req = mg.pop("pause_req")
+                mg["wait"] = {"who": "the manager", "text": req.get("text", ""), "proposal": req.get("text", ""),
+                              "turn": req.get("turn", "")}
+                mg["phase"] = ph = "wait"
+                self.rec.progress("⏸ the manager paused the work until a task of mine is done")
             try:
                 out = getattr(self, "ph_" + ph)(mg)
             except _Failed as f:
@@ -686,10 +737,20 @@ class ManagedRunner(MonitorRunner):
             block = self.ask_block(r.get("output") or "", "worker")
             if block:
                 self.new_question(m.agent(r["agent"]), self.critic.name, block, r["turn_id"])
-        mg["work"] = {r["agent"]: {"turn_id": r["turn_id"], "status": r["status"], "output": r.get("output"),
-                                   "stderr": r.get("stderr")} for r in recs}
+        return self.after_work(recs, summary)
+
+    def after_work(self, recs: List[Dict[str, Any]], summary: Dict[str, Any]) -> Optional[str]:
+        """After the workers' turns: hand the work to the critic, or first wait for a job the worker is waiting on."""
+        m, c, mg = self.mon, self.mon.controller, self.mg
+        earlier = mg.pop("work_earlier", None) or {}
+        mg["work"] = {r["agent"]: {"turn_id": r["turn_id"], "status": r["status"], "stderr": r.get("stderr"),
+                                   "output": (earlier[r["agent"]] + "\n\n**Later, after the job it was waiting on:**\n\n"
+                                              + (r.get("output") or "")) if earlier.get(r["agent"]) else r.get("output")}
+                      for r in recs}
+        for a, out in earlier.items():  # a worker that had no job of its own keeps its earlier report
+            mg["work"].setdefault(a, {"turn_id": "", "status": "ok", "output": out, "stderr": ""})
         mg["feedback"] = {}
-        summary["turns"] = [r["turn_id"] for r in recs]
+        summary["turns"] = (summary.get("turns") or []) + [r["turn_id"] for r in recs]
         mg["summary"] = summary
         for r in recs:  # past the time limit: not fatal; the worker picks up from where things stand
             if r["status"] == "timeout":
@@ -699,8 +760,72 @@ class ManagedRunner(MonitorRunner):
         if errors and c.stop_on_error:
             self.end_round(summary, "worker error → stop", errors=[r["turn_id"] for r in errors])
             return "failed"
+        jobs: Dict[str, Dict[str, Any]] = {}
+        if c.job_wait > 0:
+            for r in recs:
+                lines = re.findall(_JOB, r.get("output") or "", re.I | re.M)
+                pids = sorted({int(x) for ln in lines for x in re.findall(r"\bpids?\D{0,3}(\d+)", ln, re.I)})
+                live = [x for x in pids if pid_alive(x)]
+                if live:
+                    jobs[r["agent"]] = {"pids": live, "lines": [ln.strip() for ln in lines]}
+        if jobs:
+            mg["job"] = {"agents": jobs, "since": now_iso(), "since_ts": time.time()}
+            mg["work_earlier"] = {a: x.get("output") or "" for a, x in mg["work"].items()}
+            mg["phase"] = "job"
+            pids = ", ".join(str(x) for j in jobs.values() for x in j["pids"])
+            self.rec.progress(f"⏳ waiting for the worker's job (pid {pids}) before {self.critic.name} reviews")
+            self.log(f"  ⏳ waiting for job pid {pids} (up to {c.job_wait / 3600:.1f} h; 'Review now' on the board skips)")
+            return None
         mg["phase"] = "review"
         return None
+
+    def ph_job(self, mg: Dict[str, Any]) -> Optional[str]:
+        """The worker finished its turn but is waiting on its own background job: don't spend a critic review on
+        work that isn't done. When the job ends (or after job_wait), the worker picks up again; I can skip ahead."""
+        c, job = self.mon.controller, mg.get("job") or {}
+        agents = job.get("agents") or {}
+        self.rec.set(status="waiting_job")
+        why = "finished"
+        try:
+            while True:
+                if self.should_stop():
+                    raise StopRequested()
+                self.check_control()
+                if mg.pop("job_release", False):
+                    why = "released"
+                    break
+                if not any(pid_alive(x) for j in agents.values() for x in j["pids"]):
+                    break
+                if time.time() - float(job.get("since_ts") or time.time()) > c.job_wait:
+                    why = "timeout"
+                    break
+                time.sleep(2)
+        finally:
+            self.rec.set(status="running")
+        mg.pop("job", None)
+        if why == "released":
+            mg.pop("work_earlier", None)
+            self.rec.progress(f"▶ review now, without waiting for the job")
+            mg["phase"] = "review"
+            return None
+        rnd = int(self.st.get("round", 0))
+        summary = mg.get("summary") or {"round": rnd, "turns": []}
+        hours = (time.time() - float(job.get("since_ts") or time.time())) / 3600
+        items = []
+        for name, j in agents.items():
+            w = self.mon.agent(name)
+            state = (f"has finished" if why == "finished" else f"is still running after {hours:.1f} h")
+            items.append((w, self.mtpl("worker_job_done", jobs="; ".join(j["lines"]), state=state, human_messages=""),
+                          "work"))
+        recs = self._stage(items, rnd, {"milestone": mg.get("ms", 0), "milestone_round": mg.get("ms_round", 0)})
+        if self.should_stop() or any(r["status"] == "stopped" for r in recs):
+            mg["job"] = {**job, "agents": agents}  # wait again (or go straight on) after the restart
+            raise StopRequested()
+        for r in recs:
+            block = self.ask_block(r.get("output") or "", "worker")
+            if block:
+                self.new_question(self.mon.agent(r["agent"]), self.critic.name, block, r["turn_id"])
+        return self.after_work(recs, summary)
 
     def _stage(self, items: List[Tuple[AgentConfig, str, str]], rnd: int, extra: Dict[str, Any]) -> List[Dict[str, Any]]:
         out = []
@@ -736,14 +861,59 @@ class ManagedRunner(MonitorRunner):
         passed = vd == "PASS"
         if not passed:
             self.worker_feedback(self.clean_critic(r["output"]))
-        mg["phase"] = "report" if passed else "work"
+        wait = [] if passed else note_blocks(r.get("output") or "", _WAIT)
+        nxt = "report" if passed else ("pause" if wait else "work")  # a proposed pause goes to the manager
+        if wait:
+            mg["wait"] = {"who": wait[0][0], "text": "\n\n".join(b for _w, b in wait), "turn": r["turn_id"]}
+        mg["phase"] = nxt
         n = c.checkin_every
-        if not passed and n and mg.get("ms_round", 0) % n == 0:
+        if nxt == "work" and n and mg.get("ms_round", 0) % n == 0:
             mg["checkin_due"] = True  # after any question to the manager has been dealt with
-        asked = self.critic_asks(r, after="report" if passed else "work")
-        self.end_round(summary, ("passed → report" if passed else "feedback → " + ", ".join(w.name for w in self.workers))
+        asked = self.critic_asks(r, after=nxt)
+        self.end_round(summary, ("passed → report" if passed else "critic proposes a pause → manager" if wait
+                                 else "feedback → " + ", ".join(w.name for w in self.workers))
                        + (" · question for the manager" if asked else ""))
         mg["asks"] = 0
+        return None
+
+    def ph_pause(self, mg: Dict[str, Any]) -> Optional[str]:
+        """The critic proposes pausing until a human task is done; the manager decides."""
+        w = mg.get("wait") or {}
+        r = self.say(self.manager, self.mtpl("manager_pause", proposal=w.get("text", ""), human_messages=""), "pause")
+        out = r.get("output") or ""
+        if re.search(r"DECISION:\s*\**\s*PAUSE", out, re.I):
+            rest = self.after_manager(r)
+            msg = re.sub(r"\n*\s*DECISION:\s*\**\s*PAUSE\**\s*", "\n", self.for_me(rest), flags=re.I).strip()
+            mg["wait"] = {**w, "who": "the manager agrees", "text": msg or w.get("text", ""), "proposal": w.get("text", ""),
+                          "turn": r["turn_id"]}
+            mg["phase"] = "wait"
+            return None
+        self.after_manager(r)
+        mg.pop("pause_req", None)  # it decided to continue
+        guidance = re.sub(r"\n*\s*DECISION:\s*\**\s*\w+\**\s*$", "", self.for_critic(out), flags=re.I).strip()
+        mg.pop("wait", None)
+        c = self.say(self.critic, self.mtpl("critic_continue", guidance=guidance, human_messages=""), "guidance")
+        self.worker_feedback(self.clean_critic(c["output"]))
+        mg["phase"] = "work"
+        self.critic_asks(c, after="work")
+        return None
+
+    def ph_wait(self, mg: Dict[str, Any]) -> Optional[str]:
+        """Nothing for the worker to do until a human task is done: pause (no rounds spent) until I say carry on."""
+        w = mg.get("wait") or {}
+        mg.pop("pause_req", None)
+        d = self.wait_gate({"kind": "wait", "milestone": mg.get("ms", 0), "turn": w.get("turn"),
+                            "title": f"Waiting for you ({w.get('who') or 'a human task'})", "text": w.get("text", "")})
+        msg = (d.get("message") or "").strip()
+        if msg:
+            self.decide(msg, "you", "wait")
+        r = self.say(self.critic, self.mtpl("critic_resume", message=msg or "(no message)",
+                                            waited=w.get("proposal") or w.get("text", ""),
+                                            human_messages=""), "guidance")
+        self.worker_feedback(self.clean_critic(r["output"]))
+        mg.pop("wait", None)
+        mg["phase"] = "work"
+        self.critic_asks(r, after="work")
         return None
 
     def ph_checkin(self, mg: Dict[str, Any]) -> Optional[str]:

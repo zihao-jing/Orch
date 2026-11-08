@@ -151,6 +151,21 @@ starts; its work is in the files, and the critic's brief plus the register tell 
 re-reads its whole history on every step, so this keeps worker turns from getting slower and dearer as a run goes
 on. The manager and critic are best left in one session: they are cheap, and they need to remember the decisions.
 
+**Waiting for a human task.** When the next step is mine or the authors' (labelling, a dry run) and the worker has
+nothing useful left, the critic proposes a pause with a paragraph starting `WAITING FOR YOU:`. The manager decides:
+`DECISION: PAUSE` pauses the run without spending rounds, and the board shows the manager's note on what I need to
+do under *Needs you*, with a **Done, carry on** button and a message box (the message goes into the decisions
+register and to the critic, which then tells the worker what to do next). `DECISION: CONTINUE` instead sends the
+critic what to do in the meantime.
+The manager can also pause the work itself, in any reply or in the board chat, with its own `WAITING FOR YOU:`
+paragraph saying what I need to do; it takes effect before the next round.
+
+**Waiting for the worker's own job.** If the worker ends its turn while the rest depends on a background job, it ends
+its reply with `WAITING ON JOB: pid <id>, log <path>`. While that process is alive the critic's review is held (no
+review spent on unfinished work); when it exits, the worker gets the turn back to finish, and the critic then reviews
+both replies together. `job_wait` (seconds, default 21600; 0 = never wait) caps the wait, after which the worker is
+asked for progress. **Review now** on the board skips the wait. A line whose pid has already exited is ignored.
+
 **The board** — `orch run cfg.yaml --serve [--open]`, or `orch serve cfg.yaml` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Without the board: `orch approve <run|cfg> [--note … | --revise …]`, `orch answer <run|cfg> Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
 
 ## Config reference

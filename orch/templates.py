@@ -239,7 +239,9 @@ will check. The repository is at `{{cwd}}`.
 
 {{worker_report}}
 
-Please take a look at the changes. End with one final line: `VERDICT: PASS` or `VERDICT: FAIL`.
+Please take a look at the changes. If {{worker}} has nothing useful left to do until a task of mine or the
+authors' is done, don't tell {{worker}} to hold: propose a pause with a `WAITING FOR YOU:` paragraph instead.
+End with one final line: `VERDICT: PASS` or `VERDICT: FAIL`.
 """,
     "critic_answer": """\
 About your question:
@@ -254,6 +256,42 @@ If this changes what {{worker}} should do, say what. If it changes your verdict,
 
 Please tell me how things stand{{limit_note}}: what was asked, what was done, what is still
 open, any risks, and anything you assumed while a question was open. Tables are welcome; keep the prose short.
+""",
+    "worker_job_done": """\
+{{human_messages}}
+
+The job you were waiting on ({{jobs}}) {{state}}. Check its output and logs, finish what depended on it, and reply
+with your summary as usual. If you start another job and the rest depends on it, end with the same line again.
+""",
+    "manager_pause": """\
+{{human_messages}}
+
+{{critic}} proposes pausing the work, because what comes next is waiting on me (or the authors):
+
+{{proposal}}
+
+Please decide. If nothing useful can be done until that is finished, write for me, in a few plain lines, what I need
+to do and what to send back, and end with the line `DECISION: PAUSE`; the work then waits, without spending rounds,
+until I say it is done. If there is still useful work meanwhile, write `For {{critic}}:` followed by what to do in
+the meantime, and end with the line `DECISION: CONTINUE`.
+""",
+    "critic_continue": """\
+{{human_messages}}
+
+About your proposal to pause: not yet. {{guidance}}
+
+Please tell {{worker}} what to do next.
+""",
+    "critic_resume": """\
+{{human_messages}}
+
+The work was paused while waiting for this:
+
+{{waited}}
+
+That is done now. My message: {{message}}
+
+Please check where things stand and tell {{worker}} what to do next.
 """,
     "critic_guidance": """\
 {{human_messages}}
@@ -278,8 +316,10 @@ A quick update from {{critic}}:
 {{update}}
 
 No full review needed. Your reply is shown to me, not to {{critic}}: only a paragraph starting with
-`NOTE FOR {{critic}}:` is passed on, so write one if {{critic}} should change course. Otherwise a line for me is
-enough, including anything you need me to do.
+`NOTE FOR {{critic}}:` is passed on, so write one if {{critic}} should change course. If nothing useful can be done
+until I finish something, write a paragraph starting `WAITING FOR YOU:` saying what I need to do; the work then
+pauses, without spending rounds, until I say it is done. Otherwise a line for me is enough, including anything you
+need me to do.
 """,
     "worker_start": """\
 {{task}}

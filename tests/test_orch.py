@@ -1,6 +1,7 @@
 """End-to-end tests using the mock and command backends. Run: python -m unittest discover tests"""
 
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -708,6 +709,124 @@ class TestManaged(unittest.TestCase):
         r.backfill_decisions()
         self.assertEqual([(d["id"], d["by"], d["text"]) for d in rec2.state["decisions"]],
                          [("S1", "you", "Use British spelling."), ("S2", "you", "Bold headers?: yes")])
+
+    def test_critic_pauses_the_work_while_waiting_for_a_human_task(self):
+        crit = {"replies": {"verify": [
+            "WAITING FOR YOU: the authors label the 20 items in `labels/`; I need the four CSV files back.\n\n"
+            "## Review for Sam\nNothing more to do until the labels are in.\n\n- [ ] labels are in\nVERDICT: FAIL",
+            "All good.\n\n- [x] labels are in\nVERDICT: PASS"]}}
+        cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1}, critic=crit)])
+        out = self.tmp / "out" / "m"
+        holder = {}
+        th = threading.Thread(target=lambda: holder.update(res=run(cfg)), daemon=True)
+        th.start()
+        t0, g = time.time(), None
+        while time.time() - t0 < 10 and not g:
+            runs = sorted(out.glob("*/state.json")) if out.exists() else []
+            g = ((read_json(runs[-1]) if runs else {}).get("managed") or {}).get("gate")
+            time.sleep(0.05)
+        self.assertEqual(g["kind"], "wait")
+        self.assertIn("Please do the task", g["text"])  # the manager's words for me
+        st = read_json(runs[-1])
+        self.assertEqual(st["status"], "awaiting_approval")
+        n_rounds = st["round"]
+        (runs[-1].parent / "inbox" / "a-gate.json").write_text(json.dumps(
+            {"kind": "gate", "decision": "approve", "message": "Labels are in labels/v2.", "gate": g["key"]}))
+        th.join(10)
+        status, rec = holder["res"]
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        res = [t for t in ts if t["purpose"] == "guidance"]
+        self.assertEqual(len(res), 1)
+        self.assertIn("Labels are in labels/v2.", res[0]["input"])
+        self.assertIn("four CSV files", res[0]["input"])
+        work = [t for t in ts if t["purpose"] == "work"]
+        self.assertTrue(all("WAITING FOR" not in t["input"] for t in work))
+        self.assertEqual(rec.state["round"], n_rounds + 1)  # the pause spent no rounds
+        self.assertIn("Labels are in labels/v2.", rec.state["decisions"][-1]["text"])
+        pause = [t for t in ts if t["purpose"] == "pause"]
+        self.assertEqual(len(pause), 1)
+        self.assertIn("four CSV files", pause[0]["input"])  # the critic proposed, the manager decided
+
+    def test_manager_can_turn_down_a_proposed_pause(self):
+        crit = {"replies": {"verify": [
+            "WAITING FOR YOU: the authors label the 20 items.\n\n## Review for Sam\nNothing more to do.\n\n"
+            "- [ ] labels are in\nVERDICT: FAIL", "All good.\n\n- [x] labels are in\nVERDICT: PASS"],
+            "guidance": ["## Review for Sam\nWrite the analysis script against the dummy labels."]}}
+        mgr = {"milestones": 1, "replies": {"pause": [
+            "Not yet.\n\nFor the critic: have the worker write the analysis script on dummy labels.\n\nDECISION: CONTINUE"]}}
+        status, rec = run(make_cfg(self.tmp, [managed(mgr=mgr, critic=crit)]))
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        self.assertFalse(any(g["kind"] == "wait" for g in rec.state["managed"].get("gates") or []))
+        cont = [t for t in ts if t["agent"] == "critic" and t["purpose"] == "guidance"]
+        self.assertIn("analysis script on dummy labels", cont[0]["input"])
+        self.assertNotIn("DECISION", cont[0]["input"])
+        work = [t for t in ts if t["purpose"] == "work"]
+        self.assertIn("dummy labels", work[1]["input"])
+
+    def test_review_waits_for_the_workers_job(self):
+        job = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"])
+        work = {"replies": {"work": [f"Started the run.\n\nWAITING ON JOB: pid {job.pid}, log logs/run.log",
+                                     "The run finished; results are in out.csv."]}}
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=work)]))
+        job.wait()
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        seq = [(t["agent"], t["purpose"]) for t in ts if t["purpose"] in ("work", "verify")]
+        self.assertEqual(seq[:3], [("writer", "work"), ("writer", "work"), ("critic", "verify")])
+        self.assertIn("has finished", ts[[t["purpose"] for t in ts].index("work") + 1]["input"])
+        first_review = [t for t in ts if t["purpose"] == "verify"][0]["input"]
+        self.assertIn("Started the run.", first_review)
+        self.assertIn("results are in out.csv", first_review)
+
+    def test_review_now_skips_the_job_wait(self):
+        job = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(job.kill)
+        work = {"replies": {"work": [f"WAITING ON JOB: pid {job.pid}", "Carried on."]}}
+        cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=work)])
+        out = self.tmp / "out" / "m"
+        holder = {}
+        th = threading.Thread(target=lambda: holder.update(res=run(cfg)), daemon=True)
+        th.start()
+        t0, st = time.time(), {}
+        while time.time() - t0 < 10 and st.get("status") != "waiting_job":
+            runs = sorted(out.glob("*/state.json")) if out.exists() else []
+            st = read_json(runs[-1]) if runs else {}
+            time.sleep(0.05)
+        self.assertEqual(st["managed"]["job"]["agents"]["writer"]["pids"], [job.pid])
+        (runs[-1].parent / "inbox" / "a-job.json").write_text(json.dumps({"kind": "job"}))
+        th.join(10)
+        status, rec = holder["res"]
+        self.assertEqual(status, "completed")
+        self.assertTrue(job.poll() is None)  # the job itself is left alone
+
+    def test_manager_pauses_the_work_itself(self):
+        mgr = {"milestones": 1, "replies": {"ack": [
+            "WAITING FOR YOU: please finish the dry run and tell me where the notes are.\n\nThanks.", "Carry on."]}}
+        cfg = make_cfg(self.tmp, [managed(controller={"checkin_every": 1}, mgr=mgr, critic={"pass_after": 3})])
+        out = self.tmp / "out" / "m"
+        holder = {}
+        th = threading.Thread(target=lambda: holder.update(res=run(cfg)), daemon=True)
+        th.start()
+        t0, g = time.time(), None
+        while time.time() - t0 < 10 and not g:
+            runs = sorted(out.glob("*/state.json")) if out.exists() else []
+            g = ((read_json(runs[-1]) if runs else {}).get("managed") or {}).get("gate")
+            time.sleep(0.05)
+        self.assertEqual(g["kind"], "wait")
+        self.assertIn("finish the dry run", g["text"])
+        (runs[-1].parent / "inbox" / "a-gate.json").write_text(json.dumps(
+            {"kind": "gate", "decision": "approve", "message": "Notes are in notes.md.", "gate": g["key"]}))
+        th.join(10)
+        status, rec = holder["res"]
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        i_ack = [t["purpose"] for t in ts].index("ack")
+        self.assertEqual(ts[i_ack + 1]["purpose"], "guidance")  # paused right after the check-in, then resumed
+        self.assertIn("Notes are in notes.md.", ts[i_ack + 1]["input"])
+        self.assertIn("finish the dry run", ts[i_ack + 1]["input"])
+        self.assertEqual([x["kind"] for x in rec.state["managed"]["gates"]].count("wait"), 1)
 
     def test_managed_validation(self):
         m = managed()
