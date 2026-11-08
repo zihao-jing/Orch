@@ -17,4 +17,4 @@ orch = "orch.cli:main"
 packages = ["orch"]
 
 [tool.setuptools.package-data]
-orch = ["example_config.yaml", "board.html", "prompts/*.md"]
+orch = ["example_config.yaml", "board.html", "prompts/*.md", "prompts/protocol/*.md"]

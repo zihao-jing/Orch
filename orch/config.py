@@ -48,6 +48,7 @@ class AgentConfig:
     memory_files: List[str] = field(default_factory=list)  # notes/preferences (files or folders of .md)
     memory_heading: str = "Things to keep in mind:"
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
+    protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
     fresh_session: str = ""  # "milestone": start a new session when each milestone starts (managed mode)
 
     @property
@@ -75,6 +76,14 @@ class AgentConfig:
                     continue
                 if text:
                     notes.append(text)
+        if self.protocol_path:
+            try:
+                proto = Path(self.protocol_path).read_text(encoding="utf-8").strip()
+            except OSError:
+                proto = ""
+            if proto:
+                from .templates import render
+                sp = (sp + "\n\n" if sp else "") + render(proto, **(self.prompt_vars or {})).strip()
         if notes:
             sp = (sp + "\n\n" if sp else "") + (self.memory_heading + "\n\n" if self.memory_heading else "") \
                 + "\n\n".join(notes)
@@ -116,6 +125,7 @@ class ControllerConfig:
     approve_plan: bool = True  # pause for my OK on the manager's milestone plan
     approve_milestones: bool = True  # pause for my OK after the manager accepts each milestone
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
+    protocol: bool = True  # managed mode: add orch's fixed protocol (signals, who reads what, boundaries) to each prompt
     job_wait: int = 21600  # seconds the critic waits for a job the worker says it is waiting on (0 = never wait)
     checkin_every: int = 0  # every N worker/critic rounds the critic sends the manager a short update (0 = off)
     # a reply holding a line like this sends questions one level up (worker -> critic -> manager -> me)
@@ -298,7 +308,7 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "stop_on_error", "max_report_chars", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
-             "checkin_every", "job_wait")
+             "checkin_every", "job_wait", "protocol")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -419,7 +429,7 @@ def load_config(path: str) -> Config:
                       "stop_on_error", "max_report_chars", "templates", "agent",
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
-                      "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait"}
+                      "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "protocol"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
@@ -446,6 +456,7 @@ def load_config(path: str) -> Config:
             min_score=float(craw["min_score"]) if craw.get("min_score") is not None else None,
             checkin_every=int(craw.get("checkin_every", 0) or 0),
             job_wait=int(craw.get("job_wait", ControllerConfig.job_wait) or 0),
+            protocol=bool(craw.get("protocol", True)),
             **{k: str(craw[k]) for k in ("question_pattern", "note_pattern", "accept_pattern", "revise_pattern")
                if craw.get(k)},
         )
@@ -457,6 +468,9 @@ def load_config(path: str) -> Config:
                 for key, role in (("manager", "manager"), ("critic", "verifier"), ("worker", "worker"))}
         for a in agents:
             a.prompt_vars = dict(team)
+            proto = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(a.role)
+            if controller.mode == "managed" and controller.protocol and proto:
+                a.protocol_path = str(PROMPTS_DIR / "protocol" / f"{proto}.md")
         m_known = {"name", "workspace", "working_dir", "goal", "max_rounds", "controller", "agents",
                    "defaults", "output_dir", "enabled"}
         unknown = set(mraw) - m_known
@@ -543,6 +557,9 @@ def validate(cfg: Config, check_paths: bool = False) -> List[str]:
                                   f"role: verifier (the critic) and at least one with role: worker")
             if c.milestone_rounds < 1:
                 raise ConfigError(f"{where}: controller.milestone_rounds must be >= 1")
+            if m.max_rounds <= c.milestone_rounds:
+                warnings.append(f"{where}: max_rounds ({m.max_rounds}) counts rounds over all milestones; at or below "
+                                f"milestone_rounds ({c.milestone_rounds}) the run can stop in the middle of a milestone")
             others = [a.name for a in m.agents if a.role not in ("worker", "verifier", "manager")]
             if others:
                 warnings.append(f"{where}: managed mode ignores agents with custom roles: {', '.join(others)}")

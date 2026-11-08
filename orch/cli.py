@@ -89,7 +89,8 @@ timeout: 2400
 retries: 1
 # the run as a whole
 goal_file: goal.md          # only the manager reads the goal
-max_rounds: 20              # worker/critic rounds in all (safety cap)
+max_rounds: 60              # worker/critic rounds in all milestones together (safety cap); keep it well above
+                            # milestone_rounds, or the run stops in the middle of a milestone
 approve_plan: true          # wait for my OK on the milestone plan
 approve_milestones: true    # and after each milestone the manager accepts
 # min_score: 4              # an ACCEPT below this overall score counts as REVISE
@@ -103,16 +104,20 @@ backend_options: {model: opus, effort: medium, permission_mode: auto}
 timeout: 2400
 retries: 1
 checklist: true             # a PASS only counts when every checklist item is [x]
-milestone_rounds: 4         # rounds per milestone before the manager and I look at it anyway
+milestone_rounds: 10        # rounds per milestone before the manager and I look at it anyway
 checkin_every: 2            # every 2 rounds, a short update for the manager (0 = off)
+# job_wait: 21600           # how long a review waits for a job the worker is waiting on (seconds; 0 = never)
 """,
         "agents/worker/agent.yaml": """\
 role: worker
 description: Does the work in the repository.
 backend: claude
-backend_options: {model: opus, effort: medium, permission_mode: auto}
-timeout: 2400
+backend_options: {model: sonnet, effort: medium, permission_mode: auto}
+# Codex instead: backend: codex, backend_options: {model: <model>, sandbox: workspace-write,
+#                extra_args: ["-c", "sandbox_workspace_write.network_access=true"]}
+timeout: 7200               # per turn; long jobs run in the background and are waited on with WAITING ON JOB
 retries: 1
+fresh_session: milestone    # a new session for each milestone: turns stay fast and cheap; the files carry the state
 # snapshot: [docs]          # folders whose every version is kept in the run log
 """,
     }

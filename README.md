@@ -105,8 +105,8 @@ A project keeps its agents in `<project>/.orch/agents/`, one folder per agent; t
   agents/<name>/
     agent.yaml       role (manager | critic | worker), display_name, backend, backend_options, timeout …
                      plus the run settings that belong to this agent, e.g.
-                       manager: goal_file, max_rounds, approve_plan, approve_milestones, min_score
-                       critic:  checklist, checklist_nudge, milestone_rounds
+                       manager: goal_file, max_rounds, approve_plan, approve_milestones, min_score, protocol
+                       critic:  checklist, checklist_nudge, milestone_rounds, checkin_every, job_wait
                        worker:  snapshot, fresh_session
     goal.md          manager: the goal (only the manager reads it)
     memory.md, memory/*.md   this project's notes and preferences, added after the system prompt
@@ -138,6 +138,31 @@ Three layers of review, so each layer above reads less. Agents: exactly one `rol
 | gate | me | the manager's summary → **I approve** or send it back (`approve_milestones`) |
 
 Questions go up one level at a time and never stop the run: a worker's question is answered by the critic; a critic reply starting `QUESTIONS FOR …:` is answered by the manager straight away; a manager reply starting `QUESTIONS FOR YOU:` is labelled (Q1, Q2 …) for me while the asker continues with a stated assumption. My answer is relayed to the manager and the critic on their next turn. `NOTE FOR <name>:` in a manager reply (also in my chat with it) is passed to that agent.
+
+**The protocol.** In managed mode orch adds a fixed section, *How this team works*, to every agent's system prompt
+(`orch/prompts/protocol/<role>.md`), after the project's own prompt and before its memory notes. The role
+prompts describe the job and the working style; the protocol is what the framework itself depends on, so it stays
+the same however a project edits its prompts (`protocol: false` turns it off). It sets three things for each role:
+which part of its reply each other party reads, the signals orch acts on, and hard boundaries. The signals:
+
+| signal (start of a line) | written by | what orch does |
+|---|---|---|
+| `QUESTIONS FOR YOU:` | worker → critic, critic → manager, manager → me | records the question (Q1, Q2 …) and passes it up one level; the run does not wait |
+| `NOTE FOR <name>:` | manager (also in the chat), critic (`NOTE FOR YOU:`) | passes that block to the named agent's next turn |
+| `## Review for <worker>` | critic | only what follows reaches the worker (without checklist, verdict and signals) |
+| `- [x]` / `- [ ]` + `VERDICT: PASS/FAIL` | critic | a PASS counts only when every item is `[x]` |
+| `For <critic>:` | manager, in reviews and answers | only that part reaches the critic |
+| `Overall score: x/5` + `DECISION: ACCEPT/REVISE` | manager, milestone review | accepts the milestone or sends it back |
+| `WAITING FOR YOU:` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's pauses the run |
+| `DECISION: PAUSE/CONTINUE` | manager, on a proposed pause (also in the chat) | pauses without spending rounds, or sends the critic what to do meanwhile |
+| `WAITING ON JOB: pid …` | worker | holds the critic's review until that process exits |
+
+The boundaries: the manager doesn't edit files and keeps milestones, rubric and scores to itself; the critic only
+reviews (no edits, no fixes written for the worker, no wider scope); the worker changes only what the work needs,
+commits nothing unless asked, writes no notes or status files, caps and pilots anything that spends, never starts
+a job twice and never keeps its turn open to wait. Protocol reminders that matter most are also repeated in the
+per-turn messages (for example the pause in every review request), because an agent deep in a long session follows
+the message in front of it more reliably than its system prompt.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
 answers and notes, messages I add at a gate, and the manager's answers to the critic, each with who decided and
@@ -244,12 +269,28 @@ orch status orch-runs --latest                 # one line per monitor
 orch show orch-runs -m api-feature             # rounds, verdicts, one line per turn
 orch show orch-runs/api-feature --turn r002-t01   # one turn in full: input, output, stderr
 orch inject orch-runs/api-feature "Use pytest, not unittest" --to implementer
-orch stop orch-runs/api-feature                # stops after terminating the current turn
+orch stop orch-runs/api-feature                # stops after terminating the current turn (resume re-sends it)
 orch run my.yaml -m api-feature --resume       # continue the same run, same agent sessions
 orch report orch-runs                          # regenerate HTML
 ```
 
 Pressing Ctrl-C in `orch run` stops every monitor cleanly: running agent processes are terminated and each run is marked `stopped`, so `--resume` can pick it up later.
+
+## Running a long project: lessons from real runs
+
+- **Two round limits.** `milestone_rounds` (critic) is per milestone: at the limit the manager reviews anyway.
+  `max_rounds` (manager) counts every round of the whole run; keep it well above `milestone_rounds`, or the run
+  stops in the middle of a milestone (orch warns about this, and the stop message says which limit was hit).
+  Raising either takes effect on `orch run --resume`.
+- **Changing models or backends mid-run** (for cost, or Codex ↔ Claude): edit the agent's `agent.yaml` and resume.
+  A changed backend can't resume the old session, so the agent starts a new one with a handover note.
+- **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` sends it again in the same session,
+  so a restart costs at most one repeated turn. The cheapest moment is just after a worker turn ends with nothing
+  waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
+- **Cost.** Long sessions get dearer per turn because each turn re-reads the history: use `fresh_session:
+  milestone` for workers, a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
+- **Idle rounds.** If the work waits on people, make sure the pause gets used (the board's *Needs you* shows it);
+  a worker that keeps answering "holding" is spending rounds.
 
 ## Layout
 

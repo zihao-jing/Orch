@@ -828,6 +828,18 @@ class TestManaged(unittest.TestCase):
         self.assertIn("finish the dry run", ts[i_ack + 1]["input"])
         self.assertEqual([x["kind"] for x in rec.state["managed"]["gates"]].count("wait"), 1)
 
+    def test_protocol_is_added_to_every_role_and_can_be_turned_off(self):
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        sp = {t["agent"]: t["system_prompt"] for t in turns(rec)}
+        self.assertIn("`DECISION: PAUSE`", sp["boss"])
+        self.assertIn("## Review for Sam", sp["critic"])  # names filled in
+        self.assertIn("WAITING ON JOB:", sp["writer"])
+        self.assertNotIn("{{", sp["writer"])
+        off = managed(name="n", controller={"protocol": False}, mgr={"milestones": 1})
+        (self.tmp / "b").mkdir()
+        cfg = load_config(make_cfg(self.tmp / "b", [off]))
+        self.assertTrue(all(not a.protocol_path for a in cfg.monitor("n").agents))
+
     def test_managed_validation(self):
         m = managed()
         m["agents"] = m["agents"][1:]
@@ -853,7 +865,7 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual(mon.name, self.tmp.name.strip("-.") or mon.name)
         self.assertEqual((mon.workspace, cfg.output_dir), (str(self.tmp.resolve()), str((d / "runs").resolve())))
         c = mon.controller
-        self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 4, 20))
+        self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 10, 60))
         self.assertTrue(mon.goal.startswith("Describe what you want done"))
         self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker")])
         critic = mon.agent("critic")
@@ -867,7 +879,8 @@ class TestProjectFolder(unittest.TestCase):
         (d / "agents/critic/memory/style.md").write_text("British spelling.")
         self.assertTrue(critic.current_system_prompt().endswith("Things to keep in mind:\n\nPrefer short reviews.\n\nBritish spelling."))
         (d / "agents/worker/system_prompt.md").write_text("You are {{worker}}; {{critic}} reviews you.")
-        self.assertEqual(load_config(str(d)).monitors[0].agent("worker").current_system_prompt(), "You are the worker; the critic reviews you.")
+        wsp = load_config(str(d)).monitors[0].agent("worker").current_system_prompt()
+        self.assertTrue(wsp.startswith("You are the worker; the critic reviews you.\n\n# How this team works"), wsp[:120])
 
     def test_conflicting_workflow_setting_and_run(self):
         cli.main(["init", str(self.tmp), "--project"])
