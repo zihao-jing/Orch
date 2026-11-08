@@ -408,7 +408,7 @@ class TestManaged(unittest.TestCase):
     def test_worker_timeout_is_not_fatal(self):
         m = managed(mgr={"milestones": 1})
         m["agents"][2].update(backend="command", timeout=0.5, retries=2, backend_options={
-            "command": [sys.executable, "-c", "import sys,time; p=sys.stdin.read(); time.sleep(5) if 'brief' not in p and 'time limit' not in p else 0; print('done')"]})
+            "command": [sys.executable, "-c", "import sys,time; p=sys.stdin.read(); time.sleep(5) if 'brief' not in p and 'ran past the time limit' not in p else 0; print('done')"]})
         status, rec = run(make_cfg(self.tmp, [m]))
         ts = turns(rec)
         w = [t for t in ts if t["agent"] == "writer"]
@@ -833,12 +833,33 @@ class TestManaged(unittest.TestCase):
         sp = {t["agent"]: t["system_prompt"] for t in turns(rec)}
         self.assertIn("`DECISION: PAUSE`", sp["boss"])
         self.assertIn("## Review for Sam", sp["critic"])  # names filled in
-        self.assertIn("WAITING ON JOB:", sp["writer"])
+        self.assertIn("NO WAIT: pid", sp["writer"])
         self.assertNotIn("{{", sp["writer"])
         off = managed(name="n", controller={"protocol": False}, mgr={"milestones": 1})
         (self.tmp / "b").mkdir()
         cfg = load_config(make_cfg(self.tmp / "b", [off]))
         self.assertTrue(all(not a.protocol_path for a in cfg.monitor("n").agents))
+
+    def test_orch_finds_a_job_the_worker_left_running(self):
+        work = {"spawn": "sleep 2.31", "replies": {"work": ["Started the full run in the background.",
+                                                           "The run finished; results are in out.csv."]}}
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=work)]))
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        seq = [(t["agent"], t["purpose"]) for t in ts if t["purpose"] in ("work", "verify")]
+        self.assertEqual(seq[:3], [("writer", "work"), ("writer", "work"), ("critic", "verify")])
+        done = [t for t in ts if t["purpose"] == "work"][1]["input"]
+        self.assertIn("sleep 2.31", done)
+        self.assertIn("has finished", done)
+
+    def test_ignored_commands_are_not_waited_on(self):
+        work = {"spawn": "sleep 4.37", "replies": {"work": ["Started a helper."]}}
+        status, rec = run(make_cfg(self.tmp, [managed(controller={"job_ignore": ["sleep 4.37"]},
+                                                      mgr={"milestones": 1}, worker=work)]))
+        subprocess.run(["pkill", "-f", "sleep 4.37"])
+        self.assertEqual(status, "completed")
+        seq = [(t["agent"], t["purpose"]) for t in turns(rec) if t["purpose"] in ("work", "verify")]
+        self.assertEqual(seq[:2], [("writer", "work"), ("critic", "verify")])
 
     def test_managed_validation(self):
         m = managed()
@@ -865,7 +886,7 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual(mon.name, self.tmp.name.strip("-.") or mon.name)
         self.assertEqual((mon.workspace, cfg.output_dir), (str(self.tmp.resolve()), str((d / "runs").resolve())))
         c = mon.controller
-        self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 10, 60))
+        self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 25, 100))
         self.assertTrue(mon.goal.startswith("Describe what you want done"))
         self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker")])
         critic = mon.agent("critic")

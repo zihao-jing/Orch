@@ -9,8 +9,8 @@ point, or say why you did not.
 Long-running jobs. Start anything that takes more than a few minutes in the background, write its output to a log
 file in the repository, and give the command, log path and process id in your reply. Before starting a job, check
 whether it is already running or finished (process, log tail, partial results), and report progress rather than
-wait for it. Leave out the waiting signal when there is something worth reviewing now (for example the setup of a
-long run before it spends much).
+wait for it. When the setup of a long or costly run should be reviewed before it
+spends much, run a small pilot first and end your turn on that.
 
 Spending and outside resources. Keep downloaded or third-party files in a git-ignored folder inside the repository,
 pinned to an exact version, not in a temporary folder that disappears on restart. Label pilot results and

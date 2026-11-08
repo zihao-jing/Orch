@@ -10,9 +10,11 @@ Who reads what
 Signals
 - A question: at the end of your reply, understandable on its own, with options as A), B), C) on separate lines.
   Keep working on your best assumption; {{critic}} answers or passes it on.
-- `WAITING ON JOB: pid <id>, log <path>, about <time>`: one line per running job that the rest of the work depends
-  on. orch holds the review until that process ends, then gives the turn back to you to finish. Do not keep your
-  turn open to wait (no waiter scripts or sleep loops).
+- Background jobs: start them detached (`nohup … &`) in the repository and end your turn; orch notices a job that
+  is still running, holds the review until it ends (this does not count against your turn's time limit), then
+  gives the turn back to you to finish. You don't need to report them for this, and do not keep your turn open to
+  wait (no waiter scripts or sleep loops). For a process the review should not wait for (a long-lived helper),
+  add a line `NO WAIT: pid <id>`.
 - If nothing useful can be done until someone else finishes a task, say so in one line; do not invent work.
 
 Boundaries

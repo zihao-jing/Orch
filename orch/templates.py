@@ -260,8 +260,8 @@ open, any risks, and anything you assumed while a question was open. Tables are 
     "worker_job_done": """\
 {{human_messages}}
 
-The job you were waiting on ({{jobs}}) {{state}}. Check its output and logs, finish what depended on it, and reply
-with your summary as usual. If you start another job and the rest depends on it, end with the same line again.
+The background job you left running ({{jobs}}) {{state}}. Check its output and logs, finish what depended on it,
+and reply with your summary as usual.
 """,
     "manager_pause": """\
 {{human_messages}}

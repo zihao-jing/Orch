@@ -155,12 +155,12 @@ which part of its reply each other party reads, the signals orch acts on, and ha
 | `Overall score: x/5` + `DECISION: ACCEPT/REVISE` | manager, milestone review | accepts the milestone or sends it back |
 | `WAITING FOR YOU:` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's pauses the run |
 | `DECISION: PAUSE/CONTINUE` | manager, on a proposed pause (also in the chat) | pauses without spending rounds, or sends the critic what to do meanwhile |
-| `WAITING ON JOB: pid …` | worker | holds the critic's review until that process exits |
+| (none: orch finds detached jobs itself) / `NO WAIT: pid …` | worker | holds the critic's review until a job the worker left running exits / not for that one |
 
 The boundaries: the manager doesn't edit files and keeps milestones, rubric and scores to itself; the critic only
 reviews (no edits, no fixes written for the worker, no wider scope); the worker changes only what the work needs,
 commits nothing unless asked, writes no notes or status files, caps and pilots anything that spends, never starts
-a job twice and never keeps its turn open to wait. Protocol reminders that matter most are also repeated in the
+a job twice and never keeps its turn open to wait (orch waits for its jobs between turns). Protocol reminders that matter most are also repeated in the
 per-turn messages (for example the pause in every review request), because an agent deep in a long session follows
 the message in front of it more reliably than its system prompt.
 
@@ -185,11 +185,14 @@ critic what to do in the meantime.
 The manager can also pause the work itself, in any reply or in the board chat, with its own `WAITING FOR YOU:`
 paragraph saying what I need to do; it takes effect before the next round.
 
-**Waiting for the worker's own job.** If the worker ends its turn while the rest depends on a background job, it ends
-its reply with `WAITING ON JOB: pid <id>, log <path>`. While that process is alive the critic's review is held (no
-review spent on unfinished work); when it exits, the worker gets the turn back to finish, and the critic then reviews
-both replies together. `job_wait` (seconds, default 21600; 0 = never wait) caps the wait, after which the worker is
-asked for progress. **Review now** on the board skips the wait. A line whose pid has already exited is ignored.
+**Waiting for the worker's own jobs.** orch finds them itself: a process that started during the worker's turn, is
+still running after the turn ends, runs inside the workspace and was detached from the agent (`nohup … &`, so its
+parent is the system's init process) is a job; processes of mine, an editor or a terminal never count. While a job
+runs, the critic's review is held (no review spent on unfinished work, and none of it counts against the worker's
+turn time limit); when it exits, the worker gets the turn back to finish, and the critic then reviews both replies
+together. `job_wait` (seconds, default 21600; 0 = off) caps the wait, after which the worker is asked for progress;
+`job_ignore` (regexes on the command line) and a worker line `NO WAIT: pid <id>` exclude long-lived helpers.
+**Review now** on the board skips the wait. A worker may still name a job with `WAITING ON JOB: pid <id>`.
 
 **The board** — `orch run cfg.yaml --serve [--open]`, or `orch serve cfg.yaml` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Without the board: `orch approve <run|cfg> [--note … | --revise …]`, `orch answer <run|cfg> Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
 

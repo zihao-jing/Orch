@@ -477,6 +477,8 @@ class MockBackend(Backend):
         if n in [int(x) for x in o.get("fail_turns", [])]:
             return TurnResult("error", "", sid, 1, "mock: simulated failure", ["mock"], {"turn": n})
         script = o.get("script")
+        if o.get("spawn") and purpose == "work" and n == 1:  # tests: leave a detached job running in the workspace
+            subprocess.run(["sh", "-c", f"nohup {o['spawn']} >/dev/null 2>&1 &"], cwd=req.cwd or None)
         by_purpose = (o.get("replies") or {}).get(purpose)  # managed dry runs: {"purpose": [reply, ...]}
         if by_purpose:
             k = self._counts.setdefault(f"{sid}:{purpose}", 0) + 1

@@ -310,7 +310,7 @@ function renderNeeds(mg){
   let h = '<div class="card needs"><h2>' + (g || mine.length ? 'Needs you' : 'Waiting for a job') + '</h2>';
   if (job){
     const ls = Object.entries(job.agents||{}).map(([a, j]) => `<li><b>${esc(called(a))}</b>: ${inline((j.lines||[]).join('; '))}</li>`).join('');
-    h += `<div style="font-weight:600;margin-bottom:4px">⏳ The worker is waiting on its job, so the critic's review is held until it ends (since ${tm(job.since)})</div>
+    h += `<div style="font-weight:600;margin-bottom:4px">⏳ A job the worker started is still running, so the critic's review is held until it ends (since ${tm(job.since)})</div>
       <ul>${ls}</ul><div class="row"><button data-job="1">▶ Review now, don't wait</button></div>`;
   }
   if (g){

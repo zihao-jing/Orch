@@ -29,6 +29,8 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import jobs as _jobs
+
 from .backends import StopRequested
 from .config import AgentConfig
 from .controller import MonitorRunner, checklist_state, parse_options, resolve_choice, strip_checklist, \
@@ -37,6 +39,7 @@ from .recorder import now_iso
 
 _WAIT = r"^\W*WAITING\s+(?:FOR|ON)\s+([^:\n]+?)\s*:"  # the critic: nothing to do until a human task is done
 _JOB = r"^\W*WAITING\s+ON\s+(?:A\s+|THE\s+|MY\s+)?(?:JOBS?|PROCESS(?:ES)?|RUNS?)\b[^\n]*"  # the worker: a job still runs
+_NO_WAIT = r"^\W*NO\s+WAIT\b[^\n]*"  # the worker: a process it started that the review should not wait for
 
 
 _DEC_PAUSE = re.compile(r"\n*\s*DECISION:\s*\**\s*PAUSE\**\s*", re.I)
@@ -729,6 +732,7 @@ class ManagedRunner(MonitorRunner):
                 prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
             items.append((w, prompt, "work"))
         extra = {"milestone": mg.get("ms", 0), "milestone_round": mg["ms_round"]}
+        self._procs = _jobs.snapshot() if c.job_wait > 0 else {}  # to find jobs the worker leaves running
         recs = self._stage(items, rnd, extra)
         if self.should_stop() or any(r["status"] == "stopped" for r in recs):
             raise StopRequested()  # keep the round open; `orch run --resume` redoes it in the same session
@@ -762,12 +766,27 @@ class ManagedRunner(MonitorRunner):
             return "failed"
         jobs: Dict[str, Dict[str, Any]] = {}
         if c.job_wait > 0:
+            outs = "\n".join(r.get("output") or "" for r in recs)
+            skip = {int(x) for ln in re.findall(_NO_WAIT, outs, re.I | re.M) for x in re.findall(r"\d+", ln)}
+            found = [j for j in _jobs.detect(getattr(self, "_procs", {}) or {},
+                                             {self.mon.agent(r["agent"]).working_dir or self.mon.working_dir for r in recs},
+                                             c.job_ignore)
+                     if j["pid"] not in skip]  # orch finds them itself
+            self._procs = {}
             for r in recs:
-                lines = re.findall(_JOB, r.get("output") or "", re.I | re.M)
-                pids = sorted({int(x) for ln in lines for x in re.findall(r"\bpids?\D{0,3}(\d+)", ln, re.I)})
+                lines = re.findall(_JOB, r.get("output") or "", re.I | re.M)  # still honoured when a worker says so
+                pids = sorted({int(x) for ln in lines for x in re.findall(r"\bpids?\D{0,3}(\d+)", ln, re.I)} - skip)
                 live = [x for x in pids if pid_alive(x)]
                 if live:
-                    jobs[r["agent"]] = {"pids": live, "lines": [ln.strip() for ln in lines]}
+                    jobs[r["agent"]] = {"pids": live, "lines": [ln.strip() for ln in lines], "cmds": {}}
+            for j in found:
+                if any(j["pid"] in x["pids"] for x in jobs.values()):
+                    continue
+                for r in recs[:1] if len(recs) == 1 else recs:
+                    x = jobs.setdefault(r["agent"], {"pids": [], "lines": [], "cmds": {}})
+                    x["pids"].append(j["pid"])
+                    x["lines"].append(f"pid {j['pid']}: {_clip(str(j['command']), 160)}")
+                    x["cmds"][str(j["pid"])] = j["command"]
         if jobs:
             mg["job"] = {"agents": jobs, "since": now_iso(), "since_ts": time.time()}
             mg["work_earlier"] = {a: x.get("output") or "" for a, x in mg["work"].items()}
@@ -794,7 +813,8 @@ class ManagedRunner(MonitorRunner):
                 if mg.pop("job_release", False):
                     why = "released"
                     break
-                if not any(pid_alive(x) for j in agents.values() for x in j["pids"]):
+                if not any(_jobs.alive(x, (j.get("cmds") or {}).get(str(x), "")) for j in agents.values()
+                           for x in j["pids"]):
                     break
                 if time.time() - float(job.get("since_ts") or time.time()) > c.job_wait:
                     why = "timeout"
@@ -817,6 +837,7 @@ class ManagedRunner(MonitorRunner):
             state = (f"has finished" if why == "finished" else f"is still running after {hours:.1f} h")
             items.append((w, self.mtpl("worker_job_done", jobs="; ".join(j["lines"]), state=state, human_messages=""),
                           "work"))
+        self._procs = _jobs.snapshot() if c.job_wait > 0 else {}
         recs = self._stage(items, rnd, {"milestone": mg.get("ms", 0), "milestone_round": mg.get("ms_round", 0)})
         if self.should_stop() or any(r["status"] == "stopped" for r in recs):
             mg["job"] = {**job, "agents": agents}  # wait again (or go straight on) after the restart
