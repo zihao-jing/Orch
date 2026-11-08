@@ -107,7 +107,7 @@ A project keeps its agents in `<project>/.orch/agents/`, one folder per agent; t
                      plus the run settings that belong to this agent, e.g.
                        manager: goal_file, max_rounds, approve_plan, approve_milestones, min_score
                        critic:  checklist, checklist_nudge, milestone_rounds
-                       worker:  snapshot
+                       worker:  snapshot, fresh_session
     goal.md          manager: the goal (only the manager reads it)
     memory.md, memory/*.md   this project's notes and preferences, added after the system prompt
                      ("Things to keep in mind:"; HTML comments are ignored)
@@ -138,6 +138,18 @@ Three layers of review, so each layer above reads less. Agents: exactly one `rol
 | gate | me | the manager's summary → **I approve** or send it back (`approve_milestones`) |
 
 Questions go up one level at a time and never stop the run: a worker's question is answered by the critic; a critic reply starting `QUESTIONS FOR …:` is answered by the manager straight away; a manager reply starting `QUESTIONS FOR YOU:` is labelled (Q1, Q2 …) for me while the asker continues with a stated assumption. My answer is relayed to the manager and the critic on their next turn. `NOTE FOR <name>:` in a manager reply (also in my chat with it) is passed to that agent.
+
+**Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
+answers and notes, messages I add at a gate, and the manager's answers to the critic, each with who decided and
+when (S1, S2 …; where two say different things, the later one holds). The manager's kickoff, the critic's brief
+and a fresh worker session get the whole list at the start of every milestone, so decisions don't have to survive
+a chain of relayed notes. The board shows it under **Decisions**. A run started before the register existed has it
+rebuilt from its history on resume.
+
+**Fresh worker sessions.** `fresh_session: milestone` on an agent starts it in a new session when each milestone
+starts; its work is in the files, and the critic's brief plus the register tell it what it needs. A long session
+re-reads its whole history on every step, so this keeps worker turns from getting slower and dearer as a run goes
+on. The manager and critic are best left in one session: they are cheap, and they need to remember the decisions.
 
 **The board** — `orch run cfg.yaml --serve [--open]`, or `orch serve cfg.yaml` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Without the board: `orch approve <run|cfg> [--note … | --revise …]`, `orch answer <run|cfg> Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
 

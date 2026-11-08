@@ -109,6 +109,13 @@ _NOTE_STOP = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,}|#{1,6}\s|\W*(?:NOTES?|QUESTI
                         re.I)
 
 
+def _clip(text: str, limit: int) -> str:
+    """The start of a text, cut at a word, with a pointer to the rest."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:") + " … (in full in the decisions file)"
+
+
 def note_blocks(text: str, pattern: str, to_end: bool = False) -> List[Tuple[str, str]]:
     """[(addressee, note)] for every 'NOTE FOR name: ...'. A note is its first paragraph plus a list it introduces
     ("...:" then bullets); ``to_end`` (a chat reply, where the note comes last) takes everything up to a divider,
@@ -164,6 +171,7 @@ class ManagedRunner(MonitorRunner):
 
     def mtpl(self, name: str, **values: Any) -> str:
         values.setdefault("instructions", self.mon.controller.instructions or "")
+        values.setdefault("decisions", "")
         return self.tpl(name, **{**self.names(), **values})
 
     def has_session(self, a: AgentConfig) -> bool:
@@ -207,6 +215,7 @@ class ManagedRunner(MonitorRunner):
             self.rec.update_session(agent.name, session_id=sid)
 
     def recover_interrupted(self) -> List[Dict[str, Any]]:
+        self.backfill_decisions()
         out = super().recover_interrupted()
         mg = self.mg
         for t in out:  # runs started before `in_work` existed
@@ -296,9 +305,104 @@ class ManagedRunner(MonitorRunner):
         else:
             self.forward(self.manager, self.mtpl("relay_answer_manager", question=short, answer=ans).strip())
             self.forward(self.critic, self.mtpl("relay_answer_critic", question=short, answer=ans).strip())
+        self.decide(ans if via == "conversation" else f"{self.short_question(q['text'])}: {ans}", "you", q["id"])
         self.rec.event("human_answer", qid=q["id"])
         self.rec.progress(f"✅ **{q['id']}** answered by me: {truncate(ans, 300)}")
         self.log(f"  ✓ {q['id']} answered; the answer reaches {self.manager.name} and {self.critic.name} next")
+        self.rec.save()
+
+    # ------------------------------------------------------------------ decisions register
+
+    def decide(self, text: str, by: str, source: str, at: str = "") -> None:
+        """Record something settled: my answers and notes, gate messages, the manager's answers to the critic."""
+        text = (text or "").strip()
+        regs = self.st.setdefault("decisions", [])
+        if not text or any(d["text"] == text for d in regs):
+            return
+        d = {"id": f"S{len(regs) + 1}", "text": truncate(text, 1500), "by": by, "source": source, "at": at or now_iso()}
+        regs.append(d)
+        self.rec.event("decision", id=d["id"], by=by, source=source)
+        self.write_decisions()
+
+    def write_decisions(self) -> None:
+        regs = self.st.get("decisions") or []
+        lines = ["# Decisions", "", "Binding for the whole run; where two say different things, the later one holds.", ""]
+        for d in regs:
+            lines.append(f"## {d['id']} · {d['by']} · {d['at'][:16].replace('T', ' ')} · {d['source']}")
+            lines += ["", d["text"], ""]
+        (self.rec.run_dir / "decisions.md").write_text("\n".join(lines), encoding="utf-8")
+        self.rec.save()
+
+    @staticmethod
+    def short_question(text: str) -> str:
+        """A question as one plain line for the register: no header, no options, no numbering of a single question."""
+        lines = [ln.strip() for ln in (text or "").split("\n")]
+        lines = [ln for ln in lines if ln and not re.match(r"^\W*(QUESTIONS?|NEEDS[_ ]HUMAN)\b", ln, re.I)
+                 and not re.match(r"^[A-H][).]\s", ln)]
+        if sum(1 for ln in lines if re.match(r"^\d+[.)]\s", ln)) <= 1:
+            lines = [re.sub(r"^\d+[.)]\s+", "", ln) for ln in lines]
+        return truncate(re.sub(r"\*\*", "", " ".join(lines)), 400)
+
+    def decisions_text(self) -> str:
+        regs = self.st.get("decisions") or []
+        if not regs:
+            return ""
+        head = self.mtpl("decisions_intro", path=str(self.rec.run_dir / "decisions.md")).strip()
+        body = "\n".join(f"- **{d['id']}** ({d['by']}, {d['at'][:16].replace('T', ' ')}): "
+                         + _clip(d["text"], 500).replace("\n", "\n  ") for d in regs)  # in full in the file
+        return f"{head}\n\n{body}"
+
+    def backfill_decisions(self) -> None:
+        """A run started before the register existed: rebuild it from answers, my notes and gate messages."""
+        if "decisions" in self.st:
+            return
+        self.st["decisions"] = []
+        found = []
+        for q in self.st.get("questions") or []:
+            who = q.get("answered_by")  # only answers from the one asked: an answer to a passed-up question is copied down
+            if q.get("status") == "answered" and q.get("answer") and (
+                    (who == "human" and q.get("to") == "human") or (who == self.manager.name and q.get("to") == self.manager.name)):
+                by = "you" if q["answered_by"] == "human" else self.manager.called
+                text = q["answer"] if q.get("via") == "conversation" else f"{self.short_question(q['text'])}: {q['answer']}"
+                found.append((q.get("answered_at") or q.get("asked_at") or "", text, by, q["id"]))
+        for p in sorted((self.rec.run_dir / "inbox" / "consumed").glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and not data.get("kind") and str(data.get("message", "")).strip():
+                ts = p.name[:15]
+                at = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}T{ts[9:11]}:{ts[11:13]}:{ts[13:15]}" if len(ts) == 15 else ""
+                found.append((at, data["message"], "you", "note to " + ", ".join(data.get("to") or ["all"])))
+        for g in (self.mg.get("gates") or []):
+            if g.get("message"):
+                found.append((g.get("decided_at") or "", f"{g.get('title', 'Gate')}: {g['decision']}. {g['message']}",
+                              "you", "gate"))
+        for at, text, by, src in sorted(found, key=lambda x: x[0]):
+            self.decide(text, by, src, at=at)
+        self.write_decisions()
+
+    def human_text(self, agent: Optional[str], msgs: List[Dict[str, Any]], annotate: bool = False) -> str:
+        for x in msgs:  # my notes are decisions too
+            if agent is None or x["to"] is None or agent in x["to"]:
+                self.decide(x["message"], "you", "note to " + ", ".join(x["to"] or ["all"]))
+        return MonitorRunner.human_text(agent, msgs, annotate)
+
+    def fresh_sessions(self) -> None:
+        """Agents set to `fresh_session: milestone` start each milestone in a new session (once per milestone)."""
+        mg = self.mg
+        if mg.get("fresh_for") == mg.get("ms"):
+            return
+        for a in self.mon.agents:
+            if a.fresh_session == "milestone" and self.has_session(a):
+                sess = self.st["sessions"].get(a.name) or {}
+                prev = {k: v for k, v in sess.items() if k != "previous"}
+                self.rec.update_session(a.name, session_id=None, turns=0, previous=(sess.get("previous") or []) + [prev])
+                self.st.setdefault("fwd", {}).setdefault(a.name, []).insert(
+                    0, self.mtpl("milestone_fresh", cwd=a.working_dir).strip())
+                self.rec.event("fresh_session", agent=a.name, milestone=mg.get("ms"), session_id=sess.get("session_id"))
+                self.log(f"{a.name}: fresh session for milestone {mg.get('ms', 0) + 1}")
+        mg["fresh_for"] = mg.get("ms")
         self.rec.save()
 
     def for_me(self, rest: str) -> str:
@@ -528,14 +632,17 @@ class ManagedRunner(MonitorRunner):
     def ph_kickoff(self, mg: Dict[str, Any]) -> Optional[str]:
         ms = self.cur()
         ms.update(status="active", started_at=now_iso(), started_round=int(self.st.get("round", 0)) + 1)
+        self.fresh_sessions()
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
-                                             milestone=ms["text"], human_messages=""), "kickoff")
+                                             milestone=ms["text"], human_messages="",
+                                             decisions=self.decisions_text()), "kickoff")
         mg.update(note=self.for_critic(self.after_manager(r)), ms_round=0, limit=False, phase="brief")
         return None
 
     def ph_brief(self, mg: Dict[str, Any]) -> Optional[str]:
         v = self.critic
         r = self.say(v, self.mtpl("critic_brief", note=mg.get("note", ""), human_messages="", cwd=v.working_dir,
+                                  decisions=self.decisions_text(),
                                   instructions=self.mon.controller.instructions if not self.has_session(v) else ""), "brief")
         self.worker_feedback(self.clean_critic(r["output"]))
         mg["phase"] = "work"
@@ -565,7 +672,8 @@ class ManagedRunner(MonitorRunner):
         for w in self.workers:
             fb = (mg.get("feedback") or {}).get(w.name) or "Please carry on."
             if not self.has_session(w):
-                prompt = self.mtpl("worker_start", task=w.task or "", feedback=fb, human_messages="", cwd=w.working_dir)
+                prompt = self.mtpl("worker_start", task=w.task or "", feedback=fb, human_messages="", cwd=w.working_dir,
+                                   decisions=self.decisions_text())
             else:
                 prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
             items.append((w, prompt, "work"))
@@ -658,6 +766,7 @@ class ManagedRunner(MonitorRunner):
             self.settle(q, "", "", r["turn_id"], status="passed_up")  # gone up to me; the manager's guess is in `text`
         else:
             self.settle(q, self.manager.name, text, r["turn_id"])
+            self.decide(f"{self.short_question(q['text'])}: {truncate(self.for_critic(text), 1200)}", self.manager.called, q["id"])
         mg.update(answer_text=text, phase="amend")
         return None
 
@@ -733,6 +842,8 @@ class ManagedRunner(MonitorRunner):
             f" — round limit reached ({mg.get('ms_round')} rounds), the manager has not accepted it"
         d = self.wait_gate({"kind": "milestone", "milestone": mg["ms"], "title": f"Milestone {mg['ms'] + 1}: "
                             f"{ms['title']}{why}", "text": ms.get("summary", ""), "turn": ms.get("summary_turn")})
+        if d.get("message"):
+            self.decide(f"Milestone {mg['ms'] + 1} ({ms['title']}): {d['decision']}. {d['message']}", "you", "gate")
         if d["decision"] == "approve":
             if d.get("message"):
                 self.forward(self.manager, d["message"])

@@ -161,6 +161,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
    <div class="card"><h2>Manager ↔ critic</h2><div id="thread"></div></div>
    <div class="card"><h2>Critic ↔ worker, round by round</h2><div id="rounds"></div></div>
    <div class="card"><h2>Questions</h2><div id="qs"></div></div>
+   <div class="card"><h2 id="dec-h">Decisions</h2><div id="decs"></div></div>
   </main>
   <aside class="side">
    <div class="card chat">
@@ -272,7 +273,7 @@ function render(){
   $('title').textContent = D.monitor; setHTML($('status'), stPill(D.status)); $('runid').textContent = D.run_id;
   document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderTiles(mg); renderSteps(mg); renderCharts(mg); renderReport(mg);
-  renderThread(mg); renderRounds(mg); renderQs(); renderChat();
+  renderThread(mg); renderRounds(mg); renderQs(); renderDecisions(); renderChat();
   Object.keys(live).forEach(paintLive);
 }
 
@@ -518,6 +519,18 @@ function renderQs(){
     + (closed.length ? `<details class="tbl"><summary>Settled (${closed.length})</summary>${head + closed.map(row).join('')}</table></div></details>` : ''));
 }
 
+function renderDecisions(){  // the register: everything settled, newest first; the agents get it in full each milestone
+  const ds = (D.decisions||[]).slice().reverse();
+  $('dec-h').textContent = 'Decisions' + (ds.length ? ` · ${ds.length} · binding, the later one holds` : '');
+  if (!ds.length){ setHTML($('decs'), '<div class="empty">Nothing settled yet. Your answers and notes, gate messages and the manager\'s answers to the critic are listed here and given to the agents in full at the start of each milestone.</div>'); return; }
+  setHTML($('decs'), ds.map(d => `<details class="fold" data-d="${esc(d.id)}"${openDecs.has(d.id) ? ' open' : ''}><summary>
+    <span class="mono">${esc(d.id)}</span><span class="mute">${tm(d.at)}</span><b>${esc(d.by === 'you' ? 'you' : called(d.by))}</b>
+    <span class="pill">${esc(d.source)}</span><span class="pv">${esc(preview(d.text))}</span></summary>
+    <div class="fb"><div class="md">${md(d.text)}</div></div></details>`).join(''));
+}
+const openDecs = new Set();
+$('decs').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.d) return;
+  d.open ? openDecs.add(d.dataset.d) : openDecs.delete(d.dataset.d); }, true);
 function renderChat(){
   const cl = $('chatlog'), atBottom = cl.scrollHeight - cl.scrollTop - cl.clientHeight < 40;
   $('chat-h').textContent = 'Talk to ' + who('manager');

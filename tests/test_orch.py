@@ -662,6 +662,53 @@ class TestManaged(unittest.TestCase):
         prev = rec3.state["sessions"]["writer"]["previous"][0]
         self.assertEqual((prev["backend"], prev["session_id"]), ("claude", "claude-xyz"))
 
+    def test_decisions_register_and_fresh_worker_session_per_milestone(self):
+        m = managed(critic={"replies": {"brief": [
+            "QUESTIONS FOR YOU:\n1. Should the tables use percentages?\nA) yes\nB) no\n\nAssuming A.\n\n"
+            "## Review for Sam\nStart with the tables."]}})
+        m["agents"][2]["fresh_session"] = "milestone"
+        status, rec = run(make_cfg(self.tmp, [m]))
+        self.assertEqual(status, "completed")
+        regs = rec.state["decisions"]
+        self.assertEqual((regs[0]["id"], regs[0]["by"], regs[0]["source"]), ("S1", "Alex", "Q1"))
+        self.assertIn("percentages", regs[0]["text"])
+        self.assertTrue((rec.run_dir / "decisions.md").read_text().startswith("# Decisions"))
+        ts = turns(rec)
+        briefs = [t for t in ts if t["purpose"] == "brief"]
+        self.assertNotIn("Decisions so far", briefs[0]["input"])
+        self.assertIn("Decisions so far", briefs[1]["input"])  # milestone 2 starts with the whole register
+        self.assertIn("**S1** (Alex", briefs[1]["input"])
+        w2 = [t for t in ts if t["agent"] == "writer" and t.get("milestone") == 1]
+        self.assertFalse(w2[0]["resumed_session"])  # a fresh worker session for the new milestone
+        self.assertIn("fresh conversation", w2[0]["input"])
+        self.assertIn("Decisions so far", w2[0]["input"])
+        self.assertTrue(all(t["resumed_session"] for t in w2[1:]))
+        self.assertEqual(len(rec.state["sessions"]["writer"]["previous"]), 1)
+
+    def test_decisions_backfilled_on_resume(self):
+        from orch.managed import ManagedRunner
+        from orch.recorder import Recorder
+        cfg = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        mon = cfg.monitor("m")
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        st = json.loads(json.dumps(rec.state))
+        st.pop("decisions", None)
+        st["questions"] = [{"id": "Q1", "from": "boss", "to": "human", "text": "QUESTIONS FOR YOU:\n1. Bold headers?",
+                            "status": "answered", "answered_by": "human", "answer": "yes", "answered_at": "2026-01-01T10:00:00"}]
+        st.update(status="running")
+        st["managed"]["phase"] = "done"
+        rec2 = Recorder.create(str(self.tmp / "out"), "m", mon.snapshot())
+        rec2.state.update(st)
+        rec2.save()
+        (rec2.run_dir / "inbox" / "consumed").mkdir(parents=True)
+        (rec2.run_dir / "inbox" / "consumed" / "20260101-090000-1-note.json").write_text(
+            json.dumps({"to": ["critic"], "message": "Use British spelling."}))
+        r = ManagedRunner(mon, threading.Event(), resume=True, log=lambda s: None)
+        r.rec = rec2
+        r.backfill_decisions()
+        self.assertEqual([(d["id"], d["by"], d["text"]) for d in rec2.state["decisions"]],
+                         [("S1", "you", "Use British spelling."), ("S2", "you", "Bold headers?: yes")])
+
     def test_managed_validation(self):
         m = managed()
         m["agents"] = m["agents"][1:]

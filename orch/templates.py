@@ -181,6 +181,8 @@ Please send me the updated milestone list in the same form.
     "manager_kickoff": """\
 {{human_messages}}
 
+{{decisions}}
+
 Milestone {{n}} of {{total}} is next: {{milestone}}
 
 Please write the instruction that gets {{critic}} started on it: what is needed, what matters most and what to
@@ -222,6 +224,8 @@ I will pass on your reply as it is.
 {{instructions}}
 
 {{human_messages}}
+
+{{decisions}}
 
 {{note}}
 
@@ -282,6 +286,8 @@ enough, including anything you need me to do.
 
 {{feedback}}
 
+{{decisions}}
+
 {{human_messages}}
 
 The repository is at `{{cwd}}`.
@@ -293,6 +299,12 @@ The repository is at `{{cwd}}`.
 """,
     "worker_timeout": "Your last turn ran past the time limit and was stopped. Check where things stand (running "
                       "jobs, logs, partial results) before you continue.",
+    "milestone_fresh": "We are starting a new part of the work, so this is a fresh conversation. Everything done so "
+                       "far is in the repository at `{{cwd}}`: read the relevant files, logs and any running jobs "
+                       "before you change anything, and carry on from there.",
+    # the decisions register: everything settled so far, given in full when a milestone starts
+    "decisions_intro": "Decisions so far. They are binding; where two say different things, the later one holds. "
+                       "The list is kept up to date in `{{path}}`.",
     "turn_interrupted": "Your last turn was cut off when the run was restarted, so here is the same message "
                         "again. Pick up from where you got to rather than starting over: check what you already "
                         "did (files, running jobs, logs) and don't restart a job that is still running.",

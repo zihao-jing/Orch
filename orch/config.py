@@ -48,6 +48,7 @@ class AgentConfig:
     memory_files: List[str] = field(default_factory=list)  # notes/preferences (files or folders of .md)
     memory_heading: str = "Things to keep in mind:"
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
+    fresh_session: str = ""  # "milestone": start a new session when each milestone starts (managed mode)
 
     @property
     def called(self) -> str:
@@ -257,10 +258,13 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
     working_dir = _expand(wd, Path(mon_wd)) if wd else mon_wd
     known = {"name", "role", "description", "system_prompt", "task", "backend", "backend_options",
              "working_dir", "timeout", "retries", "env", "reviews", "feedback_to", "display_name",
-             "memory_files", "memory_heading"}
+             "memory_files", "memory_heading", "fresh_session"}
     unknown = set(merged) - known
     if unknown:
         raise ConfigError(f"{where} ({name}): unknown keys: {', '.join(sorted(unknown))}")
+    fresh = str(merged.get("fresh_session", "") or "").strip().lower()
+    if fresh not in ("", "never", "milestone"):
+        raise ConfigError(f"{where} ({name}): fresh_session must be 'milestone' or 'never'")
     return AgentConfig(
         name=name,
         role=role,
@@ -279,6 +283,7 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
         system_prompt_path=sp_path,
         memory_files=[_expand(x, base) for x in _as_list(merged.get("memory_files"))],
         memory_heading=str(merged.get("memory_heading", AgentConfig.memory_heading) or ""),
+        fresh_session="" if fresh == "never" else fresh,
     )
 
 

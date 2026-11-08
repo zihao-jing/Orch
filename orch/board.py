@@ -100,6 +100,7 @@ class Board:
             "cost": total_cost, "turn_counts": st.get("turn_counts"), "updated_at": st.get("updated_at"),
             "started_at": st.get("started_at"), "error": st.get("error"),
             "managed": st.get("managed") or {}, "questions": st.get("questions") or [],
+            "decisions": st.get("decisions") or [],
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
             "chat": chat, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
             "min_score": (cfg.get("controller") or {}).get("min_score"),
