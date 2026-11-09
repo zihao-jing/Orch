@@ -32,7 +32,7 @@ from .report import checklist_items, turn_costs
 from .templates import render
 
 _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
-    "plan": ("manager", "human"), "kickoff": ("manager", "critic"), "answer": ("manager", "critic"),
+    "plan": ("manager", "human"), "kickoff": ("manager", "critic"), "restart": ("manager", "critic"), "answer": ("manager", "critic"),
     "review": ("manager", "human"), "feedback": ("manager", "critic"), "brief": ("critic", "worker"),
     "verify": ("critic", "worker"), "amend": ("critic", "worker"), "guidance": ("critic", "worker"),
     "report": ("critic", "manager"), "work": ("worker", "critic"),

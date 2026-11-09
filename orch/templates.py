@@ -231,7 +231,8 @@ inside `<message to="{{critic}}">…</message>`.
 {{note}}
 
 Please turn this into concrete instructions for {{worker}}: what to change, in what order, and what you
-will check. The repository is at `{{cwd}}`.
+will check, with whatever settled matters the work must keep to ({{worker}} hears about them only from you). The
+repository is at `{{cwd}}`.
 """,
     "critic_review": """\
 {{human_messages}}
@@ -345,6 +346,27 @@ The repository is at `{{cwd}}`.
     # the decisions register: everything settled so far, given in full when a milestone starts
     "decisions_intro": "Decisions so far. They are binding; where two say different things, the later one holds. "
                        "The list is kept up to date in `{{path}}`.",
+    "worker_fresh": "This is a fresh conversation: everything done so far is in the repository at `{{cwd}}`. "
+                    "Read what you need there before you change anything.\n\n{{state}}\n\nMy instructions follow.",
+    "manager_restart": """\
+{{human_messages}}
+
+We are picking the work up again in fresh conversations, so {{critic}} starts without the earlier history. Write
+{{critic}} a short instruction for what to continue with now: where the current work stands, what comes next, and
+what settled matters it must keep to. A few sentences; {{critic}} works out the details and keeps its own checklist.
+Put it inside `<message to="{{critic}}">…</message>`; outside it, one line for me is enough.
+""",
+    "critic_restart": """\
+{{human_messages}}
+
+{{instruction}}
+
+Please tell {{worker}} what to do next: concrete steps, somewhat more detailed than this, and what you will check.
+{{worker}} also starts a fresh conversation and knows only what you tell it, so include whatever settled matters
+the work must keep to. The repository is at `{{cwd}}`.
+""",
+    "decisions_pointer": "Everything decided so far is in `{{path}}` (the later entry holds where two differ); look "
+                         "one up there when you need it.",
     "decisions_intro_worker": "Decisions so far. They are binding; where two say different things, the later one holds.",
     "turn_interrupted": "Your last turn was cut off when the run was restarted, so here is the same message "
                         "again. Pick up from where you got to rather than starting over: check what you already "

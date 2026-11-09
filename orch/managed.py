@@ -365,18 +365,58 @@ class ManagedRunner(MonitorRunner):
             lines = [re.sub(r"^\d+[.)]\s+", "", ln) for ln in lines]
         return truncate(re.sub(r"\*\*", "", " ".join(lines)), 400)
 
+    @staticmethod
+    def topic(text: str, limit: int = 140) -> str:
+        """What a question is about, in one short line: its first sentence that asks something."""
+        flat = re.sub(r"\*\*|`", "", " ".join(ln.strip() for ln in (text or "").split("\n")
+                                            if ln.strip() and not re.match(r"^\W*(QUESTIONS?|NEEDS[_ ]HUMAN)\b", ln, re.I)
+                                            and not re.match(r"^\W*[A-H][).]\s", ln)))
+        flat = re.sub(r"^\s*(\d+[.)]\s+)?(What's being decided|Question|Decision)\s*:\s*", "", flat, flags=re.I)
+        ask = re.search(r"[^.?!]*\?", flat)
+        line = (ask.group(0) if ask else re.split(r"(?<=[.!])\s", flat, maxsplit=1)[0]).strip()
+        return truncate(line, limit)
+
+    def decision_body(self, d: Dict[str, Any]) -> Tuple[str, str]:
+        """(topic, decision) of a register entry. Entries from a question were saved as "question: answer", and a
+        long question pushed the answer out of a clipped entry, so the answer is taken from the question itself."""
+        src = str(d.get("source") or "")
+        q = next((x for x in self.st.get("questions") or [] if x.get("id") == src), None) if src.startswith("Q") else None
+        if q:
+            ans = (q.get("answer") or "").strip()
+            if not ans:
+                pre = self.short_question(q.get("text", "")) + ": "
+                ans = d["text"][len(pre):] if d["text"].startswith(pre) else d["text"].rsplit("?: ", 1)[-1]
+            return self.topic(q.get("text", "")), ans.strip()
+        return "", d["text"]
+
     def decisions_text(self, a: Optional[AgentConfig] = None) -> str:
-        """The register for one agent. The worker gets the decisions without who made them: it knows only the
-        critic, so "the manager" or "you" there would bring in roles it should not have to reason about."""
+        """The register as one agent should read it.
+        - Each entry is the decision itself, with a one-line topic when it answered a question.
+        - Who decided is named from the reader's side: the manager reads me as "me" and itself as "you"; the critic
+          and the worker get no attribution (to them a decision simply holds).
+        - The worker and critic skip my milestone gate messages (milestones are between the manager and me); the
+          worker also skips the pause messages and the pointer to the file, which names who decided."""
         regs = self.st.get("decisions") or []
-        if not regs:
+        role = a.role if a is not None else "manager"
+        skip = {"worker": ("gate", "wait"), "verifier": ("gate",)}.get(role, ())
+        rows = []
+        kept = [d for d in regs if str(d.get("source", "")) not in skip]
+        recent = {d["id"] for d in kept[-12:]}  # older decisions in one short line; the file has them in full
+        for d in kept:
+            topic, body = self.decision_body(d)
+            lim = 400 if role == "worker" else (500 if d["id"] in recent else 160)
+            body = body if len(body) <= lim else body[:lim].rsplit(" ", 1)[0].rstrip(" ,;:") + " …"  # the intro names the file
+            who = ""
+            if role == "manager":
+                who = " (me" if d.get("by") == "you" else (" (you" if d.get("by") == self.manager.called else f" ({d.get('by')}")
+                who += f", {d['at'][5:16].replace('T', ' ')})"
+            head = f"- **{d['id']}**{who}" + (f" — {topic}" if topic else "") + ": "
+            rows.append(head + body.replace("\n", "\n  "))
+        if not rows:
             return ""
-        head = self.mtpl("decisions_intro", path=str(self.rec.run_dir / "decisions.md")).strip()
-        if a is not None and a.role == "worker":
-            return self.mtpl("decisions_intro_worker").strip() + "\n\n" + "\n".join(f"- **{d['id']}**: " + _clip(d["text"], 500).replace("\n", "\n  ") for d in regs)
-        body = "\n".join(f"- **{d['id']}** ({d['by']}, {d['at'][:16].replace('T', ' ')}): "
-                         + _clip(d["text"], 500).replace("\n", "\n  ") for d in regs)  # in full in the file
-        return f"{head}\n\n{body}"
+        intro = (self.mtpl("decisions_intro_worker") if role == "worker"
+                 else self.mtpl("decisions_intro", path=str(self.rec.run_dir / "decisions.md"))).strip()
+        return intro + "\n\n" + "\n".join(rows)
 
     def backfill_decisions(self) -> None:
         """A run started before the register existed: rebuild it from answers, my notes and gate messages."""
@@ -440,10 +480,20 @@ class ManagedRunner(MonitorRunner):
                 return t["output"]
         return ""
 
-    def handover(self, a: AgentConfig) -> str:
-        """What an agent needs to carry on in a fresh session: where the run is, its current instructions and the
-        decisions so far."""
+    def handover(self, a: AgentConfig, top_down: bool = False) -> str:
+        """What an agent needs to carry on in a fresh session.
+        - manager: the goal, its plan and rubric, the milestone table, the critic's latest report, the decisions.
+        - critic: its checklist and the decisions; outside a top-down restart also my current instruction, my latest
+          guidance and its latest review in short (in a top-down restart my new instruction replaces those).
+        - worker: only that this is a fresh conversation, plus its latest report outside a top-down restart; the
+          critic's instruction, which carries what the work must keep to, comes with the next message."""
         mg, ms = self.mg, (self.cur() or {})
+        if a.role == "worker":
+            work = (mg.get("work") or {}).get(a.name) or {}
+            state = ""
+            if work.get("output") and not top_down:
+                state = "Your latest report, in short:\n\n" + _clip(work["output"], 2500).replace(" (in full in the decisions file)", "")
+            return self.mtpl("worker_fresh", cwd=a.working_dir, state=state).strip()
         parts = []
         if ms:
             parts.append(f"Where we are: milestone {mg.get('ms', 0) + 1} of {len(mg.get('milestones') or [])}"
@@ -462,26 +512,29 @@ class ManagedRunner(MonitorRunner):
                 parts.append("| # | milestone | status | score |\n|---|---|---|---|\n" + "\n".join(rows))
             last = self.last_output(self.critic.name, ("report", "checkin"))
             if last:
-                parts.append(_cap(f"{self.critic.called}'s latest report or update:\n\n") + _clip(self.clean_report(last), 4000))
+                parts.append(_cap(f"{self.critic.called}'s latest report or update:\n\n")
+                             + _clip(self.clean_report(last), 4000).replace(" (in full in the decisions file)", ""))
         elif a.role == "verifier":
-            if mg.get("note"):
-                parts.append(_cap(f"{self.manager.called}'s instruction for the current work:\n\n") + mg["note"].strip())
-            if mg.get("guidance"):
-                parts.append(_cap(f"{self.manager.called}'s latest guidance:\n\n") + mg["guidance"].strip())
-            last = self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
-            if last:
-                parts.append("Your latest review (keep your checklist items as they are):\n\n" + _clip(last, 6000))
-        else:
-            work = (mg.get("work") or {}).get(a.name) or {}
-            if work.get("output"):
-                parts.append("Your latest report:\n\n" + _clip(work["output"], 4000))
-            parts.append("My latest instructions come with your next message.")
+            if mg.get("note") and not top_down:
+                parts.append("My instruction for the current work:\n\n" + mg["note"].strip())
+            if mg.get("guidance") and not top_down:
+                parts.append("My latest guidance:\n\n" + mg["guidance"].strip())
+            last = "" if top_down else self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
+            if last:  # the prose briefly, the checklist in full: the list is what carries over
+                prose = strip_checklist(T.without_markup(last, drop=("checklist", "verdict")))
+                parts.append("Your latest review, in short:\n\n" + _clip(prose, 2500).replace(" (in full in the decisions file)", ""))
+            ck = self.latest_checklist()
+            if ck:
+                parts.append("Your checklist (keep the items as they are):\n\n" + ck)
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
         if qs and a.role != "worker":
             parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
-        dec = self.decisions_text(a)
-        if dec:
-            parts.append(dec)
+        if top_down and a.role == "verifier":  # the manager's new instruction carries what matters now
+            parts.append(self.mtpl("decisions_pointer", path=str(self.rec.run_dir / "decisions.md")).strip())
+        else:
+            dec = self.decisions_text(a)
+            if dec:
+                parts.append(dec)
         return self.mtpl("session_reset", state="\n\n".join(parts)).strip()
 
     def clean_report(self, text: str) -> str:
@@ -491,8 +544,14 @@ class ManagedRunner(MonitorRunner):
         """Clear these agents' conversations (all by default): the run keeps its place, records and decisions, and
         each agent starts a new session with a handover of what it needs."""
         done = []
+        mg = self.mg
+        top_down = (not names or self.manager.name in names) and mg.get("phase") in self.RESTARTABLE
+        if top_down:  # the manager restarts the work: a short instruction to the critic, a detailed one to the worker
+            mg["restart"] = {"from": mg.get("phase"), "at": now_iso()}
+            mg["phase"] = "restart"
+            mg.pop("in_work", None)
         for a in self.mon.agents:
-            if names and a.name not in names:
+            if names and a.name not in names and not (top_down and a.role in ("verifier", "worker")):
                 continue
             if a.role not in ("manager", "verifier", "worker"):
                 continue
@@ -503,13 +562,36 @@ class ManagedRunner(MonitorRunner):
             fwd = [x for x in (self.st.setdefault("fwd", {}).get(a.name) or [])
                    if not x.startswith(("Your last turn was cut off", "We are starting a new part", "You are taking over",
                                         "This is a fresh conversation"))]
-            self.st["fwd"][a.name] = [self.handover(a)] + fwd
+            self.st["fwd"][a.name] = [self.handover(a, top_down=top_down)] + fwd
             self.rec.event("session_reset", agent=a.name, session_id=sess.get("session_id"))
             done.append(a.name)
         if self.mg.get("fresh_for") is None:
             self.mg["fresh_for"] = self.mg.get("ms")  # no second fresh start for this milestone
         self.rec.save()
         return done
+
+    # a top-down restart replaces these steps of the worker/critic loop; plans, gates, pauses and reports go on as they are
+    RESTARTABLE = ("work", "review", "checkin", "answer", "amend", "guidance")
+
+    def ph_restart(self, mg: Dict[str, Any]) -> Optional[str]:
+        """After a reset of everyone's sessions: the manager, with the whole picture, gives the critic a short
+        instruction on what to continue with; the critic turns it into concrete steps for the worker."""
+        for a in [self.manager, self.critic] + list(self.workers):  # a cut-off turn is replaced, not sent again
+            q = (self.st.get("fwd") or {}).get(a.name)
+            if q:
+                self.st["fwd"][a.name] = [x for x in q if not x.startswith("Your last turn was cut off")]
+        r = self.say(self.manager, self.mtpl("manager_restart", human_messages=""), "restart")
+        text = self.after_manager(r, relay=False)
+        msg = self.for_critic(text)
+        mg["guidance"] = msg
+        self.decide(msg, self.manager.called, "restart")
+        c = self.say(self.critic, self.mtpl("critic_restart", instruction=msg, human_messages="",
+                                            cwd=self.critic.working_dir), "brief")
+        self.worker_feedback(self.clean_critic(c["output"]))
+        mg.pop("restart", None)
+        mg["phase"] = "work"
+        self.critic_asks(c, after="work")
+        return None
 
     def fresh_sessions(self) -> None:
         """Agents set to `fresh_session: milestone` start each milestone in a new session (once per milestone)."""
@@ -592,7 +674,18 @@ class ManagedRunner(MonitorRunner):
         """What the worker gets from a critic reply: the text outside the tags, plus any <message to="worker">."""
         names = [n for w in self.workers for n in (w.called, w.name)] + ["worker"]
         extra = [b for a, b in T.blocks(text, "message") if b and T.addressed(a, *names)]
-        return "\n\n".join([x for x in [strip_checklist(T.outside(text))] + extra if x]).strip()  # a list without the tag too
+        return self.for_worker("\n\n".join([x for x in [T.outside(text)] + extra if x]))
+
+    def for_worker(self, text: str) -> str:
+        """The critic's words as the worker should get them: without the checklist (also when the critic forgot the
+        tag) and without headings that name the worker or anyone else ("## Updated instruction for the worker")."""
+        names = "|".join(re.escape(n) for w in self.workers for n in {w.called, w.name, "worker"} if n)
+        others = "|".join(re.escape(n) for n in {self.manager.called, self.manager.name, "manager", "lead"} if n)
+        role_head = re.compile(r"^\s*(?:#+\s*|\*\*)?\s*(?:(?:updated|revised|new|next|my)\s+)*"
+                               r"(?:instructions?|feedback|notes?|steps|tasks?|message|review)\s+(?:for|to)\s+(?:the\s+)?"
+                               rf"(?:{names}|{others})\b[^\n]*$", re.I | re.M)
+        text = role_head.sub("", strip_checklist(text or ""))
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
 
     def verdict(self, r: Dict[str, Any]) -> str:
         if r.get("status") != "ok":
@@ -770,7 +863,7 @@ class ManagedRunner(MonitorRunner):
     def ph_brief(self, mg: Dict[str, Any]) -> Optional[str]:
         v = self.critic
         r = self.say(v, self.mtpl("critic_brief", note=mg.get("note", ""), human_messages="", cwd=v.working_dir,
-                                  decisions=self.decisions_text(),
+                                  decisions=self.decisions_text(v),
                                   instructions=self.mon.controller.instructions if not self.has_session(v) else ""), "brief")
         self.worker_feedback(self.clean_critic(r["output"]))
         mg["phase"] = "work"
@@ -798,10 +891,10 @@ class ManagedRunner(MonitorRunner):
         self.cur()["rounds"] = mg["ms_round"]
         items = []
         for w in self.workers:
-            fb = (mg.get("feedback") or {}).get(w.name) or "Please carry on."
+            fb = self.for_worker((mg.get("feedback") or {}).get(w.name) or "") or "Please carry on."  # also if saved before
             if not self.has_session(w):
                 prompt = self.mtpl("worker_start", task=w.task or "", feedback=fb, human_messages="", cwd=w.working_dir,
-                                   decisions=self.decisions_text(w))
+                                   decisions="")  # what the work must keep to comes in the critic's instruction
             else:
                 prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
             items.append((w, prompt, "work"))

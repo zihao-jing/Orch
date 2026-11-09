@@ -157,11 +157,15 @@ a job twice and never keeps its turn open to wait (orch waits for its jobs betwe
 session keeps the protocol in view without being pushed to add tags it doesn't need. The board marks those turns.
 
 **Fresh sessions mid-run.** `orch reset-sessions <project> [--agent NAME]` (with the run stopped) clears the agents'
-conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. Each agent
-starts a new session on its next turn with a handover: the manager gets the goal, its approved plan and rubric, the
-milestone table and the critic's latest report; the critic gets its current instruction and its latest review with
-the checklist; the worker its latest report. All get the decisions register (the worker without who made each decision), and the manager and critic anything the run is paused on. The
-board chat follows the new session.
+conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. When the
+manager is reset in the middle of a milestone (the default, all three), the work restarts top-down: the manager gets
+the goal, its approved plan and rubric, the milestone table, the critic's latest report and the decisions (the 12
+newest in full, older ones in a line), and writes the critic a short instruction on what to continue with; the
+critic, with its checklist and a pointer to the decisions file, turns that into concrete steps for the worker; the
+worker starts with only that. A cut-off turn is replaced by this, not sent again. Resetting one agent alone gives it
+a handover instead: the critic its current instruction, its latest review in short and its checklist; the worker its
+latest report in short. The worker never gets the decisions list or anything about the people above the critic:
+what the work must keep to reaches it in the critic's instructions. The board chat follows the new session.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
 answers and notes, messages I add at a gate, and the manager's answers to the critic, each with who decided and

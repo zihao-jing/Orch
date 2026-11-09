@@ -720,11 +720,12 @@ class TestManaged(unittest.TestCase):
         briefs = [t for t in ts if t["purpose"] == "brief"]
         self.assertNotIn("Decisions so far", briefs[0]["input"])
         self.assertIn("Decisions so far", briefs[1]["input"])  # milestone 2 starts with the whole register
-        self.assertIn("**S1** (Alex", briefs[1]["input"])
+        self.assertIn("- **S1** — Should the tables use percentages?: Go with the simpler option", briefs[1]["input"])
+        self.assertNotIn("(you,", briefs[1]["input"])  # the critic gets decisions without attribution
         w2 = [t for t in ts if t["agent"] == "writer" and t.get("milestone") == 1]
         self.assertFalse(w2[0]["resumed_session"])  # a fresh worker session for the new milestone
         self.assertIn("fresh conversation", w2[0]["input"])
-        self.assertIn("Decisions so far", w2[0]["input"])
+        self.assertNotIn("Decisions so far", w2[0]["input"])  # the worker gets the critic's instruction, not the register
         self.assertTrue(all(t["resumed_session"] for t in w2[1:]))
         self.assertEqual(len(rec.state["sessions"]["writer"]["previous"]), 1)
 
@@ -790,9 +791,8 @@ class TestManaged(unittest.TestCase):
         r = ManagedRunner(load_config(cfg).monitor("m"), threading.Event(), log=lambda s: None)
         r.rec = rec
         wtext = r.decisions_text(r.workers[0])
-        self.assertIn("Labels are in labels/v2.", wtext)
-        self.assertNotIn("(you,", wtext)
-        self.assertNotIn("decisions.md", wtext)
+        self.assertNotIn("Labels are in labels/v2.", wtext)  # pause messages are not the worker's
+        self.assertIn("Labels are in labels/v2.", r.decisions_text(r.critic))
         self.assertNotIn("The whole run is paused", r.handover(r.workers[0]))
         pause = [t for t in ts if t["purpose"] == "pause"]
         self.assertEqual(len(pause), 1)
@@ -945,12 +945,49 @@ class TestManaged(unittest.TestCase):
             self.assertTrue(st["sessions"][a]["reset_at"])
             self.assertEqual(len(st["sessions"][a]["previous"]) >= 1, True)
             self.assertIn("fresh conversation", st["fwd"][a][0])
+        for a in ("boss", "critic"):
             self.assertIn("British spelling", st["fwd"][a][0])
+        self.assertNotIn("British spelling", st["fwd"]["writer"][0])  # the critic passes on what the work must keep to
         self.assertIn("Your plan and rubric", st["fwd"]["boss"][0])
         self.assertIn("| 2 | Part 2 | done |", st["fwd"]["boss"][0])
         self.assertIn("Your latest review", st["fwd"]["critic"][0])
         self.assertEqual(st["managed"]["phase"], "done")  # the run's place is kept
         self.assertEqual(cli.main(["reset-sessions", cfg_path, "--agent", "writer"]), 0)
+
+    def test_reset_mid_milestone_restarts_top_down(self):
+        mgr = {"milestones": 2, "replies": {"restart": [
+            "Picking up part 2.\n\n<message to=\"Jordan\">Part 2: finish the tables, percentages as decided.</message>"]}}
+        crit = {"replies": {"brief": ["Start with table 1 in plan.md, then table 2. Use percentages."]}}
+        cfg_path = make_cfg(self.tmp, [managed(mgr=mgr, critic=crit)])
+        status, rec = run(cfg_path)
+        from orch.managed import ManagedRunner
+        mon = load_config(cfg_path).monitor("m")
+        mg = rec.state["managed"]
+        mg.update(phase="work", ms=1)
+        mg["milestones"][1]["status"] = "active"
+        rec.set(status="stopped")
+        rec.save()
+        r = ManagedRunner(mon, threading.Event(), resume=True, log=lambda s: None)
+        r.rec = rec
+        r.decide("Use percentages in every table.", "you", "note")
+        r.reset_sessions()
+        self.assertEqual(rec.state["managed"]["phase"], "restart")
+        self.assertNotIn("percentages", rec.state["fwd"]["writer"][0])  # the worker's handover is only the fresh start
+        self.assertNotIn("My instruction for the current work", rec.state["fwd"]["critic"][0])
+        status, rec = run(cfg_path, resume=True)
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        i = next(n for n, t in enumerate(ts) if t["purpose"] == "restart")
+        self.assertEqual(ts[i]["agent"], "boss")
+        self.assertIn("Your plan and rubric", ts[i]["input"])
+        self.assertEqual((ts[i + 1]["agent"], ts[i + 1]["purpose"]), ("critic", "brief"))
+        self.assertIn("Part 2: finish the tables", ts[i + 1]["input"])
+        self.assertNotIn("Picking up part 2.", ts[i + 1]["input"])  # only the message reaches the critic
+        w = ts[i + 2]
+        self.assertEqual((w["agent"], w["purpose"]), ("writer", "work"))
+        self.assertIn("Start with table 1 in plan.md", w["input"])
+        self.assertIn("fresh conversation", w["input"])
+        self.assertNotIn("Decisions so far", w["input"])
 
     def test_managed_validation(self):
         m = managed()

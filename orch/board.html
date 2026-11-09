@@ -500,7 +500,7 @@ const LIMIT = {thread: 8, rounds: 5}, shown = {thread: 8, rounds: 5};  // newest
 function olderLink(list, total){ const hid = total - shown[list]; if (hid <= 0) return shown[list] > LIMIT[list] ? `<div class="older"><button class="more" data-less="${list}">Show fewer</button></div>` : '';
   return `<div class="older"><span>${hid} older not shown</span><button class="more" data-older="${list}" data-n="20">Show ${Math.min(20, hid)} more</button>`
     + (hid > 20 ? `<button class="more" data-older="${list}" data-n="all">Show all</button>` : '') + `</div>`; }
-const UPPER = ['plan','kickoff','answer','review','feedback','report','checkin','ack'];
+const UPPER = ['plan','kickoff','restart','answer','review','feedback','report','checkin','ack'];
 function renderThread(mg){
   const ts = (D.turns||[]).filter(t => UPPER.includes(t.purpose) && (tab === 'all' || t.purpose === 'plan' || t.milestone === sel));
   const tabs = `<div class="tabs"><button class="sm${tab==='all'?' on':''}" data-tab="all">All milestones</button><button class="sm${tab==='sel'?' on':''}" data-tab="sel">Milestone ${sel+1} only</button></div>`;
