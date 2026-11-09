@@ -50,6 +50,11 @@ def manager_pause(text: str) -> str:
     return ""
 
 
+# placeholders a reset leaves in an agent's queue; the handover notes are written when its next turn starts
+HANDOVER = "(handover notes: written when this agent's next turn starts)"
+HANDOVER_TOP_DOWN = "(handover notes for the top-down restart: written when this agent's next turn starts)"
+
+
 def checklist_text(text: str) -> str:
     """The critic's checklist in a reply: its <checklist> block(s), or, when it wrote the list without the tag,
     its checkbox lines. Either way the list is the critic's own: the gate reads it, the worker never sees it."""
@@ -219,6 +224,7 @@ class ManagedRunner(MonitorRunner):
     def say(self, agent: AgentConfig, prompt: str, purpose: str) -> Dict[str, Any]:
         """One turn of one agent, tagged with the milestone it belongs to."""
         mg = self.mg
+        self.write_handover(agent)
         if agent.role == "manager":
             self.sync_chat_session(agent)
         r = self.turn(agent, prompt, int(self.st.get("round", 0)), purpose,
@@ -231,6 +237,15 @@ class ManagedRunner(MonitorRunner):
             for note in self.notes_up(r.get("output") or ""):
                 self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
         return r
+
+    def write_handover(self, agent: AgentConfig) -> None:
+        """A reset leaves a placeholder in the agent's queue; the notes are written now, from where the run is at
+        this moment, so a reset some time before the resume doesn't hand over an old picture."""
+        q = (self.st.get("fwd") or {}).get(agent.name) or []
+        for i, x in enumerate(q):
+            if x in (HANDOVER, HANDOVER_TOP_DOWN):
+                q[i] = self.handover(agent, top_down=x == HANDOVER_TOP_DOWN)
+        self.rec.save()
 
     def notes_up(self, text: str) -> List[str]:
         """<message to="manager"> blocks in a critic reply: things the manager should know."""
@@ -467,6 +482,19 @@ class ManagedRunner(MonitorRunner):
                     return ck
         return ""
 
+    def last_turn(self, agent: str, purposes: Tuple[str, ...]) -> Optional[Dict[str, Any]]:
+        """The newest finished turn of an agent in one of these kinds of turn (None if none)."""
+        best = None
+        for p in (self.rec.run_dir / "rounds").glob("r*/t*.json"):
+            try:
+                t = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if t.get("agent") == agent and t.get("purpose") in purposes and t.get("status") == "ok" and t.get("output"):
+                if best is None or (t.get("started_at") or "") > (best.get("started_at") or ""):
+                    best = t
+        return best
+
     def last_output(self, agent: str, purposes: Tuple[str, ...]) -> str:
         """The newest reply of an agent in one of these kinds of turn ('' if none)."""
         for p in sorted((self.rec.run_dir / "rounds").glob("r*/t*.json"), reverse=True):
@@ -510,15 +538,22 @@ class ManagedRunner(MonitorRunner):
                     for i, m in enumerate(mg.get("milestones") or [])]
             if rows:
                 parts.append("| # | milestone | status | score |\n|---|---|---|---|\n" + "\n".join(rows))
-            last = self.last_output(self.critic.name, ("report", "checkin"))
-            if last:
-                parts.append(_cap(f"{self.critic.called}'s latest report or update:\n\n")
-                             + _clip(self.clean_report(last), 4000).replace(" (in full in the decisions file)", ""))
+            t = self.last_turn(self.critic.name, ("report", "checkin", "verify", "amend", "guidance", "brief"))
+            if t:  # the critic's newest message of any kind: a report or check-in can be many rounds old
+                text = strip_checklist(self.clean_report(t.get("output") or ""))
+                ck = self.latest_checklist()
+                done, open_ = checklist_state(ck) if ck else (0, 0)
+                parts.append(_cap(f"{self.critic.called}'s latest message ({t.get('purpose')}, "
+                                  f"{(t.get('started_at') or '')[5:16].replace('T', ' ')}"
+                                  + (f"; its checklist: {done} of {done + open_} done" if ck else "") + "):\n\n")
+                             + _clip(text, 4000).replace(" (in full in the decisions file)", ""))
         elif a.role == "verifier":
+            when = lambda k: f" ({mg[k][5:16].replace('T', ' ')})" if mg.get(k) else ""
             if mg.get("note") and not top_down:
-                parts.append("My instruction for the current work:\n\n" + mg["note"].strip())
+                parts.append(f"My instruction when this part of the work started{when('note_at')}; newer decisions below "
+                             "override it:\n\n" + mg["note"].strip())
             if mg.get("guidance") and not top_down:
-                parts.append("My latest guidance:\n\n" + mg["guidance"].strip())
+                parts.append(f"My latest guidance{when('guidance_at')}:\n\n" + mg["guidance"].strip())
             last = "" if top_down else self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
             if last:  # the prose briefly, the checklist in full: the list is what carries over
                 prose = strip_checklist(T.without_markup(last, drop=("checklist", "verdict")))
@@ -545,9 +580,10 @@ class ManagedRunner(MonitorRunner):
         each agent starts a new session with a handover of what it needs."""
         done = []
         mg = self.mg
-        top_down = (not names or self.manager.name in names) and mg.get("phase") in self.RESTARTABLE
+        top_down = (not names or self.manager.name in names) and mg.get("phase") in self.RESTARTABLE + ("restart",)
         if top_down:  # the manager restarts the work: a short instruction to the critic, a detailed one to the worker
-            mg["restart"] = {"from": mg.get("phase"), "at": now_iso()}
+            if mg.get("phase") != "restart":  # a second reset before the restart ran keeps the first one's origin
+                mg["restart"] = {"from": mg.get("phase"), "at": now_iso()}
             mg["phase"] = "restart"
             mg.pop("in_work", None)
         for a in self.mon.agents:
@@ -560,9 +596,10 @@ class ManagedRunner(MonitorRunner):
             self.rec.update_session(a.name, session_id=None, turns=0, reset_at=now_iso(),
                                     previous=(sess.get("previous") or []) + ([prev] if prev.get("session_id") else []))
             fwd = [x for x in (self.st.setdefault("fwd", {}).get(a.name) or [])
-                   if not x.startswith(("Your last turn was cut off", "We are starting a new part", "You are taking over",
-                                        "This is a fresh conversation"))]
-            self.st["fwd"][a.name] = [self.handover(a, top_down=top_down)] + fwd
+                   if x not in (HANDOVER, HANDOVER_TOP_DOWN)
+                   and not x.startswith(("Your last turn was cut off", "We are starting a new part", "You are taking over",
+                                         "This is a fresh conversation"))]
+            self.st["fwd"][a.name] = [HANDOVER_TOP_DOWN if top_down else HANDOVER] + fwd  # written at its next turn
             self.rec.event("session_reset", agent=a.name, session_id=sess.get("session_id"))
             done.append(a.name)
         if self.mg.get("fresh_for") is None:
@@ -583,7 +620,7 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_restart", human_messages=""), "restart")
         text = self.after_manager(r, relay=False)
         msg = self.for_critic(text)
-        mg["guidance"] = msg
+        mg.update(guidance=msg, guidance_at=now_iso())
         self.decide(msg, self.manager.called, "restart")
         c = self.say(self.critic, self.mtpl("critic_restart", instruction=msg, human_messages="",
                                             cwd=self.critic.working_dir), "brief")
@@ -857,7 +894,7 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
                                              milestone=ms["text"], human_messages="",
                                              decisions=self.decisions_text()), "kickoff")
-        mg.update(note=self.for_critic(self.after_manager(r, relay=False)), ms_round=0, limit=False, phase="brief")
+        mg.update(note=self.for_critic(self.after_manager(r, relay=False)), note_at=now_iso(), ms_round=0, limit=False, phase="brief")
         return None
 
     def ph_brief(self, mg: Dict[str, Any]) -> Optional[str]:
@@ -1012,6 +1049,7 @@ class ManagedRunner(MonitorRunner):
     def _stage(self, items: List[Tuple[AgentConfig, str, str]], rnd: int, extra: Dict[str, Any]) -> List[Dict[str, Any]]:
         out = []
         for a, p, purpose in items:  # workers of one milestone run one after another
+            self.write_handover(a)
             out.append(self.turn(a, p, rnd, purpose, extra=extra))
         return out
 
@@ -1180,9 +1218,9 @@ class ManagedRunner(MonitorRunner):
         if accept or mg.get("limit"):
             ms.update(status="awaiting_ok", summary=self.for_me(text), summary_turn=r["turn_id"], accepted=accept)
             gate = c.approve_milestones or not accept
-            mg.update(phase="gate" if gate else "next", guidance="" if accept else self.for_critic(text))
+            mg.update(phase="gate" if gate else "next", guidance="" if accept else self.for_critic(text), guidance_at=now_iso())
         else:
-            mg.update(guidance=self.for_critic(text), phase="guidance")
+            mg.update(guidance=self.for_critic(text), guidance_at=now_iso(), phase="guidance")
         return None
 
     def ph_guidance(self, mg: Dict[str, Any]) -> Optional[str]:
@@ -1210,7 +1248,7 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment),
                      "feedback")
         ms.update(status="active")
-        mg.update(guidance=self.for_critic(self.after_manager(r, relay=False)), ms_round=0, limit=False, phase="guidance")
+        mg.update(guidance=self.for_critic(self.after_manager(r, relay=False)), guidance_at=now_iso(), ms_round=0, limit=False, phase="guidance")
         return None
 
     def ph_next(self, mg: Dict[str, Any]) -> Optional[str]:

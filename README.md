@@ -165,7 +165,7 @@ critic, with its checklist and a pointer to the decisions file, turns that into 
 worker starts with only that. A cut-off turn is replaced by this, not sent again. Resetting one agent alone gives it
 a handover instead: the critic its current instruction, its latest review in short and its checklist; the worker its
 latest report in short. The worker never gets the decisions list or anything about the people above the critic:
-what the work must keep to reaches it in the critic's instructions. The board chat follows the new session.
+what the work must keep to reaches it in the critic's instructions. The notes are written when each agent's next turn starts, not at the reset, so they show where the run is then; until that turn, the agent's queue in `state.json` (`fwd`) holds a placeholder. The manager's notes include the critic's newest message of any kind with its checklist count, not just its last report. The board chat follows the new session.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
 answers and notes, messages I add at a gate, and the manager's answers to the critic, each with who decided and

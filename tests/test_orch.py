@@ -940,6 +940,9 @@ class TestManaged(unittest.TestCase):
         done = r.reset_sessions()
         self.assertEqual(sorted(done), ["boss", "critic", "writer"])
         st = rec.state
+        self.assertTrue(all(st["fwd"][a][0].startswith("(handover notes") for a in done))  # written at the next turn
+        for ag in (r.manager, r.critic, r.workers[0]):
+            r.write_handover(ag)
         for a in ("boss", "critic", "writer"):
             self.assertIsNone(st["sessions"][a]["session_id"])
             self.assertTrue(st["sessions"][a]["reset_at"])
@@ -971,7 +974,11 @@ class TestManaged(unittest.TestCase):
         r.rec = rec
         r.decide("Use percentages in every table.", "you", "note")
         r.reset_sessions()
+        r.reset_sessions()  # twice before resuming: still one top-down restart
         self.assertEqual(rec.state["managed"]["phase"], "restart")
+        self.assertEqual(rec.state["managed"]["restart"]["from"], "work")
+        for ag in (r.critic, r.workers[0]):
+            r.write_handover(ag)
         self.assertNotIn("percentages", rec.state["fwd"]["writer"][0])  # the worker's handover is only the fresh start
         self.assertNotIn("My instruction for the current work", rec.state["fwd"]["critic"][0])
         status, rec = run(cfg_path, resume=True)
