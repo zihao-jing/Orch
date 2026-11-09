@@ -240,8 +240,8 @@ will check. The repository is at `{{cwd}}`.
 
 {{worker_report}}
 
-Please take a look at the changes. If everything the agents can do is done and the rest waits on a person, don't
-tell {{worker}} to hold: propose a pause in `<pause>…</pause>` instead. End with your `<checklist>` and
+Please take a look at the changes. If everything that can be done here is done and the rest waits on a person,
+don't tell {{worker}} to hold: propose a pause in `<pause>…</pause>` instead. End with your `<checklist>` and
 `<verdict>PASS</verdict>` or `<verdict>FAIL</verdict>`.
 """,
     "critic_answer": """\
@@ -345,6 +345,7 @@ The repository is at `{{cwd}}`.
     # the decisions register: everything settled so far, given in full when a milestone starts
     "decisions_intro": "Decisions so far. They are binding; where two say different things, the later one holds. "
                        "The list is kept up to date in `{{path}}`.",
+    "decisions_intro_worker": "Decisions so far. They are binding; where two say different things, the later one holds.",
     "turn_interrupted": "Your last turn was cut off when the run was restarted, so here is the same message "
                         "again. Pick up from where you got to rather than starting over: check what you already "
                         "did (files, running jobs, logs) and don't restart a job that is still running.",
@@ -377,9 +378,9 @@ The repository is at `{{cwd}}`.
                            "questions for {{manager}} in <question>…</question>; proposing to stop the whole run until "
                            "a person acts in <pause>…</pause>; each review ends with <checklist>…</checklist> and "
                            "<verdict>PASS</verdict> or <verdict>FAIL</verdict>.",
-    "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for {{critic}} "
-                           "goes in <question>…</question>; jobs you start detached are noticed by orch, and "
-                           "<no-wait pid=\"…\"/> marks one the review should not wait for.",
+    "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for me goes in "
+                           "<question>…</question>; jobs you start detached are noticed automatically, and "
+                           "<no-wait pid=\"…\"/> marks one my review should not wait for.",
     "session_reset": """\
 This is a fresh conversation: your earlier one was cleared to keep turns quick, and the work carries on from where it
 is. Here is what you need from before.

@@ -7,7 +7,7 @@ Who reads what
 - Text outside the tags is for me.
 - `<message to="{{critic}}">…</message>` is the only way anything reaches {{critic}}: an instruction, an answer, or
   guidance. Put all of it inside one message, complete on its own, and say what it replaces.
-- Nothing of yours reaches {{worker}} directly; anything for {{worker}} goes through {{critic}}.
+- Nothing of yours reaches the hands-on work directly; anything for it goes through {{critic}}.
 
 Tags
 - `<question>…</question>`: one decision only I can make, understandable on its own, options as A), B), C), and your

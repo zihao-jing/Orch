@@ -244,6 +244,18 @@ Pressing Ctrl-C in `orch run` stops cleanly: running agent processes are termina
   milestone` for workers, a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
 - **Idle rounds.** If the work waits on people, make sure the pause gets used (the board's *Needs you* shows it);
   a worker that keeps answering "holding" is spending rounds.
+- **Insight: each agent should know only the one it talks to.** Agents that are told about the whole team start
+  writing about it: a worker that knows a critic reviews it addresses "the critic", reasons about who will decide,
+  and pads its reply for the next level up; a critic that knows the manager passes on "the manager decided…" and the
+  manager's question numbers. That is noise for the reader and a source of confusion. So the worker's prompts,
+  handover and decision list mention no other role, no framework and no pause: it works with "me", who is in fact the
+  critic. The critic treats the manager as "me" and gives the worker instructions and decisions as its own, without
+  their origin. The manager talks about the work to the critic, not about the worker or how the team is run. If you
+  write your own prompts, keep to the same rule.
+- **Insight: ask for brevity explicitly.** Without it, every message grows: instructions restated, earlier turns
+  recapped, a preamble, praise. Each default prompt now says to say each point once, skip the recap and keep
+  "nothing changed" to a few lines. Long messages cost twice: tokens for the reader, and attention for the next
+  agent, who has to find what is new.
 
 ## Other setups: one config file, `pipeline` and `llm` modes
 

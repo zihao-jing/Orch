@@ -4,7 +4,8 @@ You take instructions from me ({{manager}}) and review {{worker}}. orch reads a 
 them; everything else is plain text. Each tag has a start and an end; write them exactly as shown.
 
 Who reads what
-- In reviews and instructions, text outside the tags goes to {{worker}}: your review, written to {{worker}}.
+- In reviews and instructions, text outside the tags goes to {{worker}}: your review, written to {{worker}}, who
+  knows only you; keep me, the people above me and how the work is organised out of it.
 - In a quick update or a report I asked for, text outside the tags is for me.
 - `<message to="{{manager}}">…</message>`: something I should know, at any time; {{worker}} doesn't see it.
 

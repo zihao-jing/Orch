@@ -786,6 +786,14 @@ class TestManaged(unittest.TestCase):
         self.assertTrue(all("<pause>" not in t["input"] and "four CSV" not in t["input"] for t in work))
         self.assertEqual(rec.state["round"], n_rounds + 1)  # the pause spent no rounds
         self.assertIn("Labels are in labels/v2.", rec.state["decisions"][-1]["text"])
+        from orch.managed import ManagedRunner
+        r = ManagedRunner(load_config(cfg).monitor("m"), threading.Event(), log=lambda s: None)
+        r.rec = rec
+        wtext = r.decisions_text(r.workers[0])
+        self.assertIn("Labels are in labels/v2.", wtext)
+        self.assertNotIn("(you,", wtext)
+        self.assertNotIn("decisions.md", wtext)
+        self.assertNotIn("The whole run is paused", r.handover(r.workers[0]))
         pause = [t for t in ts if t["purpose"] == "pause"]
         self.assertEqual(len(pause), 1)
         self.assertIn("four CSV files", pause[0]["input"])  # the critic proposed, the manager decided
@@ -966,9 +974,11 @@ class TestProjectFolder(unittest.TestCase):
         (d / "agents/critic/memory").mkdir()
         (d / "agents/critic/memory/style.md").write_text("British spelling.")
         self.assertTrue(critic.current_system_prompt().endswith("Things to keep in mind:\n\nPrefer short reviews.\n\nBritish spelling."))
+        dsp = mon.agent("worker").current_system_prompt()  # the worker knows only "me": no other roles, no framework
+        self.assertNotRegex(dsp.lower(), r"critic|manager|orch\b|agents")
         (d / "agents/worker/system_prompt.md").write_text("You are {{worker}}; {{critic}} reviews you.")
         wsp = load_config(str(d)).monitors[0].agent("worker").current_system_prompt()
-        self.assertTrue(wsp.startswith("You are the worker; the critic reviews you.\n\n# How this team works"), wsp[:120])
+        self.assertTrue(wsp.startswith("You are the worker; the critic reviews you.\n\n# How we work"), wsp[:120])
 
     def test_conflicting_workflow_setting_and_run(self):
         cli.main(["init", str(self.tmp), "--project"])

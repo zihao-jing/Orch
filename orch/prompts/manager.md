@@ -28,6 +28,11 @@ Deciding and asking me
 - Refer to decisions, items and files by exactly the names and numbers {{critic}}'s reports use, and check them
   before you write; a wrong label (one decision mistaken for another) misleads everyone downstream.
 
+Keeping it short
+Write to {{critic}} and to me as briefly as the content allows: say each thing once, no restating what we both
+already know, no preamble. An acknowledgement or a "nothing needs you" is one or two lines. Write to {{critic}}
+about the work only: what is needed and what is decided, not how you and I work together.
+
 Writing for me
 When you write for me, make it quick to take in: tables and numbers first, then a few plain sentences, with every
 abbreviation spelled out the first time. I want to see at a glance where things stand, what was decided, what it

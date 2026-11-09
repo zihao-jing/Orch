@@ -355,11 +355,15 @@ class ManagedRunner(MonitorRunner):
             lines = [re.sub(r"^\d+[.)]\s+", "", ln) for ln in lines]
         return truncate(re.sub(r"\*\*", "", " ".join(lines)), 400)
 
-    def decisions_text(self) -> str:
+    def decisions_text(self, a: Optional[AgentConfig] = None) -> str:
+        """The register for one agent. The worker gets the decisions without who made them: it knows only the
+        critic, so "the manager" or "you" there would bring in roles it should not have to reason about."""
         regs = self.st.get("decisions") or []
         if not regs:
             return ""
         head = self.mtpl("decisions_intro", path=str(self.rec.run_dir / "decisions.md")).strip()
+        if a is not None and a.role == "worker":
+            return self.mtpl("decisions_intro_worker").strip() + "\n\n" + "\n".join(f"- **{d['id']}**: " + _clip(d["text"], 500).replace("\n", "\n  ") for d in regs)
         body = "\n".join(f"- **{d['id']}** ({d['by']}, {d['at'][:16].replace('T', ' ')}): "
                          + _clip(d["text"], 500).replace("\n", "\n  ") for d in regs)  # in full in the file
         return f"{head}\n\n{body}"
@@ -423,7 +427,7 @@ class ManagedRunner(MonitorRunner):
                          f" (\"{ms.get('title', '')}\"), round {mg.get('ms_round', 0)} of it."
                          if a.role == "manager" else f"Where we are: round {mg.get('ms_round', 0)} of the current work.")
         w = mg.get("wait") or {}
-        if mg.get("phase") == "wait" or (mg.get("gate") or {}).get("kind") == "wait":
+        if (mg.get("phase") == "wait" or (mg.get("gate") or {}).get("kind") == "wait") and a.role != "worker":
             parts.append("The whole run is paused until I act on this:\n\n" + (w.get("text") or ""))
         if a.role == "manager":
             parts.append("The goal:\n\n" + (self.mon.goal or "").strip())
@@ -448,11 +452,11 @@ class ManagedRunner(MonitorRunner):
             work = (mg.get("work") or {}).get(a.name) or {}
             if work.get("output"):
                 parts.append("Your latest report:\n\n" + _clip(work["output"], 4000))
-            parts.append(_cap(f"{self.critic.called}'s latest instructions come with your next message."))
+            parts.append("My latest instructions come with your next message.")
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
         if qs and a.role != "worker":
             parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
-        dec = self.decisions_text()
+        dec = self.decisions_text(a)
         if dec:
             parts.append(dec)
         return self.mtpl("session_reset", state="\n\n".join(parts)).strip()
@@ -774,7 +778,7 @@ class ManagedRunner(MonitorRunner):
             fb = (mg.get("feedback") or {}).get(w.name) or "Please carry on."
             if not self.has_session(w):
                 prompt = self.mtpl("worker_start", task=w.task or "", feedback=fb, human_messages="", cwd=w.working_dir,
-                                   decisions=self.decisions_text())
+                                   decisions=self.decisions_text(w))
             else:
                 prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
             items.append((w, prompt, "work"))
