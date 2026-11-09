@@ -8,13 +8,14 @@ answers and approvals become ``inbox/*.json`` control files, the live view tails
 chat with the manager resumes the manager's own session (under the same per-agent lock the run uses), with
 the exchange kept in ``chat.jsonl``.
 
-Endpoints: GET / · GET /api/state · GET /api/turn?id= · GET /api/events (SSE) ·
+Endpoints: GET / · GET /log/… (the run logs: index.html, each run's report.html and files) · GET /api/state · GET /api/turn?id= · GET /api/events (SSE) ·
 POST /api/chat · /api/answer · /api/gate · /api/note · /api/stop
 """
 
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
 import threading
 import time
@@ -26,7 +27,8 @@ from urllib.parse import parse_qs, urlparse
 from .backends import TurnRequest, get_backend
 from .config import MonitorConfig
 from .recorder import agent_lock, live_event, now_iso, read_json
-from .report import checklist_items
+from . import report as R
+from .report import checklist_items, turn_costs
 from .templates import render
 
 _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
@@ -289,8 +291,47 @@ def _handler(boards: Dict[str, Board]):
                 self.js(self.board(q).turn((q.get("id") or [""])[0]))
             elif u.path == "/api/events":
                 self.events(self.board(q))
+            elif u.path == "/log" or u.path.startswith("/log/"):
+                self.log_file(u.path[len("/log"):].lstrip("/"), q)
             else:
                 self.send(404, b"not found", "text/plain")
+
+        def redirect(self, to: str) -> None:
+            self.send_response(302)
+            self.send_header("Location", to)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_file(self, rel: str, q: Dict[str, List[str]]) -> None:
+            """The run logs, read-only: /log/ is the runs index, /log/run the current run's report, and any
+            file below the output folder by its path there. Reports are rendered fresh on each request."""
+            roots = []
+            for b in boards.values():
+                rd = b.run_dir
+                if rd is not None and rd.parent.parent.resolve() not in roots:
+                    roots.append(rd.parent.parent.resolve())
+            if not roots:
+                return self.send(404, b"no run yet", "text/plain")
+            if rel == "run":
+                rd = self.board(q).run_dir
+                if rd is None:
+                    return self.redirect("/log/index.html")
+                return self.redirect(f"/log/{rd.parent.name}/{rd.name}/report.html")
+            rel = rel or "index.html"
+            for root in roots:
+                f = (root / rel).resolve()
+                if not (f == root or root in f.parents):
+                    continue  # nothing outside the output folder
+                if f.name == "index.html" and f.parent == root:
+                    return self.send(200, R.render_index(root).encode("utf-8"), "text/html; charset=utf-8")
+                if f.name == "report.html" and (f.parent / "state.json").is_file():
+                    return self.send(200, R.render_run_report(f.parent).encode("utf-8"), "text/html; charset=utf-8")
+                if f.is_file():
+                    ctype = mimetypes.guess_type(f.name)[0] or "text/plain"
+                    if f.suffix in (".md", ".jsonl", ".log", ".txt", ".yaml", ".yml", ".tex", ".csv", ".py") or ctype.startswith("text/"):
+                        ctype = ("text/html" if f.suffix in (".html", ".htm") else "text/plain") + "; charset=utf-8"
+                    return self.send(200, f.read_bytes(), ctype)
+            self.send(404, b"not found", "text/plain")
 
         def do_POST(self) -> None:
             u = urlparse(self.path)
@@ -391,28 +432,23 @@ def serve(boards: Dict[str, Board], host: str = "127.0.0.1", port: int = 8765) -
         raise OSError(f"no free port from {port}: {last}")
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, f"http://{host}:{srv.server_address[1]}/"
+    shown = host if host not in ("0.0.0.0", "::", "") else _lan_ip()
+    return srv, f"http://{shown}:{srv.server_address[1]}/"
+
+
+def _lan_ip() -> str:
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # no packet is sent; this only picks the outgoing interface
+            return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
 
 
 def _turn_costs(turns: List[Dict[str, Any]], chat: List[Dict[str, Any]]) -> Optional[float]:
-    """Each turn's own cost, in place, and the run's total. Claude reports a resumed session's running total, so a
-    turn costs the increase over that session's previous report (board chats share the manager's session)."""
-    items = [(t.get("ended_at") or t.get("started_at") or "", t) for t in turns if t.get("status") != "running"]
-    items += [(c.get("ts") or "", c) for c in chat if c.get("role") == "manager" and c.get("status") not in (None, "running")]
-    last: Dict[str, float] = {}
-    total, seen = 0.0, False
-    for _, x in sorted(items, key=lambda i: i[0]):
-        c = x.get("cost")
-        if not isinstance(c, (int, float)):
-            continue
-        sid = x.get("session_id") or ""
-        prev = last.get(sid, 0.0) if sid else 0.0
-        x["cost"] = round(c - prev if c >= prev else c, 6)
-        if sid:
-            last[sid] = c
-        total += x["cost"]
-        seen = True
-    return round(total, 4) if seen else None
+    """Each turn's own cost, in place, and the run's total (board chats share the manager's session)."""
+    return turn_costs(list(turns) + [c for c in chat if c.get("role") == "manager" and c.get("status") is not None])
 
 
 def page() -> str:

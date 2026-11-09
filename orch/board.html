@@ -53,6 +53,7 @@ h1{font-size:19px;margin:0}h2{font-size:13px;text-transform:uppercase;letter-spa
 .dot.live{animation:pulse 1.2s infinite}@keyframes pulse{50%{opacity:.25}}
 button{font:inherit;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:6px 12px;cursor:pointer}
 button:hover{border-color:var(--axis)}button.pri{background:var(--s1);border-color:var(--s1);color:#fff}
+a.btn{display:inline-block;font:inherit;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:2px 9px;font-size:12px;text-decoration:none}a.btn:hover{text-decoration:none;filter:brightness(.97)}
 button.ok{background:var(--good);border-color:var(--good);color:#fff}button.sm{padding:2px 9px;font-size:12px}
 button:disabled{opacity:.5;cursor:default}
 textarea,input[type=text]{font:inherit;width:100%;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:8px 10px;resize:vertical}
@@ -144,6 +145,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
   <span class="mute mono" id="runid"></span>
   <span style="flex:1"></span>
   <select id="mon" style="display:none"></select>
+  <a class="sm btn" id="loglink" href="/log/run" target="_blank" title="Every turn's full input and output, folded by milestone and round">📜 Log</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
   <button class="sm" id="theme" title="Toggle light/dark">◐</button>
   <button class="sm" id="stop" title="Stop after the current turn">Stop run</button>
@@ -178,6 +180,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
 const MONS = __MONITORS__;
 const qsM = new URLSearchParams(location.search).get('m');
 let M = MONS.includes(qsM) ? qsM : MONS[0];
+document.getElementById('loglink').href = '/log/run?m=' + encodeURIComponent(M);
 let D = null, sel = null, tab = 'all';
 const live = {}, expanded = new Set(), openRounds = new Set();
 const $ = id => document.getElementById(id);

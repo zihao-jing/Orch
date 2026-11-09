@@ -220,8 +220,8 @@ def cmd_run(a: argparse.Namespace) -> int:
         from .board import Board, serve
         boards = {r.mon.name: Board(r.mon.name, (lambda r=r: getattr(r, "rec", None) and r.rec.run_dir), r.mon)
                   for r in runners}
-        _, url = serve(boards, port=a.port)
-        log(f"board: {url}  (live progress, your questions and approvals, chat with the manager)")
+        _, url = serve(boards, host=a.host, port=a.port)
+        log(f"board: {url}  (live progress, your questions and approvals, chat with the manager; logs at {url}log/)")
         if a.open:
             import webbrowser
             webbrowser.open(url)
@@ -270,8 +270,8 @@ def cmd_serve(a: argparse.Namespace) -> int:
             boards[run.parent.name] = Board(run.parent.name, (lambda run=run: run), None)
     if not boards:
         raise SystemExit("nothing to show")
-    _, url = serve(boards, port=a.port)
-    print(f"board: {url}   (Ctrl-C to quit)", flush=True)
+    _, url = serve(boards, host=a.host, port=a.port)
+    print(f"board: {url}   logs: {url}log/   (Ctrl-C to quit)", flush=True)
     if a.open:
         import webbrowser
         webbrowser.open(url)
@@ -462,6 +462,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-rounds", type=int, help="override max_rounds for this invocation")
     p.add_argument("--serve", action="store_true", help="also start the board (local web page) for these runs")
     p.add_argument("--port", type=int, default=8765, help="board port (default 8765; the next free one is used)")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="board address (default 127.0.0.1, this machine only; 0.0.0.0 opens it to your network, "
+                        "with no password: anyone who reaches it can steer the run)")
     p.add_argument("--open", action="store_true", help="open the board in the browser")
     p.set_defaults(func=cmd_run)
 
@@ -469,6 +472,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("target", nargs="?", default=".", help="project folder or config (default: ./.orch), or a run dir")
     p.add_argument("-m", "--monitor", action="append")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--host", default="127.0.0.1",
+                   help="board address (default 127.0.0.1, this machine only; 0.0.0.0 opens it to your network, "
+                        "with no password: anyone who reaches it can steer the run)")
     p.add_argument("--open", action="store_true")
     p.set_defaults(func=cmd_serve)
 

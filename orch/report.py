@@ -11,7 +11,7 @@ import html
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .recorder import read_json
 
@@ -62,6 +62,15 @@ pre{background:var(--code);border-radius:8px;padding:10px;white-space:pre-wrap;w
 .label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute);margin-top:8px}
 .kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 14px;font-size:12.5px;margin:6px 0}
 .tag{font-size:12px;color:var(--mute)}.decision{margin:6px 0 4px;font-weight:600}
+.bar{position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;margin:12px 0 4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;border-bottom:1px solid var(--line)}
+.bar button{font:inherit;font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+.bar button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.bar input{font:inherit;font-size:12.5px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--ink);min-width:180px;flex:1;max-width:320px}
+.ms>summary{font-size:15px}.ms>.body>details{margin-left:0}
+.prev{color:var(--mute);font-size:12.5px;flex-basis:100%;margin-left:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub{margin:6px 0;border-radius:8px}.sub>summary{padding:5px 10px;font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em}
+.sub>.body{padding:0 10px 4px}.sub pre{margin:0 0 8px}
+.hidden{display:none!important}mark{background:#ffe58a;color:inherit;border-radius:2px}
 @media (max-width:600px){.hide-sm{display:none}}
 """
 
@@ -70,18 +79,37 @@ JS = """
  var key='orch-open:'+location.pathname, ykey=key+':y', pkey=key+':pre';
  function pres(){return [].slice.call(document.querySelectorAll('.turn pre'))}
  function pid(p,i){var d=p.closest('details[id]');return (d?d.id:'')+'#'+i}
- function load(){try{return JSON.parse(sessionStorage.getItem(key)||'[]')}catch(e){return[]}}
+ function load(){try{var v=JSON.parse(sessionStorage.getItem(key)||'{}');return Array.isArray(v)?{}:v}catch(e){return{}}}
  function save(){try{
-   var ids=[].slice.call(document.querySelectorAll('details[open][id]')).map(function(d){return d.id});
+   var ids={};[].slice.call(document.querySelectorAll('details[id]')).forEach(function(d){if(d.open!==d.hasAttribute('data-def'))ids[d.id]=d.open});
    sessionStorage.setItem(key,JSON.stringify(ids));sessionStorage.setItem(ykey,String(window.scrollY));
    var m={};pres().forEach(function(p,i){if(p.scrollTop)m[pid(p,i)]=p.scrollTop});
    sessionStorage.setItem(pkey,JSON.stringify(m))}catch(e){}}
  function restore(){try{
-   load().forEach(function(id){var d=document.getElementById(id);if(d)d.open=true});
+   var o=load();Object.keys(o).forEach(function(id){var d=document.getElementById(id);if(d)d.open=o[id]});
    var m=JSON.parse(sessionStorage.getItem(pkey)||'{}');
    pres().forEach(function(p,i){var v=m[pid(p,i)];if(v)p.scrollTop=v});
    var y=+sessionStorage.getItem(ykey);if(y)window.scrollTo(0,y)}catch(e){}}
+ [].slice.call(document.querySelectorAll('details[open][id]')).forEach(function(d){d.setAttribute('data-def','')});
  restore();
+ var bar=document.querySelector('.bar');
+ if(bar){
+   var who='all',q=document.getElementById('q');
+   function apply(){var term=(q.value||'').trim().toLowerCase();
+     [].slice.call(document.querySelectorAll('details.turn[data-agent]')).forEach(function(t){
+       var ok=(who==='all'||t.getAttribute('data-agent')===who)&&(!term||t.textContent.toLowerCase().indexOf(term)>=0);
+       t.classList.toggle('hidden',!ok);if(term&&ok){t.open=true;var o=t.querySelector('.sub.out');if(o)o.open=true}});
+     [].slice.call(document.querySelectorAll('details.rnd,details.ms')).forEach(function(r){
+       var n=r.querySelectorAll('details.turn[data-agent]:not(.hidden)').length;r.classList.toggle('hidden',!n);
+       if(term&&n)r.open=true})}
+   bar.addEventListener('click',function(ev){var b=ev.target.closest('button');if(!b)return;
+     if(b.hasAttribute('data-who')){who=b.getAttribute('data-who');
+       [].slice.call(bar.querySelectorAll('[data-who]')).forEach(function(x){x.classList.toggle('on',x===b)});apply()}
+     else if(b.hasAttribute('data-all')){var open=b.getAttribute('data-all')==='1';
+       [].slice.call(document.querySelectorAll(b.getAttribute('data-sel'))).forEach(function(d){if(!d.closest('.hidden'))d.open=open})}
+     save()});
+   var tm;q.addEventListener('input',function(){clearTimeout(tm);tm=setTimeout(apply,250)});
+ }
  var lastAct=0;function act(){lastAct=Date.now();save()}
  document.addEventListener('toggle',save,true);
  window.addEventListener('scroll',act,{passive:true});
@@ -125,16 +153,66 @@ def _turns_for_round(rdir: Path) -> List[Dict[str, Any]]:
     return out
 
 
+def turn_costs(items: List[Dict[str, Any]], key: str = "cost") -> Optional[float]:
+    """Each item's own cost, set in place under ``key``, and the total. Claude reports a resumed session's
+    running total, so a turn costs the increase over that session's previous report."""
+    ordered = sorted((x for x in items if x.get("status") != "running"),
+                     key=lambda x: x.get("ended_at") or x.get("ts") or x.get("started_at") or "")
+    last: Dict[str, float] = {}
+    total, seen = 0.0, False
+    for x in ordered:
+        c = x.get(key)
+        if not isinstance(c, (int, float)):
+            continue
+        sid = x.get("session_id") or ""
+        prev = last.get(sid, 0.0) if sid else 0.0
+        x[key] = round(c - prev if c >= prev else c, 6)
+        if sid:
+            last[sid] = c
+        total += x[key]
+        seen = True
+    return round(total, 4) if seen else None
+
+
+def _sub(tid: str, part: str, label: str, text: Any, open_: bool = False, cls: str = "") -> str:
+    return (f"<details class='sub {cls}' id='{e(tid)}-{part}'{' open' if open_ else ''}><summary>{e(label)}</summary>"
+            f"<div class='body'><pre>{e(text)}</pre></div></details>")
+
+
+def _preview(text: str) -> str:
+    """The opening words of a reply, joined across short or heading lines, for a folded row."""
+    out = ""
+    for ln in (text or "").splitlines():
+        ln = re.sub(r"\s+", " ", re.sub(r"<[^>]+>|[#*`>|_]+", " ", ln)).strip()
+        if len(ln) > 3:
+            out = f"{out} {ln}".strip()
+            if len(out) > 60 and not ln.endswith(":"):
+                break
+    return out[:200]
+
+
 def _turn_html(t: Dict[str, Any]) -> str:
-    meta = t.get("meta") or {}
-    cost = meta.get("turn_cost_usd", meta.get("total_cost_usd"))
+    tid = str(t.get("turn_id"))
+    cost = t.get("_cost")
+    out = t.get("output") or ""
+    verdict = ""
+    if t.get("role") == "verifier":
+        m = re.findall(r"<verdict>\s*(PASS|FAIL)|VERDICT:\s*\**\s*(PASS|FAIL)", out, re.I)
+        if m:
+            v = [a or b for a, b in m][-1].upper()
+            verdict = pill(v)
     head = (f'<summary>{pill(t.get("status"))}<b>{e(t.get("agent"))}</b>'
-            f'<span class="tag">{e(t.get("role"))} · {e(t.get("purpose"))}</span>'
-            f'<span class="tag mono">{e(t.get("turn_id"))}</span>'
-            f'<span class="tag">{e(t.get("duration_s") if t.get("duration_s") is not None else "…")}s</span>'
-            + (f'<span class="tag">${cost:.4f}</span>' if isinstance(cost, (int, float)) else "")
+            f'<span class="tag">{e(t.get("purpose"))}</span>{verdict}'
+            + (f'<span class="tag">❓ {e(t.get("asked"))}</span>' if t.get("asked") else "")
+            + f'<span class="tag mono">{e(tid)}</span>'
+            f'<span class="tag">{e((t.get("started_at") or "")[5:16].replace("T", " "))}</span>'
+            f'<span class="tag">{_dur(t.get("duration_s"))}</span>'
+            + (f'<span class="tag">${cost:.2f}</span>' if isinstance(cost, (int, float)) else "")
+            + (f'<span class="prev">{e(_preview(out))}</span>' if out else "")
             + "</summary>")
-    kv = [("backend", t.get("backend")), ("session", t.get("session_id")),
+    meta = t.get("meta") or {}
+    kv = [("backend", t.get("backend")), ("model", (t.get("options") or {}).get("model")),
+          ("session", t.get("session_id")),
           ("session turn", f'{t.get("session_turn")} ({"resumed" if t.get("resumed_session") else "new session"})'),
           ("cwd", t.get("cwd")), ("started", t.get("started_at")), ("ended", t.get("ended_at")),
           ("exit code", t.get("exit_code")), ("attempts", len(t.get("attempts") or []) or None)]
@@ -142,19 +220,28 @@ def _turn_html(t: Dict[str, Any]) -> str:
         if k in meta:
             kv.append((k, meta[k]))
     kvh = "".join(f"<div class='mute'>{e(k)}</div><div class='mono'>{e(v)}</div>" for k, v in kv if v not in (None, ""))
-    parts = [f"<div class='kv'>{kvh}</div>"]
-    if t.get("system_prompt"):
-        parts.append(f"<details class='turn' id='{e(t.get('turn_id'))}-sys'><summary class='tag'>system prompt</summary><div class='body'><pre>{e(t['system_prompt'])}</pre></div></details>")
-    parts.append(f"<div class='label'>input</div><pre>{e(t.get('input'))}</pre>")
+    parts = []
     if t.get("status") == "running":
         parts.append("<div class='label'>output</div><pre class='mute'>running…</pre>")
     else:
-        parts.append(f"<div class='label'>output</div><pre>{e(t.get('output') or '(empty)')}</pre>")
+        parts.append(_sub(tid, "out", "output", out or "(empty)", open_=True, cls="out"))
+    parts.append(_sub(tid, "in", f"input · {len(t.get('input') or ''):,} chars", t.get("input")))
+    if t.get("system_prompt"):
+        parts.append(_sub(tid, "sys", "system prompt", t["system_prompt"]))
     if t.get("stderr"):
-        parts.append(f"<div class='label'>stderr</div><pre>{e(t['stderr'])}</pre>")
+        parts.append(_sub(tid, "err", "stderr", t["stderr"]))
     if t.get("command"):
-        parts.append(f"<div class='label'>command</div><pre>{e(' '.join(map(str, t['command'])))}</pre>")
-    return f"<details class='turn' id='{e(t.get('turn_id'))}'>{head}<div class='body'>{''.join(parts)}</div></details>"
+        parts.append(_sub(tid, "cmd", "command", " ".join(map(str, t["command"]))))
+    parts.append(f"<details class='sub' id='{e(tid)}-meta'><summary>details</summary><div class='body'><div class='kv'>{kvh}</div></div></details>")
+    return (f"<details class='turn' id='{e(tid)}' data-agent='{e(t.get('agent'))}'>{head}"
+            f"<div class='body'>{''.join(parts)}</div></details>")
+
+
+def _dur(s: Any) -> str:
+    if not isinstance(s, (int, float)):
+        return "…"
+    s = int(s)
+    return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else (f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s")
 
 
 def _checklist_html(rdirs: List[Path]) -> str:
@@ -200,26 +287,35 @@ def _checklist_html(rdirs: List[Path]) -> str:
         vals = [rows[k][ci][0] for k in order if ci in rows[k]]
         totals.append(f"<td style='text-align:center' class='mono'>{sum(vals)}/{len(vals)}</td>")
     body.append(f"<tr><td class='mute'>done</td>{''.join(totals)}</tr>")
-    return ("<h2>Reviewer checklist</h2><p class='mute' style='margin:-4px 0 8px'>Kept by the reviewer only; "
+    return ("<p class='mute' style='margin:0 0 8px'>Kept by the reviewer only; "
             "the worker gets the prose feedback without it. Hover a cell for that review's wording.</p>"
             "<div style='overflow-x:auto'><table><tr><th>item</th>" + head + "</tr>" + "".join(body) + "</table></div>")
 
 
-def write_run_report(run_dir: Path) -> Path:
+def render_run_report(run_dir: Path) -> str:
     st = read_json(run_dir / "state.json", {}) or {}
     status = st.get("status", "?")
     tc = st.get("turn_counts") or {}
+    rounds_dir = run_dir / "rounds"
+    rdirs = sorted([p for p in rounds_dir.iterdir() if p.is_dir()]) if rounds_dir.is_dir() else []
+    rounds = [(rdir, read_json(rdir / "round.json", {}) or {}, _turns_for_round(rdir)) for rdir in rdirs]
+    every = [t for _, _, ts in rounds for t in ts]
+    for t in every:
+        t["_cost"] = (t.get("meta") or {}).get("turn_cost_usd", (t.get("meta") or {}).get("total_cost_usd"))
+    total = turn_costs(every, "_cost")
+    agents = sorted({str(t.get("agent")) for t in every})
     cards = [("status", pill(status)), ("mode", e(st.get("mode"))),
              ("round", f"{e(st.get('round'))} / {e(st.get('max_rounds'))}"),
              ("turns", f"{e(tc.get('total', 0))} <span class='mute' style='font-size:12px'>({e(tc.get('ok', 0))} ok · {e(tc.get('error', 0) + tc.get('timeout', 0))} failed)</span>"),
-             ("cost", f"${st.get('cost_usd', 0):.4f}" if st.get("cost_usd") else "—"),
-             ("started", e((st.get("started_at") or "")[:19].replace("T", " "))),
-             ("updated", e((st.get("updated_at") or "")[:19].replace("T", " ")))]
+             ("cost (reported)", f"${total:,.2f}" if total else "—"),
+             ("started", e((st.get("started_at") or "")[:16].replace("T", " "))),
+             ("updated", e((st.get("updated_at") or "")[:16].replace("T", " ")))]
     body = [f"<p class='mute'><a href='../../index.html'>← all runs</a></p>",
             f"<h1>{e(st.get('monitor'))} <span class='mute mono' style='font-size:14px'>{e(st.get('run_id'))}</span></h1>",
             f"<div class='mute mono'>{e(st.get('working_dir'))}</div>",
             "<div class='grid'>" + "".join(f"<div class='card'><div class='k'>{k}</div><div class='v'>{v}</div></div>" for k, v in cards) + "</div>",
-            f"<h2>Goal</h2><div class='goal'>{e(st.get('goal') or '(none)')}</div>"]
+            f"<details id='goal'><summary><b>Goal</b><span class='prev'>{e(_preview(st.get('goal') or ''))}</span></summary>"
+            f"<div class='body'><div class='goal'>{e(st.get('goal') or '(none)')}</div></div></details>"]
     if st.get("final_report"):
         body.append(f"<h2>Final report</h2><div class='goal'>{e(st['final_report'])}</div>")
     if st.get("error"):
@@ -230,40 +326,74 @@ def write_run_report(run_dir: Path) -> Path:
             f"<tr><td><b>{e(a)}</b></td><td>{e(s.get('role'))}</td><td class='hide-sm'>{e(s.get('backend'))}</td>"
             f"<td class='mono'>{e(s.get('session_id'))}</td><td>{e(s.get('turns'))}</td><td>{pill(s.get('last_status'))}</td></tr>"
             for a, s in sessions.items())
-        body.append("<h2>Sessions</h2><table><tr><th>agent</th><th>role</th><th class='hide-sm'>backend</th>"
-                    f"<th>session id</th><th>turns</th><th>last</th></tr>{rows}</table>")
-    rounds_dir = run_dir / "rounds"
-    rdirs = sorted([p for p in rounds_dir.iterdir() if p.is_dir()], reverse=True) if rounds_dir.is_dir() else []
-    body.append(_checklist_html(list(reversed(rdirs))))
-    body.append("<h2>Rounds</h2>")
-    if not rdirs:
+        body.append("<details id='sessions'><summary><b>Sessions</b></summary><div class='body'><table><tr><th>agent</th><th>role</th>"
+                    f"<th class='hide-sm'>backend</th><th>session id</th><th>turns</th><th>last</th></tr>{rows}</table></div></details>")
+    ck = _checklist_html(rdirs)
+    if ck:
+        body.append(f"<details id='checklist'><summary><b>Reviewer checklist</b><span class='tag'>item × review</span></summary>"
+                    f"<div class='body'>{ck}</div></details>")
+
+    # milestones -> rounds -> turns, newest first; only the newest milestone and round start open
+    titles = [m.get("title") or m.get("name") or "" for m in ((st.get("managed") or {}).get("milestones") or [])]
+    groups: List[Tuple[Any, List[Any]]] = []
+    for r in rounds:
+        ms = next((t.get("milestone") for t in r[2] if t.get("milestone") is not None), None)
+        if groups and groups[-1][0] == ms:
+            groups[-1][1].append(r)
+        else:
+            groups.append((ms, [r]))
+    who = "".join(f"<button data-who='{e(a)}'>{e(a)}</button>" for a in agents)
+    body.append("<h2>Rounds</h2><div class='bar'><button class='on' data-who='all'>everyone</button>" + who +
+                "<input id='q' type='search' placeholder='Search inputs and outputs…'>"
+                "<button data-all='1' data-sel='details.ms,details.rnd'>expand rounds</button>"
+                "<button data-all='0' data-sel='details.ms,details.rnd,details.turn'>collapse all</button></div>")
+    if not rounds:
         body.append("<p class='mute'>No rounds yet.</p>")
-    for i, rdir in enumerate(rdirs):
-        rs = read_json(rdir / "round.json", {}) or {}
-        turns = _turns_for_round(rdir)
-        extra = []
-        if rs.get("verdicts"):
-            over = rs.get("checklist_overruled") or []
-            extra.append("Verdicts: " + " ".join(
-                f"{e(k)} {pill(v)}" + (" <span class='tag'>(said PASS with open checklist items)</span>" if k in over else "")
-                for k, v in rs["verdicts"].items()))
-        d = rs.get("directive") or {}
-        if d.get("summary"):
-            extra.append(f"Controller: {e(d['summary'])}")
-        if rs.get("error"):
-            extra.append(f"<span class='pill error'>error</span> {e(rs['error'])}")
-        rstatus = rs.get("status", "?")
-        open_attr = " open" if i == 0 else ""
-        body.append(
-            f"<details id='{e(rdir.name)}'{open_attr}><summary><b>Round {e(rs.get('round', rdir.name))}</b>{pill(rstatus)}"
-            f"<span class='tag'>{len(turns)} turns</span><span class='tag'>{e(rs.get('decision') or '')}</span></summary>"
-            f"<div class='body'>" + "".join(f"<div class='decision'>{x}</div>" for x in extra)
-            + "".join(_turn_html(t) for t in turns) + "</div></details>")
-    body.append("<p class='mute' style='margin-top:24px'>Files: <code>state.json</code>, <code>events.jsonl</code>, "
-                "<code>progress.md</code>, <code>rounds/</code>. Steer with <code>orch inject</code>, stop with <code>orch stop</code>.</p>")
+    for gi, (ms, rs_) in enumerate(reversed(groups)):
+        if ms is None:
+            name = "Planning" if rs_[0][0].name == "r000" else "Rounds"
+        else:
+            i = int(ms)
+            name = f"Milestone {i + 1}" + (f" · {titles[i]}" if i < len(titles) and titles[i] else "")
+        nturns = sum(len(x[2]) for x in rs_)
+        rn = [str(x[1].get("round", int(x[0].name[1:]) if x[0].name[1:].isdigit() else "?")) for x in rs_]
+        span = f"rounds {rn[0]}–{rn[-1]}" if len(rn) > 1 else f"round {rn[0]}"
+        inner = []
+        for ri, (rdir, rs, turns) in enumerate(reversed(rs_)):
+            extra = []
+            if rs.get("verdicts"):
+                over = rs.get("checklist_overruled") or []
+                extra.append("Verdicts: " + " ".join(
+                    f"{e(k)} {pill(v)}" + (" <span class='tag'>(said PASS with open checklist items)</span>" if k in over else "")
+                    for k, v in rs["verdicts"].items()))
+            d = rs.get("directive") or {}
+            if d.get("summary"):
+                extra.append(f"Controller: {e(d['summary'])}")
+            if rs.get("error"):
+                extra.append(f"<span class='pill error'>error</span> {e(rs['error'])}")
+            rcost = sum(t["_cost"] for t in turns if isinstance(t.get("_cost"), (int, float)))
+            verd = " ".join(pill(v) for v in (rs.get("verdicts") or {}).values())
+            first = gi == 0 and ri == 0
+            inner.append(
+                f"<details class='rnd' id='{e(rdir.name)}'{' open' if first else ''}><summary><b>{'Plan' if rdir.name == 'r000' else 'Round ' + e(rs.get('round', rdir.name))}</b>"
+                f"{pill(rs.get('status', '?'))}{verd}<span class='tag'>{len(turns)} turns</span>"
+                + (f"<span class='tag'>${rcost:.2f}</span>" if rcost else "")
+                + f"<span class='tag'>{e(rs.get('decision') or '')}</span></summary>"
+                f"<div class='body'>" + "".join(f"<div class='decision'>{x}</div>" for x in extra)
+                + "".join(_turn_html(t) for t in turns) + "</div></details>")
+        body.append(f"<details class='ms' id='ms-{e(ms)}-{e(rs_[0][0].name)}'{' open' if gi == 0 else ''}><summary><b>{e(name)}</b>"
+                    f"<span class='tag'>{span} · {nturns} turns</span></summary><div class='body'>{''.join(inner)}</div></details>")
+    body.append("<p class='mute' style='margin-top:24px'>Costs are what each agent's CLI reports for the turn "
+                "(the increase in its session's total). Files: <code>state.json</code>, <code>events.jsonl</code>, "
+                "<code>progress.md</code>, <code>rounds/</code>.</p>")
+    return page(f"{st.get('monitor')} · {st.get('run_id')}", "".join(body), live=status in ("running", "starting"))
+
+
+def write_run_report(run_dir: Path) -> Path:
     out = run_dir / "report.html"
-    out.write_text(page(f"{st.get('monitor')} · {st.get('run_id')}", "".join(body),
-                        live=status in ("running", "starting")), encoding="utf-8")
+    tmp = out.with_suffix(".html.tmp")
+    tmp.write_text(render_run_report(run_dir), encoding="utf-8")
+    tmp.replace(out)
     return out
 
 
@@ -279,7 +409,7 @@ def collect_runs(output_root: Path) -> List[Dict[str, Any]]:
     return runs
 
 
-def write_index(output_root: Path) -> Path:
+def render_index(output_root: Path) -> str:
     runs = collect_runs(output_root)
     live = any(r.get("status") in ("running", "starting") for r in runs)
     rows = []
@@ -295,7 +425,11 @@ def write_index(output_root: Path) -> Path:
             + ("<table><tr><th>monitor</th><th>run</th><th>status</th><th>round</th><th>turns</th>"
                "<th class='hide-sm'>mode</th><th class='hide-sm'>updated</th></tr>" + "".join(rows) + "</table>"
                if rows else "<p class='mute'>No runs yet.</p>"))
+    return page("Orch runs", body, live)
+
+
+def write_index(output_root: Path) -> Path:
     out = output_root / "index.html"
     output_root.mkdir(parents=True, exist_ok=True)
-    out.write_text(page("Orch runs", body, live), encoding="utf-8")
+    out.write_text(render_index(output_root), encoding="utf-8")
     return out
