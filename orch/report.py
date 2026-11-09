@@ -301,7 +301,7 @@ def render_run_report(run_dir: Path) -> str:
     rounds = [(rdir, read_json(rdir / "round.json", {}) or {}, _turns_for_round(rdir)) for rdir in rdirs]
     every = [t for _, _, ts in rounds for t in ts]
     for t in every:
-        t["_cost"] = (t.get("meta") or {}).get("turn_cost_usd", (t.get("meta") or {}).get("total_cost_usd"))
+        t["_cost"] = (t.get("meta") or {}).get("total_cost_usd")  # running session totals; turn_costs takes the steps
     total = turn_costs(every, "_cost")
     agents = sorted({str(t.get("agent")) for t in every})
     cards = [("status", pill(status)), ("mode", e(st.get("mode"))),
