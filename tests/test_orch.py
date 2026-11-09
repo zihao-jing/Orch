@@ -614,6 +614,33 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(rec3.state["managed"]["milestones"][0]["rounds"], 2)  # as without the crash, not 3
         self.assertEqual(sorted({x["round"] for x in turns(rec3) if x["agent"] == "writer"}), [1, 2])
 
+    def test_a_reset_after_a_cut_off_turn_is_not_undone_by_resume(self):
+        from orch.managed import ManagedRunner
+        from orch.recorder import Recorder, live_event
+        cfg = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        mon = cfg.monitor("m")
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        rec2 = Recorder.create(str(self.tmp / "out"), "m", mon.snapshot())
+        st = json.loads(json.dumps(rec.state))
+        w = next(t for t in turns(rec) if t["agent"] == "writer")
+        st["managed"].update(phase="work", ms=0, ms_round=1, feedback={"writer": "Make the tables."})
+        st["managed"]["milestones"][0].update(status="active", score=None)
+        st["managed"].pop("in_work", None)
+        st["sessions"]["writer"] = {"session_id": None, "turns": 0, "reset_at": "2026-01-02T00:00:00+00:00"}
+        st.update(round=1, status="running")
+        rec2.state.update(st)
+        rec2.save()
+        t = dict(w, status="stopped", session_id="mock-old", output="", round=1, seq=1,
+                 turn_id="r001-t01-writer", started_at="2026-01-01T00:00:00+00:00")
+        rec2.write_turn(t)
+        live_event(rec2.run_dir, t["turn_id"], {"k": "session", "s": "mock-old"})
+        r = ManagedRunner(mon, threading.Event(), resume=True, log=lambda s: None)
+        self.assertEqual(r.run(), "completed")
+        rec3 = Recorder(rec2.run_dir, rec2.output_root)
+        redo = next(x for x in turns(rec3) if x["agent"] == "writer" and x["turn_id"] != "r001-t01-writer")
+        self.assertNotEqual(redo["session_id"], "mock-old")  # the reset stands: a new session
+        self.assertNotIn("cut off when the run was restarted", redo["input"])
+
     def test_my_note_survives_a_restart_mid_turn(self):
         from orch.managed import ManagedRunner
         from orch.recorder import Recorder

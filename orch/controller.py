@@ -384,6 +384,9 @@ class MonitorRunner:
             rec.write_turn(t)
             if t.get("backend", agent.backend) != agent.backend:
                 sid = None  # the agent moved to another backend: its old session can't be resumed
+            reset_at = (self.st["sessions"].get(agent.name) or {}).get("reset_at") or ""
+            if sid and reset_at and reset_at >= (t.get("started_at") or ""):
+                sid = None  # the agent was reset after this turn: start fresh, as the reset asked
             if sid:
                 sess = self.st["sessions"].get(agent.name) or {}
                 rec.update_session(agent.name, session_id=sid, backend=agent.backend, role=agent.role,
