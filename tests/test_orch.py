@@ -624,6 +624,86 @@ class TestManaged(unittest.TestCase):
             os.chdir(here)
         self.assertEqual([j["pid"] for j in found], [901])
 
+    AUDIT_REPLY = ("<points>\n1. The critic resends its whole checklist. Evidence: r001. Fix: send the change only.\n"
+                   "2. Second point.\n3. Third point.\n</points>\n<findings>\n"
+                   "- [repetition] the checklist is resent every round · seen 1× since 2026-11-09 · open\n</findings>")
+
+    def _audited(self, auditor_opts, controller=None):
+        m = managed(controller={"audit_every": 1, "audit_points": 2, **(controller or {})}, mgr={"milestones": 1})
+        m["agents"].append({"name": "auditor", "role": "auditor", "backend_options": auditor_opts})
+        return run(make_cfg(self.tmp, [m]))
+
+    def test_the_auditor_reads_the_conversation_every_n_rounds_and_keeps_its_findings(self):
+        from orch import audit
+        status, rec = self._audited({"replies": {"audit": [self.AUDIT_REPLY]}})
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        last = max(int(t["round"]) for t in ts)
+        self.assertFalse(any(t["agent"] == "auditor" for t in ts))  # outside the team: not a turn of the run
+        self.assertFalse(any("resends its whole checklist" in (t["input"] or "") for t in ts))  # never reaches them
+        self.assertEqual(rec.state["managed"]["audit"]["through"], last)
+        evs = [json.loads(l) for l in (rec.run_dir / "events.jsonl").read_text().splitlines()]
+        audits = [e for e in evs if e["event"] == "audit"]
+        self.assertEqual([e["rounds"] for e in audits], [[r, r] for r in range(1, last + 1)])  # every round, then none
+        f = rec.run_dir.parent / "audit-auditor.md"
+        text = f.read_text()
+        self.assertIn("- [repetition] the checklist is resent every round", text)
+        self.assertEqual(text.count("- [repetition]"), 1)  # the list is replaced, not appended
+        self.assertEqual(text.count("### "), last)
+        self.assertIn("2. Second point.", text)
+        self.assertNotIn("3. Third point.", text)  # at most audit_points
+        sent = sorted((rec.run_dir / "audits").glob("*.md"))
+        self.assertEqual(len(sent), last)
+        self.assertIn("## System prompts", sent[0].read_text())
+        if last > 1:  # the next audit gets the findings so far, and the prompts only if they changed
+            self.assertIn("the checklist is resent every round", sent[1].read_text())
+            self.assertIn("**writer**", sent[0].read_text())
+            self.assertNotIn("**writer**", sent[1].read_text())  # shown once; again only when it changes
+        self.assertEqual(audit.findings_lines(f), ["[repetition] the checklist is resent every round · seen 1× since "
+                                                   "2026-11-09 · open"])
+
+    def test_a_failed_audit_does_not_stop_the_run(self):
+        status, rec = self._audited({"fail_turns": [1]})
+        self.assertEqual(status, "completed")
+        self.assertIn("did not finish", (rec.run_dir / "progress.md").read_text())
+        self.assertFalse((rec.run_dir.parent / "audit-auditor.md").exists())
+
+    def test_the_digest_traces_where_each_part_of_a_message_came_from(self):
+        from orch import audit
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        last = max(int(t["round"]) for t in turns(rec))
+        md, st = audit.build(rec.run_dir, 1, last)
+        work = [t for t in turns(rec) if t["agent"] == "writer" and int(t["round"]) >= 1]
+        for t in work:
+            self.assertIn(f"| {t['turn_id']} | work |", md)
+        crit = [t for t in turns(rec) if t["agent"] == "critic" and t.get("output")]
+        self.assertIn("worker", st["origin"].get("critic", {}))  # the worker's report reached the critic
+        self.assertIn("## System prompts", md)
+        md2, _ = audit.build(rec.run_dir, 1, last, prompts_seen=st["prompts"])
+        self.assertNotIn("## System prompts", md2)  # unchanged since the last audit
+
+    def test_the_digest_flags_a_resent_message_and_a_note_that_waited(self):
+        from orch import audit
+        rd = self.tmp / "run"
+        (rd / "rounds" / "r001").mkdir(parents=True)
+        (rd / "inbox" / "consumed").mkdir(parents=True)
+        big = "\n\n".join(f"Paragraph {i}: " + "the same long instruction, sent again " * 3 for i in range(60))
+        for seq, (agent, role, inp, out, t0) in enumerate([
+                ("w", "worker", big, "Done the first part, details follow." * 20, "2026-11-09T10:00:00+08:00"),
+                ("w", "worker", big, "ok", "2026-11-09T10:20:00+08:00")], 1):
+            (rd / "rounds" / "r001" / f"t{seq:02d}-{agent}.json").write_text(json.dumps({
+                "turn_id": f"r001-t{seq:02d}-{agent}", "round": 1, "agent": agent, "role": role, "purpose": "work",
+                "status": "ok", "started_at": t0, "ended_at": t0.replace(":00:00", ":05:00").replace(":20:00", ":25:00"),
+                "input": inp, "output": out, "system_prompt": "You are the worker."}))
+        (rd / "inbox" / "consumed" / "20261109-090000-1-board-note.json").write_text(
+            json.dumps({"to": ["w"], "message": "Please stop the sweep."}))
+        (rd / "events.jsonl").write_text(json.dumps({"ts": "2026-11-09T10:20:00+08:00", "event": "human_messages",
+                                                     "files": ["20261109-090000-1-board-note.json"]}) + "\n")
+        md, st = audit.build(rd, 1, 1)
+        kinds = {f["kind"] for f in st["flags"]}
+        self.assertTrue({"repeated content", "short or failed reply", "note waited"} <= kinds, kinds)
+        self.assertIn("waited 80 min", md)
+
     def test_a_wait_on_a_process_outside_the_workspace_is_dropped(self):
         # a wait saved by an older orch: pid 1 (a root daemon, its directory can't be read) was taken for a job
         from unittest import mock
@@ -1216,7 +1296,13 @@ class TestProjectFolder(unittest.TestCase):
         c = mon.controller
         self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 25, 100))
         self.assertTrue(mon.goal.startswith("Describe what you want done"))
-        self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker")])
+        self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker"),
+                                                                ("auditor", "auditor")])
+        aud = mon.agent("auditor")
+        self.assertFalse((d / "agents/auditor/system_prompt.md").exists())  # orch's own prompt: it audits orch
+        self.assertIn("You are the auditor", aud.current_system_prompt())
+        self.assertEqual((mon.controller.audit_every, mon.controller.audit_points), (10, 5))
+        self.assertIn("Bash", aud.backend_options["disallowed_tools"])
         critic = mon.agent("critic")
         sp = critic.current_system_prompt()
         self.assertTrue(sp.startswith("You are the critic, a careful reviewer. I lead this work"), sp[:80])
