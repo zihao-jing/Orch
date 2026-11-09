@@ -160,7 +160,7 @@ session keeps the protocol in view without being pushed to add tags it doesn't n
 conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. Each agent
 starts a new session on its next turn with a handover: the manager gets the goal, its approved plan and rubric, the
 milestone table and the critic's latest report; the critic gets its current instruction and its latest review with
-the checklist; the worker its latest report; all get the decisions register and anything the run is paused on. The
+the checklist; the worker its latest report. All get the decisions register (the worker without who made each decision), and the manager and critic anything the run is paused on. The
 board chat follows the new session.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
