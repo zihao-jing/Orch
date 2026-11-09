@@ -548,6 +548,41 @@ class TestManaged(unittest.TestCase):
         self.assertIn("over with the authors", r.st["fwd"]["critic"][0])
         self.assertNotIn("boss", r.st.get("fwd") or {})  # the manager was in the conversation
 
+    def test_settle_with_my_answer_sends_it_to_the_manager(self):
+        from unittest import mock
+        from orch import board as B
+        from orch.backends import TurnResult
+        from orch.managed import ManagedRunner
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        cfg = load_config(str(self.tmp / "cfg.json"))
+        r = ManagedRunner(cfg.monitor("m"), threading.Event(), log=lambda s: None)
+        r.rec = rec
+        r.new_question(r.manager, "human", "Real labels or test exports? A) Real B) Test C) Ask the authors", "t0")
+        rec.save()
+        seen = []
+
+        class Fake:
+            def run(self, req, stop):
+                seen.append(req.prompt)
+                return TurnResult("ok", "Count them as real labels.", req.session_id or "s1")
+        b = B.Board("m", lambda: rec.run_dir, cfg.monitor("m"))
+        with mock.patch.object(B, "get_backend", lambda name: Fake()):
+            b.chat("These are the real labels.", qid="Q1", settle=True)
+            for _ in range(100):
+                if seen:
+                    break
+                time.sleep(0.05)
+        self.assertIn("These are the real labels.", seen[0])
+        self.assertIn("not by your earlier recommendation", seen[0])
+
+    def test_claude_can_skip_my_hooks(self):
+        from orch.backends import ClaudeBackend, TurnRequest
+        req = lambda o: TurnRequest("a", "worker", "hi", "", None, ".", 10, o)
+        cmd, _ = ClaudeBackend().build_command(req({"disable_hooks": True}))
+        self.assertIn('{"disableAllHooks": true}', cmd)
+        cmd, _ = ClaudeBackend().build_command(req({}))
+        self.assertNotIn("--settings", cmd)
+
     def test_resume_continues_an_interrupted_worker_turn(self):
         from orch.managed import ManagedRunner
         from orch.recorder import Recorder, live_event
@@ -754,6 +789,9 @@ class TestManaged(unittest.TestCase):
         pause = [t for t in ts if t["purpose"] == "pause"]
         self.assertEqual(len(pause), 1)
         self.assertIn("four CSV files", pause[0]["input"])  # the critic proposed, the manager decided
+        later = [t for t in ts[ts.index(pause[0]) + 1:] if t["agent"] == "boss"]
+        self.assertTrue(later, [(t["agent"], t["purpose"]) for t in ts])
+        self.assertIn("Labels are in labels/v2.", later[0]["input"])  # the manager hears it too
 
     def test_manager_can_turn_down_a_proposed_pause(self):
         crit = {"replies": {"verify": [

@@ -360,6 +360,13 @@ The repository is at `{{cwd}}`.
     "manager_question_settle": "Let's settle {{qid}} here. In a few lines, write what {{critic}} should go by "
                                "from now on: what we decided, and anything it changes in their instructions. "
                                "Write it as you would tell {{critic}}; nothing else.",
+    "manager_question_settle_mine": "My answer: {{message}}\n\nLet's settle {{qid}} on that. In a few lines, write what "
+                                    "{{critic}} should go by from now on: my decision, and anything it changes in their "
+                                    "instructions. Go by my answer, not by your earlier recommendation; if it fits none "
+                                    "of the options exactly, follow what I said. Write it as you would tell {{critic}}; "
+                                    "nothing else.",
+    "manager_resumed": "I ended the pause and said this (it went to {{critic}} too): \"{{message}}\"\n\n"
+                       "What the pause was waiting for: {{waited}}",
     "relay_note": "{{note}}",
     "tag_reminder_manager": "A reminder, in case it helps (not a request to add anything): what is for {{critic}} goes in "
                             "<message to=\"{{critic}}\">…</message>; a decision only I can make in <question>…</question> "

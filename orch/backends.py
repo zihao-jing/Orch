@@ -174,7 +174,8 @@ class ClaudeBackend(Backend):
     """Claude Code in print mode.
 
     options: executable, model, effort, permission_mode, allowed_tools, disallowed_tools, add_dirs,
-             max_turns, mcp_config, system_prompt_mode (append|replace), extra_args
+             max_turns, mcp_config, system_prompt_mode (append|replace), disable_hooks (bool: skip the hooks in
+             your Claude settings, e.g. a terminal integration that waits on the terminal app), extra_args
     """
 
     name = "claude"
@@ -210,6 +211,8 @@ class ClaudeBackend(Backend):
             cmd += ["--add-dir", os.path.expanduser(d)]
         if o.get("max_turns"):
             cmd += ["--max-turns", str(o["max_turns"])]
+        if o.get("disable_hooks"):
+            cmd += ["--settings", json.dumps({"disableAllHooks": True})]
         if o.get("mcp_config"):
             cmd += ["--mcp-config", os.path.expanduser(str(o["mcp_config"]))]
         cmd += _opt_list(o.get("extra_args"))

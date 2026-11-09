@@ -171,6 +171,8 @@ class Board:
             shown = message or "Let's settle it."
             if settle:
                 message = render(self.mon.controller.templates["manager_question_settle"], **values).strip()
+                if values["message"].strip():  # what I typed with "Settle it" is my answer: it must reach the manager
+                    message = render(self.mon.controller.templates["manager_question_settle_mine"], **values).strip()
                 if first:
                     message = render(self.mon.controller.templates["manager_question_chat"],
                                      **{**values, "message": message}).strip()

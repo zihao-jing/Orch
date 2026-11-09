@@ -969,6 +969,8 @@ class ManagedRunner(MonitorRunner):
         msg = (d.get("message") or "").strip()
         if msg:
             self.decide(msg, "you", "wait")
+            self.forward(self.manager, self.mtpl("manager_resumed", message=msg,
+                                                 waited=truncate(w.get("proposal") or w.get("text", ""), 600)).strip())
         r = self.say(self.critic, self.mtpl("critic_resume", message=msg or "(no message)",
                                             waited=w.get("proposal") or w.get("text", ""),
                                             human_messages=""), "guidance")
