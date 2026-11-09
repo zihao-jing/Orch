@@ -2,7 +2,7 @@
 
 Every signal is an XML-style tag with a start and an end, so orch never has to guess where a block stops:
 
-    <message to="critic">…</message>   delivered only to that agent
+    <message to="critic">…</message>   delivered only to that agent (urgent="yes": cuts into its running turn)
     <question>…</question>             one decision for the level above (one tag per question)
     <pause>…</pause>                   a pause (proposed by the critic, called by the manager)
     <checklist>…</checklist>           the critic's checklist (`- [x]` / `- [ ]` lines)
@@ -115,3 +115,8 @@ def addressed(attrs: Dict[str, str], *names: str) -> bool:
     """Is a <message to="…"> for one of these names (display name or agent name, "the" ignored)?"""
     to = _norm(attrs.get("to", ""))
     return bool(to) and any(to == _norm(n) for n in names if n)
+
+
+def urgent(attrs: Dict[str, str]) -> bool:
+    """<message to="…" urgent="yes">: deliver now, cutting into a running turn."""
+    return _norm(attrs.get("urgent", "")) in ("yes", "true", "1", "now")

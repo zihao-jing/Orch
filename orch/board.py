@@ -221,7 +221,8 @@ class Board:
             for attrs, body in T.blocks(text or "", "message"):  # <message to="critic"> -> that agent's next turn
                 for a in self.mon.agents:
                     if body and a.name != mgr.name and T.addressed(attrs, a.name, a.called):
-                        self.control({"to": [a.name], "message": body, "from": mgr.name})
+                        self.control({"to": [a.name], "message": body, "from": mgr.name,
+                                      **({"urgent": True} if T.urgent(attrs) else {})})
 
         threading.Thread(target=work, daemon=True).start()
         return {"id": cid}
@@ -359,7 +360,8 @@ def _handler(boards: Dict[str, Board]):
                 b.control({"kind": "gate", "gate": body.get("gate"), "message": msg,
                            "decision": "approve" if body.get("decision") == "approve" else "revise"})
             elif u.path == "/api/note":
-                b.control({"to": [body["to"]] if body.get("to") else None, "message": msg})
+                b.control({"to": [body["to"]] if body.get("to") else None, "message": msg,
+                           **({"urgent": True} if body.get("urgent") else {})})
             elif u.path == "/api/stop":
                 (b.run_dir / "STOP").write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
             else:

@@ -265,6 +265,27 @@ class Recorder:
             self.event("human_messages", count=len(msgs), files=[m["file"] for m in msgs])
         return msgs
 
+    def urgent_notes(self) -> List[Dict[str, Any]]:
+        """Urgent human messages waiting in inbox/ (not consumed): [{to: [..]|None}]. One of these cuts into the
+        turn that is running now, instead of waiting for the next one."""
+        out: List[Dict[str, Any]] = []
+        try:
+            files = sorted((self.run_dir / "inbox").glob("*.json"))
+        except OSError:
+            return out
+        for p in files:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or data.get("kind") or not data.get("urgent"):
+                continue
+            if not str(data.get("message", "")).strip():
+                continue
+            to = data.get("to") or None
+            out.append({"to": [to] if isinstance(to, str) else to})
+        return out
+
     def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause")) -> List[Dict[str, Any]]:
         """Consume answer / approval files from inbox/ (oldest first)."""
         inbox = self.run_dir / "inbox"

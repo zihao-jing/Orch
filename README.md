@@ -344,6 +344,20 @@ With a file, the steering commands take the output directory and a monitor name,
 `orch show orch-runs -m api-feature`, `orch inject orch-runs/api-feature "Use pytest" --to implementer`,
 `orch run my.yaml -m api-feature --resume`.
 
+### Urgent messages
+
+A message normally waits for its agent's next turn. An urgent one cuts into the turn that is running now:
+
+* `orch inject <project> "Stop the provenance checks" --to worker --urgent`: if the worker is mid-turn, that turn is
+  stopped and resumed in the same session with the message first; the agent then finishes the turn.
+* Managed mode, `--to critic --urgent` while the worker is mid-turn: the worker's turn ends where it is (its partial
+  report is marked as cut short, and the review does not wait for jobs it left running), so the critic reads the
+  message at once and redirects the work. The worker is told at its next turn why its last one ended early.
+* In a board chat, the manager can pass a change of course on with `<message to="critic" urgent="yes">`, which
+  works the same way. Its protocol tells it to do so only for what can't wait.
+
+The turn record lists each interruption (`interruptions`, `cut_short`), and the board's progress log marks it with ⚡.
+
 ## Backends
 
 * **claude**: runs `claude -p --output-format json` with the prompt on stdin. The first turn uses `--session-id <uuid>`, and later turns use `--resume <uuid>`. The system prompt is passed with `--append-system-prompt`, or with `--system-prompt` if you set `system_prompt_mode: replace`. Options: `model`, `effort`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `add_dirs`, `max_turns`, `mcp_config`, `extra_args`, `executable`. Cost, number of turns and error flags are recorded for each turn.

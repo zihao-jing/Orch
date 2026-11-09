@@ -194,6 +194,12 @@ class ManagedRunner(MonitorRunner):
     def inbox_broadcast(self, agent: AgentConfig) -> bool:
         return agent.role == "manager"  # notes to nobody in particular are for the manager
 
+    def yields_to(self, agent: AgentConfig, to: List[str]) -> bool:
+        return agent.role == "worker" and self.critic.name in to  # the critic redirects the work now, not after it
+
+    def cut_short_note(self, agent: AgentConfig) -> str:
+        return self.mtpl("worker_cut_short").strip()
+
     @property
     def mg(self) -> Dict[str, Any]:
         return self.st.setdefault("managed", {"phase": "plan", "ms": 0, "ms_round": 0, "milestones": [],
@@ -1106,8 +1112,14 @@ class ManagedRunner(MonitorRunner):
         if errors and c.stop_on_error:
             self.end_round(summary, "worker error → stop", errors=[r["turn_id"] for r in errors])
             return "failed"
+        for r in recs:  # ended early for an urgent message: the worker hears why at its next turn
+            if r.get("cut_short"):
+                self.forward(m.agent(r["agent"]), self.mtpl("worker_after_cut").strip())
+        cut = any(r.get("cut_short") for r in recs)
         jobs: Dict[str, Dict[str, Any]] = {}
-        if c.job_wait > 0:
+        if c.job_wait > 0 and cut:
+            self._procs = {}  # the critic acts now; it doesn't wait for a job the worker left running
+        elif c.job_wait > 0:
             outs = "\n".join(r.get("output") or "" for r in recs)
             skip = {int(a["pid"]) for a, _b in T.blocks(outs, "no-wait") if str(a.get("pid", "")).isdigit()}
             found = [j for j in _jobs.detect(getattr(self, "_procs", {}) or {},
@@ -1146,8 +1158,9 @@ class ManagedRunner(MonitorRunner):
                 if self.should_stop():
                     raise StopRequested()
                 self.check_control()
-                if mg.pop("job_release", False):
-                    why = "released"
+                if mg.pop("job_release", False) or any(n["to"] and self.critic.name in n["to"]
+                                                        for n in self.rec.urgent_notes()):
+                    why = "released"  # "Review now" on the board, or an urgent message for the critic
                     break
                 if not any(_jobs.alive(x, (j.get("cmds") or {}).get(str(x), "")) for j in agents.values()
                            for x in j["pids"]):

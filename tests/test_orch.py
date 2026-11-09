@@ -583,6 +583,75 @@ class TestManaged(unittest.TestCase):
         cmd, _ = ClaudeBackend().build_command(req({}))
         self.assertNotIn("--settings", cmd)
 
+    def _urgent_run(self, note: dict, worker_opts: dict):
+        """Run a one-milestone project; drop `note` (urgent) into the inbox while the writer's first turn runs."""
+        from unittest import mock
+        from orch.backends import MockBackend
+        sent, orig = [], MockBackend.run
+
+        def spy(self_, req, stop):
+            sent.append((req.agent, req.session_id, req.prompt))
+            return orig(self_, req, stop)
+
+        def drop():
+            for _ in range(400):
+                for t in (self.tmp / "out").glob("**/rounds/r*/t*-writer.json"):
+                    if (read_json(t) or {}).get("status") == "running":
+                        time.sleep(0.3)
+                        inbox = t.parents[2] / "inbox"
+                        (inbox / "20990101-000000-urgent.json").write_text(json.dumps({**note, "urgent": True}))
+                        return
+                time.sleep(0.05)
+        th = threading.Thread(target=drop, daemon=True)
+        th.start()
+        with mock.patch.object(MockBackend, "run", spy):
+            status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=worker_opts)]))
+        th.join(timeout=5)
+        return status, rec, sent
+
+    def test_an_urgent_message_cuts_into_the_running_turn_of_its_agent(self):
+        status, rec, sent = self._urgent_run({"to": ["writer"], "message": "Stop checking provenance."},
+                                             {"delay": 3, "replies": {"work": ["Done, without the provenance checks."]}})
+        self.assertEqual(status, "completed")
+        w = [t for t in turns(rec) if t["agent"] == "writer"]
+        first = w[0]
+        self.assertEqual(first["status"], "ok")
+        self.assertIn("Stop checking provenance.", first["interruptions"][0]["message"])
+        self.assertEqual(first["output"], "Done, without the provenance checks.")
+        calls = [x for x in sent if x[0] == "writer"]
+        self.assertTrue(calls[1][1] and calls[1][1] == first["session_id"])  # carried on in the same session
+        self.assertIn("I stopped you mid-turn", calls[1][2])
+        self.assertIn("Stop checking provenance.", calls[1][2])
+        self.assertNotIn("I stopped you mid-turn", calls[0][2])
+        for t in w[1:]:  # delivered once, not again at the next turn
+            self.assertNotIn("Stop checking provenance.", t["input"])
+        self.assertFalse((rec.state.get("fwd") or {}).get("writer"))
+        self.assertEqual(list((rec.run_dir / "inbox").glob("*.json")), [])
+
+    def test_an_urgent_message_for_the_critic_ends_the_workers_turn(self):
+        status, rec, sent = self._urgent_run({"to": ["critic"], "message": "Drop the inventory checks."},
+                                             {"delay": 3})
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        i = next(k for k, t in enumerate(ts) if t["agent"] == "writer")
+        w = ts[i]
+        self.assertTrue(w.get("cut_short"))
+        self.assertIn("ended this turn early so Jordan could act", w["output"])
+        self.assertLess(w["duration_s"], 3)
+        nxt = ts[i + 1]  # the critic goes next, with my message
+        self.assertEqual(nxt["agent"], "critic")
+        self.assertIn("Drop the inventory checks.", nxt["input"])
+        self.assertEqual(sum("Drop the inventory checks." in t["input"] for t in ts), 1)
+        w2 = next(t for t in ts[i + 1:] if t["agent"] == "writer")
+        self.assertIn("I ended your last turn early", w2["input"])
+
+    def test_the_manager_can_send_an_urgent_message_from_the_chat(self):
+        from orch import tags as T
+        a, body = T.blocks('<message to="Jordan" urgent="yes">Stop now.</message>', "message")[0]
+        self.assertTrue(T.urgent(a))
+        self.assertEqual(body, "Stop now.")
+        self.assertFalse(T.urgent(T.blocks('<message to="Jordan">x</message>', "message")[0][0]))
+
     def test_resume_continues_an_interrupted_worker_turn(self):
         from orch.managed import ManagedRunner
         from orch.recorder import Recorder, live_event

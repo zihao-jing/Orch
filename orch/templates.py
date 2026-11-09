@@ -399,6 +399,15 @@ the work must keep to. The repository is at `{{cwd}}`.
     "manager_resumed": "I ended the pause and said this (it went to {{critic}} too): \"{{message}}\"\n\n"
                        "What the pause was waiting for: {{waited}}",
     "relay_note": "{{note}}",
+    "urgent_resume": "I stopped you mid-turn for this, because it can't wait until you finish:\n\n{{note}}\n\n"
+                     "Take it into account from here. Anything you were running in the foreground was ended; check "
+                     "where it got to before you rely on it. Then finish the request you were working on, and reply "
+                     "as it asked.",
+    "urgent_cut_short": "(orch: I ended this turn early for an urgent message; the work above may be half done.)",
+    "worker_cut_short": "(orch: I ended this turn early so {{critic}} could act on an urgent message from me at once. "
+                        "The work may be half done; anything it was running in the foreground was ended.)",
+    "worker_after_cut": "I ended your last turn early to change course; anything it was running in the foreground was "
+                        "ended. What to do now follows.",
     "tag_reminder_manager": "A reminder, in case it helps (not a request to add anything): what is for {{critic}} goes in "
                             "<message to=\"{{critic}}\">…</message>; a decision only I can make in <question>…</question> "
                             "(one per question); stopping the whole run until I act in <pause>…</pause>; in reviews "

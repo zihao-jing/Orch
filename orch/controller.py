@@ -402,6 +402,40 @@ class MonitorRunner:
         rec.save()
         return out
 
+    def turn_cancel(self, agent: AgentConfig, hit: List[str]) -> Callable[[], bool]:
+        """What the backend polls during a turn: a stop, or an urgent message that should cut in now. Sets
+        hit[0] to "resume" (the message is for this agent) or "cut" (for the agent that directs it)."""
+        last = [0.0]
+
+        def cancel() -> bool:
+            if self.should_stop():
+                return True
+            now = time.monotonic()
+            if now - last[0] < 1.0:
+                return False
+            last[0] = now
+            how = self.urgent_hit(agent)
+            if how:
+                hit[:] = [how]
+                return True
+            return False
+        return cancel
+
+    def urgent_hit(self, agent: AgentConfig) -> Optional[str]:
+        notes = self.rec.urgent_notes()
+        if any((n["to"] and agent.name in n["to"]) or (not n["to"] and self.inbox_broadcast(agent)) for n in notes):
+            return "resume"
+        if any(n["to"] and self.yields_to(agent, n["to"]) for n in notes):
+            return "cut"
+        return None
+
+    def yields_to(self, agent: AgentConfig, to: List[str]) -> bool:
+        """Does an urgent message for one of `to` end this agent's running turn? (Managed: a worker yields to its critic.)"""
+        return False
+
+    def cut_short_note(self, agent: AgentConfig) -> str:
+        return self.tpl("urgent_cut_short").strip()
+
     def _live_session(self, turn_id: str) -> Optional[str]:
         try:
             for ln in (self.rec.run_dir / "live" / f"{turn_id}.jsonl").read_text(encoding="utf-8").splitlines():
@@ -536,11 +570,17 @@ class MonitorRunner:
         reason = ""
         lock = rec.agent_lock(agent.name)
         lock.__enter__()
-        for attempt in range(agent.retries + 1):
+        hit: List[str] = []
+        cancel = self.turn_cancel(agent, hit)
+        attempt, urgent_send = 0, ""
+        while attempt <= agent.retries:
             send = prompt
-            if attempt and res.session_id:  # correction: tell the agent what went wrong in its own session
+            if urgent_send:  # an urgent message cut in: the same session carries on with it
+                send, urgent_send = urgent_send, ""
+            elif attempt and res.session_id:  # correction: tell the agent what went wrong in its own session
                 send = (f"Your previous reply was unusable ({reason or res.status}). "
                         f"Please redo the last request and reply with text.\n\n{prompt}")
+            hit.clear()
             req = TurnRequest(
                 agent=agent.name, role=agent.role, prompt=send, system_prompt=record["system_prompt"],
                 session_id=sid, cwd=agent.working_dir, timeout=agent.timeout,
@@ -550,9 +590,32 @@ class MonitorRunner:
                 on_event=lambda ev, tid=record["turn_id"]: rec.live(tid, ev),
             )
             try:
-                res = backend.run(req, self.should_stop)
+                res = backend.run(req, cancel)
             except Exception:
                 res = TurnResult("error", "", sid, None, traceback.format_exc(), [], {})
+            if res.status == "stopped" and hit and not self.should_stop():
+                if hit[0] == "resume":  # the message is for this agent: it continues, with the message first
+                    note = self.human_text(agent.name, rec.take_inbox(agent.name, broadcast=self.inbox_broadcast(agent)))
+                    sid = res.session_id or self._live_session(record["turn_id"]) or sid
+                    if note:  # queued like any message until the turn ends, so a restart re-sends it
+                        self.st.setdefault("fwd", {}).setdefault(agent.name, []).append(note)
+                        fwd.append(note)
+                        prompt = f"{note}\n\n{prompt}"  # what a correction or a fresh session re-sends
+                    urgent_send = self.tpl("urgent_resume", note=note or "(no text)") if sid else prompt
+                    record.setdefault("interruptions", []).append({"at": now_iso(), "message": note})
+                    record["session_id"] = sid
+                    rec.write_turn(record)
+                    rec.event("urgent", turn=record["turn_id"], how="resume")
+                    rec.progress(f"⚡ `{record['turn_id']}` **{agent.name}**: an urgent message cut in; it carries on with it")
+                    self.log(f"r{rnd} ⚡ {agent.name}: urgent message, continuing in the same turn")
+                    continue
+                # the message is for the agent that directs this one: end this turn so that agent acts now
+                cut = self.cut_short_note(agent)
+                res = dataclasses.replace(res, status="ok", output=((res.output or "").rstrip() + "\n\n" + cut).strip())
+                record["cut_short"] = True
+                rec.event("urgent", turn=record["turn_id"], how="cut_short")
+                rec.progress(f"⚡ `{record['turn_id']}` **{agent.name}**: ended early for an urgent message")
+                self.log(f"r{rnd} ⚡ {agent.name}: ended early for an urgent message")
             st_, reason = classify(self.mon.controller, res)
             if st_ != res.status:
                 res = dataclasses.replace(res, status=st_)
@@ -564,6 +627,7 @@ class MonitorRunner:
             if res.status in ("ok", "stopped", "needs_human", "timeout") or self.should_stop():
                 break  # a timed-out turn is not re-run from scratch (it may have been running a long job)
             self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} → {res.status}")
+            attempt += 1
         lock.__exit__(None, None, None)
         if fwd and res.status != "stopped" and not self.should_stop():  # a stopped turn is re-sent on resume
             left = (self.st.get("fwd") or {}).get(agent.name) or []

@@ -420,8 +420,8 @@ def cmd_inject(a: argparse.Namespace) -> int:
         inbox = run / "inbox"
         inbox.mkdir(exist_ok=True)
         p = inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.json"
-        write_json(p, {"to": a.to or None, "message": text})
-        print(f"queued for next round: {p}")
+        write_json(p, {"to": a.to or None, "message": text, **({"urgent": True} if a.urgent else {})})
+        print(f"urgent, cuts into the running turn: {p}" if a.urgent else f"queued for next round: {p}")
     return 0
 
 
@@ -523,6 +523,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("message", help="text, or - to read stdin")
     p.add_argument("-m", "--monitor", action="append")
     p.add_argument("--to", action="append", help="only these agents (pipeline); annotated for the llm controller")
+    p.add_argument("--urgent", action="store_true",
+                   help="don't wait for the next turn: if the agent is mid-turn it is stopped and carries on with this "
+                        "message in the same session (managed: a message for the critic also ends the worker's turn)")
     p.set_defaults(func=cmd_inject)
 
     p = sub.add_parser("report", help="regenerate HTML reports")
