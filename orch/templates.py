@@ -388,5 +388,6 @@ is. Here is what you need from before.
 {{state}}
 
 Read the files and logs you need before you act, and carry on from there.""",
+    "report_checklist": "{{critic}}'s working checklist at its last review ({{done}} of {{total}} done):\n\n{{checklist}}",
     "relay_note_up": "{{critic}} mentioned: {{note}}",
 }

@@ -35,7 +35,8 @@ from . import tags as T
 
 from .backends import StopRequested
 from .config import AgentConfig
-from .controller import MonitorRunner, checklist_state, parse_options, resolve_choice, truncate
+from .controller import MonitorRunner, checklist_state, parse_options, resolve_choice, strip_checklist, truncate
+from .report import CHECKBOX
 from .recorder import now_iso
 
 def manager_pause(text: str) -> str:
@@ -49,9 +50,18 @@ def manager_pause(text: str) -> str:
     return ""
 
 
+def checklist_text(text: str) -> str:
+    """The critic's checklist in a reply: its <checklist> block(s), or, when it wrote the list without the tag,
+    its checkbox lines. Either way the list is the critic's own: the gate reads it, the worker never sees it."""
+    tagged = T.bodies(text or "", "checklist")
+    if tagged:
+        return "\n".join(tagged)
+    return "\n".join(ln for ln in (text or "").split("\n") if CHECKBOX.match(ln))
+
+
 def checklist_of(text: str) -> Tuple[int, int]:
-    """(done, open) items of the <checklist> block(s) in a reply; (0, 0) without one."""
-    return checklist_state("\n".join(T.bodies(text or "", "checklist")))
+    """(done, open) items of the critic's checklist in a reply; (0, 0) without one."""
+    return checklist_state(checklist_text(text))
 
 
 def pid_alive(pid: int) -> bool:
@@ -404,6 +414,19 @@ class ManagedRunner(MonitorRunner):
                 self.decide(x["message"], "you", "note to " + ", ".join(x["to"] or ["all"]))
         return MonitorRunner.human_text(agent, msgs, annotate)
 
+    def latest_checklist(self) -> str:
+        """The critic's newest checklist (from a review, or an amended review), '' if it has none yet."""
+        for p in sorted((self.rec.run_dir / "rounds").glob("r*/t*.json"), reverse=True):
+            try:
+                t = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if t.get("agent") == self.critic.name and t.get("purpose") in ("verify", "amend", "guidance"):
+                ck = checklist_text(t.get("output") or "")
+                if ck:
+                    return ck
+        return ""
+
     def last_output(self, agent: str, purposes: Tuple[str, ...]) -> str:
         """The newest reply of an agent in one of these kinds of turn ('' if none)."""
         for p in sorted((self.rec.run_dir / "rounds").glob("r*/t*.json"), reverse=True):
@@ -569,7 +592,7 @@ class ManagedRunner(MonitorRunner):
         """What the worker gets from a critic reply: the text outside the tags, plus any <message to="worker">."""
         names = [n for w in self.workers for n in (w.called, w.name)] + ["worker"]
         extra = [b for a, b in T.blocks(text, "message") if b and T.addressed(a, *names)]
-        return "\n\n".join([x for x in [T.outside(text)] + extra if x]).strip()
+        return "\n\n".join([x for x in [strip_checklist(T.outside(text))] + extra if x]).strip()  # a list without the tag too
 
     def verdict(self, r: Dict[str, Any]) -> str:
         if r.get("status") != "ok":
@@ -1030,7 +1053,12 @@ class ManagedRunner(MonitorRunner):
         ms = self.cur()
         note = f", since we have spent {mg.get('ms_round', 0)} rounds on it" if mg.get("limit") else ""
         r = self.say(self.critic, self.mtpl("critic_report", limit_note=note, human_messages=""), "report")
-        mg.update(report=r["output"], report_turn=r["turn_id"], phase="mreview")
+        report = strip_checklist(T.without_markup(r["output"] or "", drop=("checklist", "verdict")))
+        ck = self.latest_checklist()
+        if ck:  # the manager judges the milestone with the critic's own list in view; the worker never gets it
+            done, open_ = checklist_state(ck)
+            report += "\n\n" + self.mtpl("report_checklist", done=done, total=done + open_, checklist=ck).strip()
+        mg.update(report=report, report_turn=r["turn_id"], phase="mreview")
         return None
 
     def ph_mreview(self, mg: Dict[str, Any]) -> Optional[str]:

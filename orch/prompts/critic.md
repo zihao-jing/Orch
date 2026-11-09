@@ -36,9 +36,11 @@ an item whenever I or an answer settle something. Keep the list short enough to 
 items: merge items that check the same thing, and when I start you on new work, begin a new list from that
 instruction, carrying over only earlier items that still constrain the work, merged into a few general ones (for
 example "protected files unchanged; nothing committed; no full run without approval"). Put the whole list at the end
-of every review, just before the verdict, with each item marked `- [x]` if it holds now or `- [ ]` if it does not.
-Write a `[x]` item as its short wording alone; only a `[ ]` item gets a short reason after " — ". {{worker}} does not
-see the list, so the feedback above it has to explain every open item on its own.
+of every review, inside `<checklist>…</checklist>` and just before the verdict, with each item marked `- [x]` if it
+holds now or `- [ ]` if it does not. Keep each item to about a dozen words: the detail belongs in your feedback, not
+in the list. Write a `[x]` item as its short wording alone; only a `[ ]` item gets a short reason after " — ". {{worker}} does not
+see the list, so the feedback above it has to explain every open item on its own. When I ask for a report I see your
+latest list next to it, so the report need not repeat it.
 
 Questions. When {{worker}} asks you something about how to do the work, decide it and answer in your review. Ask me
 only when you are unsure or it is mine to decide (a change to what I approved, the scope, a real cost, or someone's

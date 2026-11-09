@@ -801,6 +801,22 @@ class TestManaged(unittest.TestCase):
         self.assertTrue(later, [(t["agent"], t["purpose"]) for t in ts])
         self.assertIn("Labels are in labels/v2.", later[0]["input"])  # the manager hears it too
 
+    def test_untagged_checklist_is_gated_hidden_from_the_worker_and_shown_to_the_manager(self):
+        crit = {"replies": {"verify": [
+            "Fix the table header.\n\n## Checklist\n- [x] tests pass\n- [ ] table header fixed — still old\n\n<verdict>PASS</verdict>",
+            "Looks right now.\n\n<checklist>\n- [x] tests pass\n- [x] table header fixed\n</checklist>\n<verdict>PASS</verdict>"]}}
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, critic=crit)]))
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        work = [t for t in ts if t["purpose"] == "work"]
+        self.assertGreaterEqual(len(work), 2)  # the PASS with an open item was overruled
+        self.assertIn("Fix the table header.", work[1]["input"])
+        self.assertNotIn("[ ]", work[1]["input"])
+        self.assertNotIn("Checklist", work[1]["input"])
+        review = next(t for t in ts if t["purpose"] == "review")
+        self.assertIn("working checklist at its last review (2 of 2 done)", review["input"])
+        self.assertIn("- [x] table header fixed", review["input"])
+
     def test_manager_can_turn_down_a_proposed_pause(self):
         crit = {"replies": {"verify": [
             "<pause>The authors label the 20 items.</pause>\n\nNothing more to do.\n\n"

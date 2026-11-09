@@ -142,7 +142,7 @@ the critic's review goes to the worker, the manager's text to me.
 | `<message to="…">…</message>` | anyone | delivers the block to that agent only (the manager's instructions and answers to the critic, the critic's notes to the manager) |
 | `<question>…</question>` | worker → critic, critic → manager, manager → me | one decision per tag; recorded (Q1, Q2 …) and passed up one level; the run does not wait |
 | `<pause>…</pause>` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's stops the whole run until I continue it |
-| `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | a PASS counts only when every item is `[x]` |
+| `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | a PASS counts only when every item is `[x]`. The list is the critic's own: the worker never gets it (also when the critic forgets the tag), and the manager sees the latest one with each milestone report |
 | `<score>x</score>` + `<decision>ACCEPT\|REVISE</decision>` | manager, milestone review | accepts the milestone or sends it back |
 | `<decision>PAUSE\|CONTINUE</decision>` | manager, on a proposed pause | stops the run, or sends the critic what to do meanwhile |
 | `<no-wait pid="…"/>` | worker | the review does not wait for that process (orch finds the worker's detached jobs itself) |
