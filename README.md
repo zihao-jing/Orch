@@ -67,8 +67,10 @@ of update for each piece:
 | `critic/state.md` | that standing instruction ("my standing instruction") and the critic's checklist | by orch, after every review and every change of the manager's state |
 | `worker/state.md` | the worker's latest report | by orch, after every worker turn |
 
-When an agent starts a fresh session, its notes are built from its `state.md` and what happened since it was written
-(for the manager: the decisions made since). You can edit any of them between turns: orch notices, and the agent's
+Whenever an agent starts a fresh session (`orch reset-sessions`, a changed backend, or `fresh_session: milestone`
+for the manager or critic), its notes are built from its `state.md` and what happened since it was written (for the
+manager: the decisions made since), at the moment its next turn starts. The agents are not asked to read the files
+themselves: orch puts what they need into the message. You can edit any of them between turns: orch notices, and the agent's
 next turn starts with "I edited your working notes; they now read: …" (an edit of the manager's also updates the
 critic's). Each file names its run; a new run moves the previous run's files into that run's folder
 (`runs/<project>/<run>/agent_state/`). The full history stays in the run's `decisions.md` and turn records.

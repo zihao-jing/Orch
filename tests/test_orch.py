@@ -699,7 +699,7 @@ class TestManaged(unittest.TestCase):
         rec3 = Recorder(rec2.run_dir, rec2.output_root)
         redo = next(x for x in turns(rec3) if x["agent"] == "writer" and x["turn_id"] != "r001-t01-writer")
         self.assertFalse(redo["resumed_session"])  # the Claude session is not handed to the new backend
-        self.assertIn("taking over this work", redo["input"])
+        self.assertIn("This is a fresh conversation", redo["input"])  # its handover notes, as after a reset
         self.assertIn("Make the tables.", redo["input"])
         self.assertNotIn("cut off when the run was restarted", redo["input"])
         prev = rec3.state["sessions"]["writer"]["previous"][0]

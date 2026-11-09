@@ -371,6 +371,17 @@ class ManagedRunner(MonitorRunner):
         if sid and sid != (self.st["sessions"].get(agent.name) or {}).get("session_id"):
             self.rec.update_session(agent.name, session_id=sid)
 
+    def switch_backends(self) -> None:
+        """An agent moved to another backend starts a new session: with its handover notes (state file and what
+        happened since), like after a reset, not just "pick up from the repository"."""
+        super().switch_backends()
+        for a in self.mon.agents:
+            note = self.tpl("backend_switched", agent=a.called, cwd=a.working_dir).strip()
+            q = (self.st.get("fwd") or {}).get(a.name) or []
+            if note and note in q:
+                q[q.index(note)] = HANDOVER
+        self.rec.save()
+
     def recover_interrupted(self) -> List[Dict[str, Any]]:
         self.backfill_decisions()
         out = super().recover_interrupted()
@@ -766,8 +777,8 @@ class ManagedRunner(MonitorRunner):
                 sess = self.st["sessions"].get(a.name) or {}
                 prev = {k: v for k, v in sess.items() if k != "previous"}
                 self.rec.update_session(a.name, session_id=None, turns=0, previous=(sess.get("previous") or []) + [prev])
-                self.st.setdefault("fwd", {}).setdefault(a.name, []).insert(
-                    0, self.mtpl("milestone_fresh", cwd=a.working_dir).strip())
+                self.st.setdefault("fwd", {}).setdefault(a.name, []).insert(  # the worker: the critic's brief follows
+                    0, self.mtpl("milestone_fresh", cwd=a.working_dir).strip() if a.role == "worker" else HANDOVER)
                 self.rec.event("fresh_session", agent=a.name, milestone=mg.get("ms"), session_id=sess.get("session_id"))
                 self.log(f"{a.name}: fresh session for milestone {mg.get('ms', 0) + 1}")
         mg["fresh_for"] = mg.get("ms")
