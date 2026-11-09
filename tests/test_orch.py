@@ -996,6 +996,54 @@ class TestManaged(unittest.TestCase):
         self.assertIn("fresh conversation", w["input"])
         self.assertNotIn("Decisions so far", w["input"])
 
+    def test_state_files_written_edited_and_kept_per_run(self):
+        mgr = {"milestones": 1, "replies": {"kickoff": [
+            "Starting.\n\n<message to=\"Jordan\">Write the tables.</message>\n\n"
+            "<state>Standing: write the tables.\nHolds: percentages in every table.</state>"]}}
+        crit = {"replies": {"verify": [
+            "Not yet.\n\n<checklist>\n- [x] tables written\n- [ ] totals checked — missing\n</checklist>\n<verdict>FAIL</verdict>",
+            "Good.\n\n<checklist>\n- [x] tables written\n- [x] totals checked\n</checklist>\n<verdict>PASS</verdict>"]}}
+        cfg = managed(mgr=mgr, critic=crit)
+        sdir = self.tmp / "agents"
+        for ag in cfg["agents"]:
+            ag["state_file"] = str(sdir / ag["name"] / "state.md")
+        cfg_path = make_cfg(self.tmp, [cfg])
+        status, rec = run(cfg_path)
+        self.assertEqual(status, "completed")
+        boss = (sdir / "boss" / "state.md").read_text()
+        self.assertIn(f"run {rec.run_dir.name}", boss)
+        self.assertIn("Holds: percentages in every table.", boss)
+        critic = (sdir / "critic" / "state.md").read_text()
+        self.assertIn("## My standing instruction", critic)
+        self.assertIn("Standing: write the tables.", critic)
+        self.assertIn("- [x] totals checked", critic)  # its newest checklist
+        writer = (sdir / "writer" / "state.md").read_text()
+        self.assertIn("written", writer)
+        self.assertNotIn("critic", writer.split("-->", 1)[1].lower())
+
+        from orch.managed import ManagedRunner
+        r = ManagedRunner(load_config(cfg_path).monitor("m"), threading.Event(), resume=True, log=lambda s: None)
+        r.rec = rec
+        h = r.handover(r.manager)
+        self.assertIn("Your working state", h)
+        self.assertIn("Holds: percentages in every table.", h)
+        self.assertIn("latest message (report", h)  # the newest message, also when turns start in the same second
+        self.assertNotIn("Not yet.", h)
+        r.decide("Round to one decimal.", "you", "note")
+        h = r.handover(r.manager)
+        self.assertIn("Decided since those notes were last written", h)
+        self.assertIn("Round to one decimal.", h)
+        # my edit reaches the manager and the critic's file
+        p = sdir / "boss" / "state.md"
+        p.write_text(p.read_text().replace("percentages", "fractions"))
+        r.sync_state(r.manager)
+        self.assertTrue(any("fractions" in x and "I edited your working notes" in x for x in rec.state["fwd"]["boss"]))
+        self.assertIn("fractions", (sdir / "critic" / "state.md").read_text())
+        # a new run moves the old run's files aside
+        status2, rec2 = run(cfg_path)
+        self.assertTrue((rec.run_dir / "agent_state" / "boss.md").is_file())
+        self.assertIn(f"run {rec2.run_dir.name}", (sdir / "boss" / "state.md").read_text())
+
     def test_managed_validation(self):
         m = managed()
         m["agents"] = m["agents"][1:]

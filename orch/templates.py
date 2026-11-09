@@ -188,7 +188,8 @@ Milestone {{n}} of {{total}} is next: {{milestone}}
 Please write the instruction that gets {{critic}} started on it: what is needed, what matters most and what to
 watch out for. Describe the work itself and keep it high level; {{critic}} does not hear about milestones,
 your rubric or scores. Put the instruction inside `<message to="{{critic}}">…</message>`; anything outside it is
-for me.
+for me. Then write your `<state>` for this part of the work: the instruction in short and the decisions that still
+hold.
 """,
     "manager_question": """\
 {{human_messages}}
@@ -199,6 +200,7 @@ for me.
 
 Please answer if you can, inside `<message to="{{critic}}">…</message>`. If only I can decide it, ask me in a
 `<question>…</question>` (one per decision), and still give {{critic}} your best guess to work with until I reply.
+If the answer changes the work, update your `<state>`.
 """,
     "manager_review": """\
 {{human_messages}}
@@ -211,7 +213,8 @@ Please score it against your rubric: a small table with a score out of 5 for eac
 score as `<score>x</score>` (out of 5). If the milestone is done, write me a short summary (tables welcome) and end
 with `<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
 `<message to="{{critic}}">…</message>`, in terms of the work and at a high level (only that is passed on, so leave
-out milestones and scores), and end with `<decision>REVISE</decision>`.
+out milestones and scores), and end with `<decision>REVISE</decision>`. Either way, update your `<state>`: on
+ACCEPT fold in what this milestone settled, on REVISE what still has to happen.
 """,
     "manager_feedback": """\
 I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
@@ -219,7 +222,7 @@ I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
 {{comment}}
 
 Please write what {{critic}} should do next, at a high level and in terms of the work (no milestones or scores),
-inside `<message to="{{critic}}">…</message>`.
+inside `<message to="{{critic}}">…</message>`, and update your `<state>` with it.
 """,
     "critic_brief": """\
 {{instructions}}
@@ -318,7 +321,7 @@ A quick update from {{critic}}:
 {{update}}
 
 No full review needed. Your reply is shown to me, not to {{critic}}: only a `<message to="{{critic}}">` is passed
-on, so write one if {{critic}} should change course. If everything the agents can do is done and the rest waits on
+on, so write one if {{critic}} should change course (and update your `<state>` if you do). If everything the agents can do is done and the rest waits on
 me, write `<pause>what I need to do</pause>`: the whole run stops until I continue it. Otherwise a line for me is
 enough, including anything you need me to do.
 """,
@@ -354,7 +357,9 @@ The repository is at `{{cwd}}`.
 We are picking the work up again in fresh conversations, so {{critic}} starts without the earlier history. Write
 {{critic}} a short instruction for what to continue with now: where the current work stands, what comes next, and
 what settled matters it must keep to. A few sentences; {{critic}} works out the details and keeps its own checklist.
-Put it inside `<message to="{{critic}}">…</message>`; outside it, one line for me is enough.
+Put it inside `<message to="{{critic}}">…</message>`; outside it, one line for me is enough. Then rewrite your
+`<state>` from your notes and the decisions since: the standing instruction and what still holds, without what
+no longer does.
 """,
     "critic_restart": """\
 {{human_messages}}
@@ -365,6 +370,9 @@ Please tell {{worker}} what to do next: concrete steps, somewhat more detailed t
 {{worker}} also starts a fresh conversation and knows only what you tell it, so include whatever settled matters
 the work must keep to. The repository is at `{{cwd}}`.
 """,
+    "state_edited": "I edited your working notes; they now read:\n\n{{state}}\n\nGo by them from now on.",
+    "critic_state_instruction": "## My standing instruction\n\n{{state}}",
+    "decisions_since": "Decided since those notes were last written:",
     "decisions_pointer": "Everything decided so far is in `{{path}}` (the later entry holds where two differ); look "
                          "one up there when you need it.",
     "decisions_intro_worker": "Decisions so far. They are binding; where two say different things, the later one holds.",
@@ -394,7 +402,8 @@ the work must keep to. The repository is at `{{cwd}}`.
     "tag_reminder_manager": "A reminder, in case it helps (not a request to add anything): what is for {{critic}} goes in "
                             "<message to=\"{{critic}}\">…</message>; a decision only I can make in <question>…</question> "
                             "(one per question); stopping the whole run until I act in <pause>…</pause>; in reviews "
-                            "<score>…</score> and <decision>…</decision>. Everything outside tags is read by me.",
+                            "<score>…</score> and <decision>…</decision>; your working state in <state>…</state> when it changes. "
+                            "Everything outside tags is read by me.",
     "tag_reminder_critic": "A reminder, in case it helps (not a request to add anything): text outside tags reaches "
                            "{{worker}}; what is only for {{manager}} goes in <message to=\"{{manager}}\">…</message>; "
                            "questions for {{manager}} in <question>…</question>; proposing to stop the whole run until "

@@ -22,12 +22,14 @@ Nothing in the agents' messages mentions a workflow; relayed text reads like a n
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import jobs as _jobs
@@ -48,6 +50,12 @@ def manager_pause(text: str) -> str:
     if T.value(text or "", "decision") == "PAUSE":
         return T.outside(text) or "Paused by the manager."
     return ""
+
+
+# the head of an agent's state.md; the run id in it keeps one run's state out of the next
+STATE_HEAD = ("<!-- orch: working state of {agent}, run {run_id}, written {at} by {by}. You can edit this file; "
+              "the agent is told about your changes on its next turn. A new run moves it into this run's folder. -->")
+_STATE_HEAD_RE = re.compile(r"\A\s*<!--\s*orch: working state of .*?run (\S+?), written (\S+) by .*?-->\s*", re.S)
 
 
 # placeholders a reset leaves in an agent's queue; the handover notes are written when its next turn starts
@@ -160,10 +168,10 @@ def _cap(text: str) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
-    """The start of a text, cut at a word, with a pointer to the rest."""
+    """The start of a text, cut at a word."""
     if len(text) <= limit:
         return text
-    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:") + " … (in full in the decisions file)"
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:") + " …"
 
 
 class ManagedRunner(MonitorRunner):
@@ -224,12 +232,14 @@ class ManagedRunner(MonitorRunner):
     def say(self, agent: AgentConfig, prompt: str, purpose: str) -> Dict[str, Any]:
         """One turn of one agent, tagged with the milestone it belongs to."""
         mg = self.mg
+        self.sync_state(agent)
         self.write_handover(agent)
         if agent.role == "manager":
             self.sync_chat_session(agent)
         r = self.turn(agent, prompt, int(self.st.get("round", 0)), purpose,
                       extra={"milestone": mg.get("ms", 0) if mg.get("milestones") else None,
                              "milestone_round": mg.get("ms_round", 0)})
+        self.after_state_turn(agent, r)
         if r["status"] != "ok":
             if self.mon.controller.stop_on_error:
                 raise _Failed(f"{agent.name} {purpose} turn ended with status {r['status']}")
@@ -237,6 +247,103 @@ class ManagedRunner(MonitorRunner):
             for note in self.notes_up(r.get("output") or ""):
                 self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
         return r
+
+    # ------------------------------------------------------------------ working state (agents/<name>/state.md)
+    # One owner and one moment per piece: the manager rewrites its state (standing instruction for the critic and the
+    # decisions that still hold) in a <state> tag whenever it writes to the critic; the critic's file is that
+    # instruction plus the critic's own checklist, rewritten at every review; the worker's file is its latest report.
+    # I can edit any of them; the agent gets my changes on its next turn. Fresh sessions start from these files.
+
+    def state_path(self, a: AgentConfig) -> Path:
+        return Path(a.state_file) if a.state_file else self.rec.run_dir / "state" / f"{a.name}.md"
+
+    def read_state(self, a: AgentConfig) -> Tuple[str, str]:
+        """(body, written_at) of the agent's state file for this run; ('', '') if there is none."""
+        try:
+            text = self.state_path(a).read_text(encoding="utf-8")
+        except OSError:
+            return "", ""
+        m = _STATE_HEAD_RE.match(text)
+        if m and m.group(1) != self.rec.run_dir.name:
+            return "", ""  # another run's state
+        return (text[m.end():] if m else text).strip(), (m.group(2) if m else "")
+
+    def write_state(self, a: AgentConfig, body: str, by: str) -> None:
+        body = (body or "").strip()
+        if not body:
+            return
+        p = self.state_path(a)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        text = STATE_HEAD.format(agent=a.called, run_id=self.rec.run_dir.name, at=now_iso(), by=by) + "\n\n" + body + "\n"
+        p.write_text(text, encoding="utf-8")
+        self.st.setdefault("state_hash", {})[a.name] = hashlib.sha1(text.encode()).hexdigest()
+        self.rec.event("state_written", agent=a.name, by=by)
+
+    def adopt_state_files(self) -> None:
+        """A state file from another run is moved into that run's folder (or kept next to it, renamed)."""
+        for a in self.mon.agents:
+            p = self.state_path(a)
+            try:
+                text = p.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            m = _STATE_HEAD_RE.match(text)
+            old = m.group(1) if m else ""
+            if old == self.rec.run_dir.name:
+                continue
+            target = self.rec.run_dir.parent / old / "agent_state" / p.name if old else None
+            if target is not None and target.parent.parent.is_dir():
+                target.parent.mkdir(exist_ok=True)
+                target = target.with_name(f"{a.name}.md")
+            else:
+                target = p.with_name(f"state.{old or 'earlier'}.md")
+            p.replace(target)
+            self.log(f"{a.name}: an earlier state file moved to {target}")
+
+    def sync_state(self, a: AgentConfig) -> None:
+        """Before the agent's turn: if I edited its state file, tell it (and carry the manager's into the critic's)."""
+        p = self.state_path(a)
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            return
+        h = hashlib.sha1(text.encode()).hexdigest()
+        known = (self.st.get("state_hash") or {}).get(a.name)
+        if known is None or h == known:
+            return  # written by orch (or never written by it): nothing new from me
+        self.st.setdefault("state_hash", {})[a.name] = h
+        body, _at = self.read_state(a)
+        if body:
+            self.forward(a, self.mtpl("state_edited", state=body).strip())
+            if a.role == "manager":
+                self.write_critic_state()
+        self.rec.save()
+
+    def write_critic_state(self) -> None:
+        mine, _at = self.read_state(self.manager)
+        ck = self.latest_checklist()
+        parts = []
+        if mine:
+            parts.append(self.mtpl("critic_state_instruction", state=mine).strip())
+        if ck:
+            parts.append("## Your checklist\n\n" + ck)
+        if parts:
+            self.write_state(self.critic, "\n\n".join(parts), "orch")
+
+    def after_state_turn(self, a: AgentConfig, r: Dict[str, Any]) -> None:
+        """After a turn: save what it changed in the working state."""
+        out = r.get("output") or ""
+        if r.get("status") != "ok" or not out:
+            return
+        if a.role == "manager":
+            bodies = T.bodies(out, "state")
+            if bodies:
+                self.write_state(a, bodies[-1], a.called)
+                self.write_critic_state()
+        elif a.role == "verifier" and checklist_text(out):
+            self.write_critic_state()
+        elif a.role == "worker":
+            self.write_state(a, T.outside(out), "orch, from the latest report")
 
     def write_handover(self, agent: AgentConfig) -> None:
         """A reset leaves a placeholder in the agent's queue; the notes are written now, from where the run is at
@@ -404,7 +511,7 @@ class ManagedRunner(MonitorRunner):
             return self.topic(q.get("text", "")), ans.strip()
         return "", d["text"]
 
-    def decisions_text(self, a: Optional[AgentConfig] = None) -> str:
+    def decisions_text(self, a: Optional[AgentConfig] = None, after: str = "") -> str:
         """The register as one agent should read it.
         - Each entry is the decision itself, with a one-line topic when it answered a question.
         - Who decided is named from the reader's side: the manager reads me as "me" and itself as "you"; the critic
@@ -415,12 +522,12 @@ class ManagedRunner(MonitorRunner):
         role = a.role if a is not None else "manager"
         skip = {"worker": ("gate", "wait"), "verifier": ("gate",)}.get(role, ())
         rows = []
-        kept = [d for d in regs if str(d.get("source", "")) not in skip]
+        kept = [d for d in regs if str(d.get("source", "")) not in skip and (d.get("at") or "") >= after]  # same second: keep
         recent = {d["id"] for d in kept[-12:]}  # older decisions in one short line; the file has them in full
         for d in kept:
             topic, body = self.decision_body(d)
             lim = 400 if role == "worker" else (500 if d["id"] in recent else 160)
-            body = body if len(body) <= lim else body[:lim].rsplit(" ", 1)[0].rstrip(" ,;:") + " …"  # the intro names the file
+            body = body if len(body) <= lim else body[:lim].rsplit(" ", 1)[0].rstrip(" ,;:") + " …"  # the file has it in full
             who = ""
             if role == "manager":
                 who = " (me" if d.get("by") == "you" else (" (you" if d.get("by") == self.manager.called else f" ({d.get('by')}")
@@ -429,7 +536,7 @@ class ManagedRunner(MonitorRunner):
             rows.append(head + body.replace("\n", "\n  "))
         if not rows:
             return ""
-        intro = (self.mtpl("decisions_intro_worker") if role == "worker"
+        intro = (self.mtpl("decisions_intro_worker") if role == "worker" else self.mtpl("decisions_since") if after
                  else self.mtpl("decisions_intro", path=str(self.rec.run_dir / "decisions.md"))).strip()
         return intro + "\n\n" + "\n".join(rows)
 
@@ -491,9 +598,10 @@ class ManagedRunner(MonitorRunner):
             except (OSError, json.JSONDecodeError):
                 continue
             if t.get("agent") == agent and t.get("purpose") in purposes and t.get("status") == "ok" and t.get("output"):
-                if best is None or (t.get("started_at") or "") > (best.get("started_at") or ""):
-                    best = t
-        return best
+                key = (t.get("started_at") or "", p.parent.name, p.name)  # ties within a second: the later turn
+                if best is None or key > best[0]:
+                    best = (key, t)
+        return best[1] if best else None
 
     def last_output(self, agent: str, purposes: Tuple[str, ...]) -> str:
         """The newest reply of an agent in one of these kinds of turn ('' if none)."""
@@ -509,18 +617,20 @@ class ManagedRunner(MonitorRunner):
         return ""
 
     def handover(self, a: AgentConfig, top_down: bool = False) -> str:
-        """What an agent needs to carry on in a fresh session.
-        - manager: the goal, its plan and rubric, the milestone table, the critic's latest report, the decisions.
-        - critic: its checklist and the decisions; outside a top-down restart also my current instruction, my latest
-          guidance and its latest review in short (in a top-down restart my new instruction replaces those).
-        - worker: only that this is a fresh conversation, plus its latest report outside a top-down restart; the
-          critic's instruction, which carries what the work must keep to, comes with the next message."""
+        """What an agent needs to carry on in a fresh session, built from its state file (agents/<name>/state.md)
+        and what happened since it was written. Without a state file yet (a run from before them), from the run's
+        records instead.
+        - manager: the goal, its plan and rubric, the milestone table, its state, the critic's newest message, open
+          questions, and the decisions made since its state was written.
+        - critic: its state (my standing instruction and its checklist) and its latest review in short; in a
+          top-down restart only its checklist, since my new instruction comes next.
+        - worker: that this is a fresh conversation, plus its state (its latest report) outside a top-down restart;
+          the critic's instruction comes with the next message."""
         mg, ms = self.mg, (self.cur() or {})
         if a.role == "worker":
-            work = (mg.get("work") or {}).get(a.name) or {}
-            state = ""
-            if work.get("output") and not top_down:
-                state = "Your latest report, in short:\n\n" + _clip(work["output"], 2500).replace(" (in full in the decisions file)", "")
+            body, _at = self.read_state(a)
+            work = body or ((mg.get("work") or {}).get(a.name) or {}).get("output") or ""
+            state = "" if top_down or not work else "Your latest report, in short:\n\n" + _clip(work, 2500)
             return self.mtpl("worker_fresh", cwd=a.working_dir, state=state).strip()
         parts = []
         if ms:
@@ -528,8 +638,10 @@ class ManagedRunner(MonitorRunner):
                          f" (\"{ms.get('title', '')}\"), round {mg.get('ms_round', 0)} of it."
                          if a.role == "manager" else f"Where we are: round {mg.get('ms_round', 0)} of the current work.")
         w = mg.get("wait") or {}
-        if (mg.get("phase") == "wait" or (mg.get("gate") or {}).get("kind") == "wait") and a.role != "worker":
+        if mg.get("phase") == "wait" or (mg.get("gate") or {}).get("kind") == "wait":
             parts.append("The whole run is paused until I act on this:\n\n" + (w.get("text") or ""))
+        mine, mine_at = self.read_state(self.manager)  # the standing instruction and what holds, and since when
+        since = mine_at
         if a.role == "manager":
             parts.append("The goal:\n\n" + (self.mon.goal or "").strip())
             if mg.get("plan_text"):
@@ -538,6 +650,8 @@ class ManagedRunner(MonitorRunner):
                     for i, m in enumerate(mg.get("milestones") or [])]
             if rows:
                 parts.append("| # | milestone | status | score |\n|---|---|---|---|\n" + "\n".join(rows))
+            if mine:
+                parts.append(f"Your working state (`{self.state_path(a)}`, written {mine_at[5:16].replace('T', ' ')}):\n\n{mine}")
             t = self.last_turn(self.critic.name, ("report", "checkin", "verify", "amend", "guidance", "brief"))
             if t:  # the critic's newest message of any kind: a report or check-in can be many rounds old
                 text = strip_checklist(self.clean_report(t.get("output") or ""))
@@ -546,25 +660,37 @@ class ManagedRunner(MonitorRunner):
                 parts.append(_cap(f"{self.critic.called}'s latest message ({t.get('purpose')}, "
                                   f"{(t.get('started_at') or '')[5:16].replace('T', ' ')}"
                                   + (f"; its checklist: {done} of {done + open_} done" if ck else "") + "):\n\n")
-                             + _clip(text, 4000).replace(" (in full in the decisions file)", ""))
+                             + _clip(text, 4000))
         elif a.role == "verifier":
-            when = lambda k: f" ({mg[k][5:16].replace('T', ' ')})" if mg.get(k) else ""
-            if mg.get("note") and not top_down:
-                parts.append(f"My instruction when this part of the work started{when('note_at')}; newer decisions below "
-                             "override it:\n\n" + mg["note"].strip())
-            if mg.get("guidance") and not top_down:
-                parts.append(f"My latest guidance{when('guidance_at')}:\n\n" + mg["guidance"].strip())
-            last = "" if top_down else self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
-            if last:  # the prose briefly, the checklist in full: the list is what carries over
-                prose = strip_checklist(T.without_markup(last, drop=("checklist", "verdict")))
-                parts.append("Your latest review, in short:\n\n" + _clip(prose, 2500).replace(" (in full in the decisions file)", ""))
+            body, _at = self.read_state(a)
             ck = self.latest_checklist()
-            if ck:
-                parts.append("Your checklist (keep the items as they are):\n\n" + ck)
+            if top_down:
+                if ck:
+                    parts.append("Your checklist (keep the items as they are):\n\n" + ck)
+            elif body:
+                parts.append(f"Your working state (`{self.state_path(a)}`):\n\n{body}")
+            else:  # a run from before state files
+                when = lambda k: f" ({mg[k][5:16].replace('T', ' ')})" if mg.get(k) else ""
+                if mg.get("note"):
+                    parts.append(f"My instruction when this part of the work started{when('note_at')}; newer decisions "
+                                 "below override it:\n\n" + mg["note"].strip())
+                if mg.get("guidance"):
+                    parts.append(f"My latest guidance{when('guidance_at')}:\n\n" + mg["guidance"].strip())
+                if ck:
+                    parts.append("Your checklist (keep the items as they are):\n\n" + ck)
+            last = "" if top_down else self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
+            if last:  # the prose briefly; the checklist is above
+                prose = strip_checklist(T.without_markup(last, drop=("checklist", "verdict")))
+                parts.append("Your latest review, in short:\n\n" + _clip(prose, 2500))
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
-        if qs and a.role != "worker":
+        if qs:
             parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
         if top_down and a.role == "verifier":  # the manager's new instruction carries what matters now
+            parts.append(self.mtpl("decisions_pointer", path=str(self.rec.run_dir / "decisions.md")).strip())
+        elif since:  # the state holds what was decided before it; only what came after
+            dec = self.decisions_text(a, after=since)
+            if dec:
+                parts.append(dec)
             parts.append(self.mtpl("decisions_pointer", path=str(self.rec.run_dir / "decisions.md")).strip())
         else:
             dec = self.decisions_text(a)
@@ -833,6 +959,7 @@ class ManagedRunner(MonitorRunner):
 
     def main_loop(self) -> str:
         mg = self.mg
+        self.adopt_state_files()
         while True:
             self.check_control()
             ph = mg.get("phase", "plan")
@@ -1049,8 +1176,10 @@ class ManagedRunner(MonitorRunner):
     def _stage(self, items: List[Tuple[AgentConfig, str, str]], rnd: int, extra: Dict[str, Any]) -> List[Dict[str, Any]]:
         out = []
         for a, p, purpose in items:  # workers of one milestone run one after another
+            self.sync_state(a)
             self.write_handover(a)
             out.append(self.turn(a, p, rnd, purpose, extra=extra))
+            self.after_state_turn(a, out[-1])
         return out
 
     def ph_review(self, mg: Dict[str, Any]) -> Optional[str]:

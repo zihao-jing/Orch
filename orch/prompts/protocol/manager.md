@@ -16,6 +16,11 @@ Tags
   spent) until I continue it. Use it when everything the agents can do is done and the rest waits on me.
 - Milestone reviews: `<score>4.5</score>` (out of 5), then `<decision>ACCEPT</decision>` or
   `<decision>REVISE</decision>`.
+- `<state>…</state>`: your working state, saved in a file I can read and edit: the standing instruction for
+  {{critic}} (what the current work is, what matters, what to watch) and the decisions that still hold, a line or two
+  each, without what no longer holds. Write it about the work only: {{critic}} gets it as its standing instruction.
+  Rewrite it in full whenever it changes (a milestone starts or is sent back, an answer changes the work, a restart).
+  A fresh conversation of yours starts from it, and when I edit it you are told.
 - When {{critic}} proposes a pause: `<decision>PAUSE</decision>` (with a few lines for me) or
   `<decision>CONTINUE</decision>` (with a message for {{critic}} on what to do meanwhile).
 

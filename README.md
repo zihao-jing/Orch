@@ -49,11 +49,29 @@ There is no separate project file: the team is the set of agent folders.
       agent.yaml         role, backend, model … and the settings for the run as a whole
       goal.md            the goal (only the manager reads it)
       system_prompt.md   this agent's prompt in this project (starts as a copy of the role's default)
-      memory.md          this project's notes and preferences (also memory/*.md)
-    critic/   agent.yaml  system_prompt.md  memory.md
-    worker/   agent.yaml  system_prompt.md  memory.md
+      memory.md          your notes and preferences for it (also memory/*.md); added to its system prompt
+      state.md           its working state in the current run, kept by orch (gitignored; you can edit it)
+    critic/   agent.yaml  system_prompt.md  memory.md  state.md
+    worker/   agent.yaml  system_prompt.md  memory.md  state.md
   runs/                  run logs (gitignored)
 ```
+
+**`memory.md` and `state.md`.** `memory.md` is yours: lasting preferences, rarely changed, added to the agent's system
+prompt before every turn (it is kept stable because a changed system prompt makes the model re-read the whole
+conversation at full price). `state.md` is where the agent stands in the current run, with one owner and one moment
+of update for each piece:
+
+| file | holds | written |
+|---|---|---|
+| `manager/state.md` | the standing instruction for the critic and the decisions that still hold | by the manager, in a `<state>` tag, whenever it writes to the critic (a milestone starts or is sent back, an answer changes the work, a restart) |
+| `critic/state.md` | that standing instruction ("my standing instruction") and the critic's checklist | by orch, after every review and every change of the manager's state |
+| `worker/state.md` | the worker's latest report | by orch, after every worker turn |
+
+When an agent starts a fresh session, its notes are built from its `state.md` and what happened since it was written
+(for the manager: the decisions made since). You can edit any of them between turns: orch notices, and the agent's
+next turn starts with "I edited your working notes; they now read: …" (an edit of the manager's also updates the
+critic's). Each file names its run; a new run moves the previous run's files into that run's folder
+(`runs/<project>/<run>/agent_state/`). The full history stays in the run's `decisions.md` and turn records.
 
 Each `agent.yaml` holds that agent's own settings plus the run settings that belong to its role:
 
@@ -142,6 +160,7 @@ the critic's review goes to the worker, the manager's text to me.
 | `<message to="…">…</message>` | anyone | delivers the block to that agent only (the manager's instructions and answers to the critic, the critic's notes to the manager) |
 | `<question>…</question>` | worker → critic, critic → manager, manager → me | one decision per tag; recorded (Q1, Q2 …) and passed up one level; the run does not wait |
 | `<pause>…</pause>` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's stops the whole run until I continue it |
+| `<state>…</state>` | manager | saved as `manager/state.md` (and the critic's standing instruction); a fresh session starts from it |
 | `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | a PASS counts only when every item is `[x]`. The list is the critic's own: the worker never gets it (also when the critic forgets the tag), and the manager sees the latest one with each milestone report |
 | `<score>x</score>` + `<decision>ACCEPT\|REVISE</decision>` | manager, milestone review | accepts the milestone or sends it back |
 | `<decision>PAUSE\|CONTINUE</decision>` | manager, on a proposed pause | stops the run, or sends the critic what to do meanwhile |
@@ -159,12 +178,12 @@ session keeps the protocol in view without being pushed to add tags it doesn't n
 **Fresh sessions mid-run.** `orch reset-sessions <project> [--agent NAME]` (with the run stopped) clears the agents'
 conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. When the
 manager is reset in the middle of a milestone (the default, all three), the work restarts top-down: the manager gets
-the goal, its approved plan and rubric, the milestone table, the critic's latest report and the decisions (the 12
-newest in full, older ones in a line), and writes the critic a short instruction on what to continue with; the
-critic, with its checklist and a pointer to the decisions file, turns that into concrete steps for the worker; the
-worker starts with only that. A cut-off turn is replaced by this, not sent again. Resetting one agent alone gives it
-a handover instead: the critic its current instruction, its latest review in short and its checklist; the worker its
-latest report in short. The worker never gets the decisions list or anything about the people above the critic:
+the goal, its approved plan and rubric, the milestone table, its `state.md`, the critic's newest message and the
+decisions made since its state was written, and writes the critic a short instruction on what to continue with (and
+a fresh `<state>`); the critic, with its checklist and a pointer to the decisions file, turns that into concrete
+steps for the worker; the worker starts with only that. A cut-off turn is replaced by this, not sent again. Resetting one agent alone gives it
+a handover instead, from its `state.md`: the critic its standing instruction, checklist and latest review in short;
+the worker its latest report in short. The worker never gets the decisions list or anything about the people above the critic:
 what the work must keep to reaches it in the critic's instructions. The notes are written when each agent's next turn starts, not at the reset, so they show where the run is then; until that turn, the agent's queue in `state.json` (`fwd`) holds a placeholder. The manager's notes include the critic's newest message of any kind with its checklist count, not just its last report. The board chat follows the new session.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my

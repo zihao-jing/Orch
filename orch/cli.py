@@ -79,7 +79,7 @@ def init_project(root: Path, force: bool) -> int:
         print(f"{d / 'agents'} exists (use --force to overwrite)")
         return 1
     files = {
-        ".gitignore": "runs/\n",
+        ".gitignore": "runs/\nagents/*/state.md\n",
         "agents/manager/agent.yaml": """\
 role: manager
 description: Owns the milestones and the rubric; reports to me.

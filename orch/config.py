@@ -50,6 +50,7 @@ class AgentConfig:
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
     fresh_session: str = ""  # "milestone": start a new session when each milestone starts (managed mode)
+    state_file: str = ""  # managed mode: the agent's working state (agents/<name>/state.md in a project folder)
 
     @property
     def called(self) -> str:
@@ -271,7 +272,7 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
     working_dir = _expand(wd, Path(mon_wd)) if wd else mon_wd
     known = {"name", "role", "description", "system_prompt", "task", "backend", "backend_options",
              "working_dir", "timeout", "retries", "env", "reviews", "feedback_to", "display_name",
-             "memory_files", "memory_heading", "fresh_session"}
+             "memory_files", "memory_heading", "fresh_session", "state_file"}
     unknown = set(merged) - known
     if unknown:
         raise ConfigError(f"{where} ({name}): unknown keys: {', '.join(sorted(unknown))}")
@@ -297,6 +298,7 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
         memory_files=[_expand(x, base) for x in _as_list(merged.get("memory_files"))],
         memory_heading=str(merged.get("memory_heading", AgentConfig.memory_heading) or ""),
         fresh_session="" if fresh == "never" else fresh,
+        state_file=_expand(merged["state_file"], base) if merged.get("state_file") else "",
     )
 
 
@@ -346,6 +348,7 @@ def _agent_folder(d: Path) -> Dict[str, Any]:
     if role == "manager" and "goal" not in raw and "goal_file" not in raw and (d / "goal.md").is_file():
         raw["goal_file"] = str(d / "goal.md")
     raw.setdefault("memory_files", [str(d / "memory.md"), str(d / "memory")])
+    raw.setdefault("state_file", str(d / "state.md"))
     return raw
 
 
