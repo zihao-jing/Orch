@@ -1,7 +1,7 @@
 """Background jobs a worker left running: found by orch itself, so the worker doesn't have to report them.
 
 A job is a process that started during the worker's turn, is still running after the turn ended, runs in the
-workspace (its working directory is inside it) and was detached from the agent (``nohup … &``, ``setsid``): its
+workspace (its working directory is inside it; a process whose directory can't be read is never counted) and was detached from the agent (``nohup … &``, ``setsid``): its
 parent is the system's init process (or another such job). Processes of mine, an editor or a terminal keep their
 own parents and are never counted.
 """
@@ -59,6 +59,8 @@ def cwds(pids: Iterable[int]) -> Dict[int, str]:
 
 
 def _inside(path: str, roots: List[str]) -> bool:
+    if not path:  # unknown (e.g. lsof can't read another user's process): realpath("") would be *my* cwd
+        return False
     try:
         rp = os.path.realpath(path)
     except OSError:

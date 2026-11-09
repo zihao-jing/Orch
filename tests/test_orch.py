@@ -609,6 +609,21 @@ class TestManaged(unittest.TestCase):
         th.join(timeout=5)
         return status, rec, sent
 
+    def test_a_system_process_whose_directory_cant_be_read_is_not_a_job(self):
+        import os
+        from unittest import mock
+        from orch import jobs
+        ws, here = os.path.realpath(self.tmp), os.getcwd()
+        before = {1: (0, "launchd")}
+        after = {1: (0, "launchd"), 900: (1, "/System/Library/nbstated"), 901: (1, "python run.py")}
+        os.chdir(ws)  # orch runs from the project folder; 900's directory can't be read (a root daemon)
+        try:
+            with mock.patch.object(jobs, "cwds", lambda pids: {901: ws}):
+                found = jobs.detect(before, [ws], after=after)
+        finally:
+            os.chdir(here)
+        self.assertEqual([j["pid"] for j in found], [901])
+
     def test_an_urgent_message_cuts_into_the_running_turn_of_its_agent(self):
         status, rec, sent = self._urgent_run({"to": ["writer"], "message": "Stop checking provenance."},
                                              {"delay": 3, "replies": {"work": ["Done, without the provenance checks."]}})
