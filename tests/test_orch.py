@@ -624,6 +624,25 @@ class TestManaged(unittest.TestCase):
             os.chdir(here)
         self.assertEqual([j["pid"] for j in found], [901])
 
+    def test_a_wait_on_a_process_outside_the_workspace_is_dropped(self):
+        # a wait saved by an older orch: pid 1 (a root daemon, its directory can't be read) was taken for a job
+        from unittest import mock
+        from orch import managed as M
+        cmd = subprocess.run(["ps", "-p", "1", "-o", "command="], capture_output=True, text=True).stdout.strip()
+        cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1})])
+        holder, calls = {}, []
+        def fake_detect(*a, **k):
+            calls.append(1)
+            return [{"pid": 1, "command": cmd}] if len(calls) == 1 else []
+        with mock.patch.object(M._jobs, "detect", fake_detect):
+            th = threading.Thread(target=lambda: holder.update(res=run(cfg)), daemon=True)
+            th.start()
+            th.join(20)
+        self.assertIn("res", holder, "still waiting on pid 1")
+        status, rec = holder["res"]
+        self.assertEqual(status, "completed")
+        self.assertIn("none of the processes I was waiting for", (rec.run_dir / "progress.md").read_text())
+
     def test_an_urgent_message_cuts_into_the_running_turn_of_its_agent(self):
         status, rec, sent = self._urgent_run({"to": ["writer"], "message": "Stop checking provenance."},
                                              {"delay": 3, "replies": {"work": ["Done, without the provenance checks."]}})

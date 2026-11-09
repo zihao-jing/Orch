@@ -1151,6 +1151,21 @@ class ManagedRunner(MonitorRunner):
         work that isn't done. When the job ends (or after job_wait), the worker picks up again; I can skip ahead."""
         c, job = self.mon.controller, mg.get("job") or {}
         agents = job.get("agents") or {}
+        for name in list(agents):  # a wait saved by an older orch may hold processes that were never jobs
+            j = agents[name]
+            ws = [self.mon.agent(name).working_dir or self.mon.working_dir]
+            keep = set(_jobs.inside(j["pids"], ws))
+            if keep != set(j["pids"]):
+                j["lines"] = [l for x, l in zip(j["pids"], j["lines"]) if x in keep]
+                j["cmds"] = {k: v for k, v in (j.get("cmds") or {}).items() if int(k) in keep}
+                j["pids"] = [x for x in j["pids"] if x in keep]
+            if not j["pids"]:
+                del agents[name]
+        if not agents:
+            mg.pop("job", None)
+            self.rec.progress("▶ none of the processes I was waiting for runs in the workspace: review now")
+            mg["phase"] = "review"
+            return None
         self.rec.set(status="waiting_job")
         why = "finished"
         try:

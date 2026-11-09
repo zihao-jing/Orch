@@ -68,6 +68,13 @@ def _inside(path: str, roots: List[str]) -> bool:
     return any(rp == r or rp.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
 
 
+def inside(pids: Iterable[int], workspaces: Iterable[str]) -> List[int]:
+    """The pids whose working directory is (still) readable and inside one of the workspaces."""
+    roots = [os.path.realpath(w) for w in workspaces if w]
+    where = cwds(pids)
+    return [int(p) for p in pids if _inside(where.get(int(p), ""), roots)]
+
+
 def detect(before: Dict[int, Proc], workspaces: Iterable[str], ignore: Iterable[str] = (),
            after: Optional[Dict[int, Proc]] = None) -> List[Dict[str, object]]:
     """Jobs started since `before` that are still running, detached, in one of the workspaces."""
