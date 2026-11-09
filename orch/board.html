@@ -194,7 +194,8 @@ const LI = /^\s*([-*+]|\d+[.)])\s+/;
 function tagsToMd(s){
   const lab = (t) => `\n\n**${t}**\n\n`;
   return String(s||'')
-    .replace(/<message\s+to\s*=\s*["']?([^"'>]+)["']?\s*>/gi, (_, w) => lab('→ ' + who(w.trim().replace(/^the\s+/i,'')) ))
+    .replace(/<message\s+to\s*=\s*["']?([^"'>]+?)["']?((?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))*)\s*>/gi,
+      (_, w, rest) => lab('→ ' + who(w.trim().replace(/^the\s+/i,'')) + (/urgent\s*=\s*["']?(yes|true|1|now)/i.test(rest||'') ? ' (urgent)' : '')))
     .replace(/<question\s*>/gi, lab('❓ Question')).replace(/<pause\s*>/gi, lab('⏸ Pause'))
     .replace(/<checklist\s*>/gi, lab('Checklist'))
     .replace(/<verdict\s*>\s*([^<]*)<\/verdict\s*>/gi, (_, v) => lab('Verdict: ' + v.trim()))
@@ -566,10 +567,19 @@ function renderChat(){
   const list = Object.values(rows);
   const h = list.length ? list.map(c => c.role === 'human'
       ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}</div><div class="b">${md(c.text)}</div></div>`
-      : `<div class="cm"><div class="w">${esc(who('manager'))} · ${tm(c.ts)}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}</div><div class="b">${c.status === 'running' ? `<div data-live="${esc(c.id)}"></div>` : md(c.text)}</div></div>`).join('')
+      : `<div class="cm"><div class="w">${esc(who('manager'))} · ${tm(c.ts)}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}</div><div class="b">${c.status === 'running' ? `<div data-live="${esc(c.id)}"></div>` : md(c.text)}</div>${relayLine(c.id)}</div>`).join('')
     : `<div class="empty">Ask ${esc(who('manager'))} how things stand, why a milestone was sent back, or tell them what to prioritise. If they want ${esc(who('critic'))} to change course, they will say so and it is passed on.</div>`;
   seenReplies(list.filter(c => c.role !== 'human' && c.status !== 'running').length);
   setHTML(cl, h); cl._stick = atBottom || cl._first === undefined; cl._first = 1; if (cl._stick) cl.scrollTop = cl.scrollHeight;
+}
+function relayLine(id){  // what became of the messages this reply passed on
+  const rs = (D.relays||{})[id]; if (!rs || !rs.length) return '';
+  return rs.map(r => {
+    const a = (D.agents||[]).find(x => x.name === r.to), to = esc(a ? a.called : who(r.to || 'critic'));
+    const s = r.status === 'delivered'
+      ? `✓ passed to ${to}${r.at ? ' at ' + tm(r.at) : ''}${r.turn ? ` · read in ${esc(r.turn)} (${esc(r.purpose || '')}${r.turn_status === 'running' ? ', running now' : ''})` : ''}`
+      : (r.urgent ? `⚡ waiting for ${to}: urgent, cuts into the running turn` : `⏳ waiting for ${to}'s next turn`);
+    return `<div class="w">${s}</div>`; }).join('');
 }
 async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true; await post('/api/chat', {message: m}); }
 let chatOpen, replies = 0, seen = null;

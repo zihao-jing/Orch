@@ -645,6 +645,21 @@ class TestManaged(unittest.TestCase):
         w2 = next(t for t in ts[i + 1:] if t["agent"] == "writer")
         self.assertIn("I ended your last turn early", w2["input"])
 
+    def test_the_board_shows_when_a_message_from_the_chat_was_delivered(self):
+        from orch.board import _relays
+        rd = self.tmp / "run"
+        (rd / "inbox" / "consumed").mkdir(parents=True)
+        (rd / "inbox" / "consumed" / "a-board-note.json").write_text(json.dumps({"to": ["critic"], "message": "Stop.", "from": "boss"}))
+        (rd / "inbox" / "b-board-note.json").write_text(json.dumps({"to": ["critic"], "message": "Later.", "from": "boss", "urgent": True}))
+        (rd / "events.jsonl").write_text(json.dumps({"ts": "2026-01-01T10:05:00", "event": "human_messages", "files": ["a-board-note.json"]}) + "\n")
+        chat = [{"id": "c1", "role": "manager", "status": "ok", "text": 'OK.\n<message to="Jordan">Stop.</message>'},
+                {"id": "c2", "role": "manager", "status": "ok", "text": '<message to="Jordan" urgent="yes">Later.</message>'}]
+        turns_ = [{"turn_id": "r1-t1-critic", "agent": "critic", "started_at": "2026-01-01T10:00:00", "purpose": "brief"},
+                  {"turn_id": "r1-t3-critic", "agent": "critic", "started_at": "2026-01-01T10:05:00", "purpose": "verify", "status": "ok"}]
+        r = _relays(rd, chat, turns_)
+        self.assertEqual((r["c1"][0]["status"], r["c1"][0]["turn"]), ("delivered", "r1-t3-critic"))
+        self.assertEqual((r["c2"][0]["status"], r["c2"][0]["urgent"]), ("waiting", True))
+
     def test_the_manager_can_send_an_urgent_message_from_the_chat(self):
         from orch import tags as T
         a, body = T.blocks('<message to="Jordan" urgent="yes">Stop now.</message>', "message")[0]

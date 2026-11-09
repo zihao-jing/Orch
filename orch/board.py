@@ -63,7 +63,8 @@ class Board:
                 continue
             out = t.get("output") or ""
             row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
-                                         "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder")}
+                                         "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder",
+                                         "cut_short", "interruptions")}
             row["output"] = out[:30000]
             row["cost"] = (t.get("meta") or {}).get("total_cost_usd")  # a session's running total; see _turn_costs
             row["session_id"] = t.get("session_id")
@@ -90,6 +91,7 @@ class Board:
         for c in chat:
             if c.get("status") == "running":
                 live[c["id"]] = self._live_text(rd / "live" / f"{c['id']}.jsonl")
+        relays = _relays(rd, chat, turns)
         total_cost = _turn_costs(turns, chat)
         queued: Dict[str, List[str]] = {}  # answers sent but not yet picked up (the run reads them between turns)
         for p in sorted((rd / "inbox").glob("*.json")):
@@ -107,7 +109,7 @@ class Board:
             "managed": st.get("managed") or {}, "questions": st.get("questions") or [],
             "decisions": st.get("decisions") or [],
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
-            "chat": chat, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
+            "chat": chat, "relays": relays, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
         }
@@ -243,6 +245,49 @@ class _Server(ThreadingHTTPServer):
         if isinstance(_sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
             return  # a browser tab closed or reloaded mid-request: harmless
         super().handle_error(request, client_address)
+
+
+def _relays(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """For each chat reply, what became of the <message to="…"> blocks it passed on: still waiting in inbox/,
+    or delivered (when, and in which turn of the agent it was for)."""
+    from . import tags as T
+    notes: Dict[str, Tuple[str, str, Dict[str, Any]]] = {}
+    for where, d in (("delivered", rd / "inbox" / "consumed"), ("waiting", rd / "inbox")):
+        for p in sorted(d.glob("*.json")) if d.is_dir() else []:
+            x = read_json(p) or {}
+            if isinstance(x, dict) and x.get("from") and not x.get("kind"):
+                notes[str(x.get("message", "")).strip()] = (p.name, where, x)
+    if not notes:
+        return {}
+    taken: Dict[str, str] = {}  # inbox file -> when a turn picked it up
+    for ln in _lines(rd / "events.jsonl"):
+        if '"human_messages"' not in ln:
+            continue
+        try:
+            ev = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        for f in ev.get("files") or []:
+            taken.setdefault(f, ev.get("ts") or "")
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for c in chat:
+        if c.get("role") != "manager" or c.get("status") != "ok":
+            continue
+        for _attrs, body in T.blocks(c.get("text") or "", "message"):
+            hit = notes.get((body or "").strip())
+            if not hit:
+                continue
+            name, where, x = hit
+            to = x.get("to") or []
+            row: Dict[str, Any] = {"to": to[0] if to else None, "status": where, "urgent": bool(x.get("urgent"))}
+            if where == "delivered":
+                ts = taken.get(name, "")
+                row["at"] = ts
+                t = next((t for t in turns if t.get("agent") in to and ts and (t.get("started_at") or "") >= ts), None)
+                if t:
+                    row.update(turn=t["turn_id"], purpose=t.get("purpose"), turn_status=t.get("status"))
+            out.setdefault(c["id"], []).append(row)
+    return out
 
 
 def _lines(p: Path) -> List[str]:
