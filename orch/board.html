@@ -107,6 +107,7 @@ details.fold[open]>summary .pv{visibility:hidden}
 details.fold .fb{padding:0 14px 10px;border-top:1px solid var(--grid)}
 .clamp{max-height:240px;overflow:hidden;position:relative}
 .clamp:after{content:"";position:absolute;left:0;right:0;bottom:0;height:46px;background:linear-gradient(transparent,var(--surface))}
+.older{display:flex;gap:14px;align-items:center;justify-content:center;padding:6px 0 2px;font-size:12px;color:var(--mute)}
 .more{font-size:12px;color:var(--s1);cursor:pointer;background:none;border:0;padding:2px 0}
 .md p{margin:4px 0 8px}.md ul,.md ol{margin:4px 0 8px;padding-left:20px}.md li.cb{list-style:none;margin-left:-16px}
 .md h3,.md h4,.md h5,.md h6{font-size:14px;margin:10px 0 4px}
@@ -391,6 +392,8 @@ document.addEventListener('click', async e => {
     b.disabled = true; const ta = $('qa-' + b.dataset.qd); if (ta) ta.value = '';
     await post('/api/chat', {qid: b.dataset.qd, message: v, settle: true}); }
   else if (b.dataset.more){ expanded.has(b.dataset.more) ? expanded.delete(b.dataset.more) : expanded.add(b.dataset.more); render(); }
+  else if (b.dataset.older){ shown[b.dataset.older] = b.dataset.n === 'all' ? 1e9 : shown[b.dataset.older] + (+b.dataset.n); render(); }
+  else if (b.dataset.less){ shown[b.dataset.less] = LIMIT[b.dataset.less]; render(); }
   else if (b.dataset.tab){ tab = b.dataset.tab; render(); }
 });
 async function post(url, body){ try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json(); if (j.error) alert(j.error); soon(); return j; } catch(e){ alert('Could not reach the board server.'); } }
@@ -472,28 +475,20 @@ function renderReport(mg){
   setHTML($('report'), h);
 }
 
-function bubble(t, opts){
-  const f = (D.flow||{})[t.purpose] || [t.role, ''];
-  let to = f[1]; if (t.purpose === 'review' && /<decision>\s*REVISE/i.test(t.output||'')) to = 'critic';
-  const id = 'm-' + t.turn_id, long = (t.output||'').length > 900, open = expanded.has(id);
-  const body = t.status === 'running' ? `<div data-live="${esc(t.turn_id)}"></div>` : `<div class="md">${md(t.output||'(empty)')}</div>`;
-  return `<div class="msg${to==='human'?' to-human':''}"><div class="h"><b>${esc(called(t.agent))}</b> → <b>${esc(who(to))}</b>
-    <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}<span>${tm(t.started_at)}</span>
-    ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
-    ${t.checklist?`<span class="mono">☑ ${t.checklist[0]}/${t.checklist[1]}</span>`:''}</div>
-    <div class="${long && !open && t.status!=='running' ? 'clamp' : ''}">${body}</div>
-    ${long && t.status!=='running' ? `<button class="more" data-more="${id}">${open?'Show less':'Show all'}</button>` : ''}</div>`;
-}
 function preview(text){  // first line of prose, without markdown, for a folded message
   const ln = String(text||'').split('\n').map(x => x.trim()).find(x => x && !/^(\||#|---|```|>)/.test(x) && !/^\W*$/.test(x)
     && !(x.length < 80 && /:\**\s*$/.test(x))) || '';  // skip lead-ins like "QUESTIONS FOR YOU:" or "Here is the instruction:"
   return ln.replace(/[*_`]/g, '').replace(/^\s*([-+]|\d+\.)\s+/, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').slice(0, 220);
 }
-function fold(t){
+const CLAMP_CHARS = 900;  // longer messages show their first ~240px; "Show all" opens the rest
+function fold(t, defOpen){
   const f = (D.flow||{})[t.purpose] || [t.role, ''];
   let to = f[1]; if (t.purpose === 'review' && /<decision>\s*REVISE/i.test(t.output||'')) to = 'critic';
-  const run = t.status === 'running', open = openMsgs.has(t.turn_id) || (run && !shutMsgs.has(t.turn_id));
-  const body = run ? `<div data-live="${esc(t.turn_id)}"></div>` : `<div class="md">${md(t.output||'(empty)')}</div>`;
+  const run = t.status === 'running', open = openMsgs.has(t.turn_id) || ((run || defOpen) && !shutMsgs.has(t.turn_id));
+  const id = 'm-' + t.turn_id, long = !run && (t.output||'').length > CLAMP_CHARS, full = expanded.has(id);
+  const body = run ? `<div data-live="${esc(t.turn_id)}"></div>`
+    : `<div class="md${long && !full ? ' clamp' : ''}">${md(t.output||'(empty)')}</div>`
+      + (long ? `<button class="more" data-more="${id}">${full ? 'Show less' : 'Show all (' + Math.round((t.output||'').length/1000) + 'k characters)'}</button>` : '');
   return `<details class="fold${to==='human'?' to-human':''}" data-t="${esc(t.turn_id)}"${open?' open':''}><summary>
     <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
     <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
@@ -501,31 +496,37 @@ function fold(t){
     <span class="pv">${esc(run ? 'writing…' : preview(t.output))}</span></summary><div class="fb">${body}</div></details>`;
 }
 const openMsgs = new Set(), shutMsgs = new Set();
+const LIMIT = {thread: 8, rounds: 5}, shown = {thread: 8, rounds: 5};  // newest first; older ones behind a link
+function olderLink(list, total){ const hid = total - shown[list]; if (hid <= 0) return shown[list] > LIMIT[list] ? `<div class="older"><button class="more" data-less="${list}">Show fewer</button></div>` : '';
+  return `<div class="older"><span>${hid} older not shown</span><button class="more" data-older="${list}" data-n="20">Show ${Math.min(20, hid)} more</button>`
+    + (hid > 20 ? `<button class="more" data-older="${list}" data-n="all">Show all</button>` : '') + `</div>`; }
 const UPPER = ['plan','kickoff','answer','review','feedback','report','checkin','ack'];
 function renderThread(mg){
   const ts = (D.turns||[]).filter(t => UPPER.includes(t.purpose) && (tab === 'all' || t.purpose === 'plan' || t.milestone === sel));
   const tabs = `<div class="tabs"><button class="sm${tab==='all'?' on':''}" data-tab="all">All milestones</button><button class="sm${tab==='sel'?' on':''}" data-tab="sel">Milestone ${sel+1} only</button></div>`;
   ts.sort((a, b) => String(b.started_at||'').localeCompare(String(a.started_at||'')) || String(b.turn_id).localeCompare(String(a.turn_id)));  // newest first
-  setHTML($('thread'), tabs + (ts.length ? ts.map(fold).join('') : '<div class="empty">No messages yet.</div>'));
+  setHTML($('thread'), tabs + (ts.length ? ts.slice(0, shown.thread).map(t => fold(t)).join('') + olderLink('thread', ts.length) : '<div class="empty">No messages yet.</div>'));
 }
 function renderRounds(mg){
   const ts = (D.turns||[]).filter(t => ['brief','work','verify','amend','guidance'].includes(t.purpose));
   const groups = {}; ts.forEach(t => { const k = t.round || 0; (groups[k] = groups[k] || []).push(t); });
   const keys = Object.keys(groups).map(Number).sort((a,b) => b-a);
   if (!keys.length){ setHTML($('rounds'), '<div class="empty">No rounds yet.</div>'); return; }
-  const h = keys.map((k, idx) => { const g = groups[k], v = g.filter(t => t.purpose==='verify').pop(), w = g.filter(t => t.purpose==='work');
+  const h = keys.slice(0, shown.rounds).map((k, idx) => { const g = groups[k], v = g.filter(t => t.purpose==='verify').pop(), w = g.filter(t => t.purpose==='work');
     const runningNow = g.some(t => t.status==='running'), msx = g[0].milestone;
     const isOpen = openRounds.has(k) || (idx===0 && !openRounds.has(-k-1));
     return `<details class="round" data-r="${k}"${isOpen?' open':''}><summary><b>${k ? 'Round ' + k : 'Briefing'}</b>${msx!=null?`<span class="mute">M${msx+1}</span>`:''}
       ${runningNow ? pill('p-run','● running') : ''}${v && v.verdict ? pill(v.verdict==='PASS'?'p-good':'p-crit', v.verdict==='PASS'?'✓ pass':'✕ fail') : ''}
       ${v && v.checklist ? `<span class="mono ink2">☑ ${v.checklist[0]}/${v.checklist[1]}</span>` : ''}
       ${w.some(t=>t.asked) || (D.questions||[]).some(q => w.some(t=>t.turn_id===q.turn)) ? pill('p-you','? asked') : ''}
-      <span class="mute">${g.length} message${g.length>1?'s':''}</span></summary><div class="rb">${g.map(t => bubble(t)).join('')}</div></details>`; }).join('');
-  setHTML($('rounds'), h);
+      <span class="mute">${g.length} message${g.length>1?'s':''}</span></summary><div class="rb">${g.map((t, i) => fold(t, idx===0 && i===g.length-1)).join('')}</div></details>`; }).join('');
+  setHTML($('rounds'), h + olderLink('rounds', keys.length));
 }
 $('thread').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.t) return;
   if (d.open){ openMsgs.add(d.dataset.t); shutMsgs.delete(d.dataset.t); paintLive(d.dataset.t); } else { openMsgs.delete(d.dataset.t); shutMsgs.add(d.dataset.t); } }, true);
-$('rounds').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || d.dataset.r === undefined) return; const k = +d.dataset.r;
+$('rounds').addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.t){
+    if (d.open){ openMsgs.add(d.dataset.t); shutMsgs.delete(d.dataset.t); paintLive(d.dataset.t); } else { openMsgs.delete(d.dataset.t); shutMsgs.add(d.dataset.t); } return; }
+  if (!d.dataset || d.dataset.r === undefined) return; const k = +d.dataset.r;
   if (d.open){ openRounds.add(k); openRounds.delete(-k-1); } else { openRounds.delete(k); openRounds.add(-k-1); } }, true);
 
 const qtext = t => String(t||'').split('\n').filter(x => !/^\W*QUESTIONS? FOR\b[^:]*:?\s*$/i.test(x)).join('\n');
