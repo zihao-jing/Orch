@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import re
 import signal
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from . import __version__
 from .config import Config, ConfigError, is_config, load_config, validate
@@ -121,12 +122,14 @@ retries: 1
 fresh_session: milestone    # a new session for each milestone: turns stay fast and cheap; the files carry the state
 # snapshot: [docs]          # folders whose every version is kept in the run log
 """,
+        "agents/auditor/agent.yaml": AUDITOR_YAML,
     }
     from .config import PROMPTS_DIR
-    for name in ("manager", "critic", "worker"):
+    for name in ("manager", "critic", "worker", "auditor"):
         files[f"agents/{name}/memory.md"] = MEMORY_STUB
         # the role's default prompt, copied so this project can adapt it
-        files[f"agents/{name}/system_prompt.md"] = (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        if name != "auditor":  # the auditor keeps orch's prompt: it audits orch, not this project
+            files[f"agents/{name}/system_prompt.md"] = (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
     for rel, text in files.items():
         f = d / rel
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +139,83 @@ fresh_session: milestone    # a new session for each milestone: turns stay fast 
     print(f"created {d}\nWrite the goal in agents/manager/goal.md; each agents/<name>/system_prompt.md starts "
           f"as orch's default for that role; adapt it for this project. Then: orch validate {root} && orch run {root} --serve")
     return 0
+
+
+AUDITOR_YAML = """\
+role: auditor
+description: Reads how the agents talk to each other (never the task) and keeps a short list of findings in audit.md.
+backend: claude
+backend_options:
+  model: sonnet
+  effort: low
+  disable_hooks: true
+  # everything it needs is in the digest orch sends; no files, no tools
+  disallowed_tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
+timeout: 900
+audit_every: 10             # rounds between audits, plus one when the run ends (0 = only `orch audit`)
+audit_points: 5             # at most this many points per audit
+"""
+
+NO_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"]
+
+
+def default_auditor(m: Any) -> Any:
+    """An auditor for `orch audit` when the project has none: orch's prompt, the critic's backend, no tools."""
+    from .config import AgentConfig, PROMPTS_DIR
+    c = m.by_role("verifier")[0] if m.by_role("verifier") else m.agents[0]
+    opts = {**c.backend_options, "effort": "low"}
+    if c.backend == "claude":
+        opts.update(disallowed_tools=NO_TOOLS, disable_hooks=True)
+    home = Path(c.state_file).parent.parent / "auditor" / "state.md" if c.state_file else ""
+    return AgentConfig(name="auditor", role="auditor", backend=c.backend, backend_options=opts, env=dict(c.env),
+                       working_dir=c.working_dir or m.working_dir, timeout=900,
+                       system_prompt_path=str(PROMPTS_DIR / "auditor.md"), state_file=str(home))
+
+
+def cmd_audit(a: argparse.Namespace) -> int:
+    """Audit how the agents of the latest run talked: --digest prints what the auditor would read (no model call)."""
+    from . import audit
+    cfg = _load(a.target, check_paths=False)
+    runs = resolve_runs(a.target, a.monitor)
+    if not runs:
+        print("no runs found")
+        return 1
+    rc = 0
+    for run in runs:
+        st = read_json(run / "state.json", {}) or {}
+        try:
+            m = cfg.monitor(st.get("monitor", ""))
+        except ConfigError as e:
+            print(e)
+            rc = 1
+            continue
+        last = int(st.get("round", 0) or 0)
+        span = m.controller.audit_every or 10
+        if a.rounds:
+            mm = re.match(r"^(\d+)(?:\s*[-–]\s*(\d+))?$", a.rounds.strip())
+            if not mm:
+                raise SystemExit("--rounds takes N or A-B, e.g. --rounds 35-44")
+            lo, hi = int(mm.group(1)), int(mm.group(2) or mm.group(1))
+        else:
+            lo, hi = max(1, last - span + 1), last
+        ag = (m.by_role("auditor") or [None])[0]
+        made = ag is None
+        ag = ag or default_auditor(m)
+        if a.digest:
+            md, _stats = audit.build(run, lo, hi, audit.findings_lines(audit.findings_path(ag, run)))
+            print(md)
+            continue
+        if made:
+            print(f"{m.name}: no agent with role: auditor; using orch's default ({ag.backend}, the critic's settings)")
+        print(f"{m.name}: auditing rounds {lo}–{hi} of {run.name} …")
+        res = audit.run_audit(m, ag, run, lo, hi, None, log=print)
+        if res.get("status") != "ok":
+            print(f"audit did not finish: {res.get('status')} (record in {run / 'audits'})")
+            rc = 1
+            continue
+        print(res.get("points") or "Nothing new.")
+        print(f"\nfindings: {res.get('file')}  (${res.get('cost_usd', 0):.2f}, digest {res.get('digest_chars')} chars)")
+    return rc
 
 
 MEMORY_STUB = """\
@@ -527,6 +607,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="don't wait for the next turn: if the agent is mid-turn it is stopped and carries on with this "
                         "message in the same session (managed: a message for the critic also ends the worker's turn)")
     p.set_defaults(func=cmd_inject)
+
+    p = sub.add_parser("audit", help="managed mode: audit how the agents talk (the auditor's findings go to audit.md)")
+    p.add_argument("target", nargs="?", default=".", help="project root, config file or run dir")
+    p.add_argument("--monitor", action="append", help="only these monitors")
+    p.add_argument("--rounds", help="N or A-B (default: the last audit_every rounds)")
+    p.add_argument("--digest", action="store_true", help="print the digest the auditor would read; no model call")
+    p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("report", help="regenerate HTML reports")
     p.add_argument("target")

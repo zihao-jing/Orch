@@ -228,7 +228,7 @@ class Board:
                 self.control({"kind": "pause", "message": pause})
             for attrs, body in T.blocks(text or "", "message"):  # <message to="critic"> -> that agent's next turn
                 for a in self.mon.agents:
-                    if body and a.name != mgr.name and T.addressed(attrs, a.name, a.called):
+                    if body and a.name != mgr.name and a.role != "auditor" and T.addressed(attrs, a.name, a.called):
                         self.control({"to": [a.name], "message": body, "from": mgr.name,
                                       **({"urgent": True} if T.urgent(attrs) else {})})
 

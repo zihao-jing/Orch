@@ -241,11 +241,36 @@ orch answer . Q3 "B"                           # answer a question to me
 orch stop .                                    # stops after terminating the current turn (resume re-sends it)
 orch run --resume --serve                      # continue the same run, same agent sessions
 orch reset-sessions .                          # with the run stopped: fresh conversations, same run state
+orch audit .                                   # how the agents talk: findings in agents/auditor/audit.md
 orch report .orch/runs                         # regenerate HTML
 ```
 
 Pressing Ctrl-C in `orch run` stops cleanly: running agent processes are terminated and the run is marked
 `stopped`, so `--resume` can pick it up later.
+
+## The auditor: how the agents talk, not what they do
+
+An agent with `role: auditor` (scaffolded by `orch init --project` in `agents/auditor/`) sits outside the team. Every
+`audit_every` rounds (default 10), and once more when the run ends, it reads a digest of what was passed between the
+agents and keeps a short list of findings in `agents/auditor/audit.md`: repetition, unneeded context, messages that
+crossed a boundary (leakage), turns that achieved nothing, roles doing each other's jobs. It never judges the task,
+and nothing it writes reaches the agents; the agents are not told it exists.
+
+The digest holds only the messages, already compared by orch: each message's size, the part that repeats what that
+agent was already sent, where each paragraph came from (another agent, the human, the manager's chat replies, or
+orch's own text), how much of each relayed output arrived, how long notes waited, and flags (short replies, bursts,
+large messages). System prompts appear on the first audit and again only when they change. About 20k characters
+per 10 rounds; the auditor gets no tools.
+
+Each audit adds at most `audit_points` points (default 5) under "Audits" and rewrites the "Findings" list (at most 12
+lines, each with a count and a status). Mark one `fixed` or `won't fix` and the auditor keeps it. The full exchange
+of each audit is in `<run>/audits/`.
+
+```bash
+orch audit . --digest --rounds 35-44   # what the auditor would read; no model call
+orch audit .                           # audit the last audit_every rounds now (uses the critic's backend if
+                                       # the project has no auditor)
+```
 
 ## What gets recorded
 
@@ -398,5 +423,6 @@ orch/controller.py  MonitorRunner: pipeline + llm modes, sessions, routing, retr
 orch/recorder.py    run directory, state, events, turn and round records, inbox / STOP control files
 orch/report.py      static HTML viewers
 orch/templates.py   all default prompts ({{goal}}, {{feedback}}, {{worker_reports}}, …)
-orch/cli.py         orch init | validate | run | status | show | stop | inject | report
+orch/audit.py       the auditor's digest (origins, repeats, relays, flags), its findings file, one audit
+orch/cli.py         orch init | validate | run | status | show | stop | inject | audit | report
 ```

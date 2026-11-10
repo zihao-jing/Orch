@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import audit as _audit
 from . import jobs as _jobs
 from . import tags as T
 
@@ -973,7 +974,10 @@ class ManagedRunner(MonitorRunner):
             self.check_control()
             ph = mg.get("phase", "plan")
             if ph == "done":
+                self.audit_due(final=True)
                 return "completed"
+            if ph == "work" and not mg.get("in_work"):  # between rounds
+                self.audit_due()
             if ph == "work" and mg.get("pause_req") and not mg.get("in_work"):  # the manager called a pause
                 req = mg.pop("pause_req")
                 mg["wait"] = {"who": "the manager", "text": req.get("text", ""), "proposal": req.get("text", ""),
@@ -987,7 +991,49 @@ class ManagedRunner(MonitorRunner):
                 return "failed"
             self.rec.save()
             if out:
+                if out in ("completed", "max_rounds_reached"):
+                    self.audit_due(final=True)
                 return out
+
+    # ---- the auditor: every `audit_every` rounds (and once when the run ends) it reads the digest of how the agents
+    # talked and updates its findings file. It is outside the team: nothing it writes reaches the agents.
+    @property
+    def auditor(self) -> Optional[AgentConfig]:
+        a = self.mon.by_role("auditor")
+        return a[0] if a else None
+
+    def audit_due(self, final: bool = False) -> None:
+        a, c = self.auditor, self.mon.controller
+        if a is None or self.should_stop():
+            return
+        au = self.mg.setdefault("audit", {})
+        done = int(self.st.get("round", 0)) - (1 if self.mg.get("in_work") else 0)
+        through = int(au.get("through", 0))
+        span = c.audit_every or 10
+        if done <= through or (not final and (c.audit_every <= 0 or done - through < c.audit_every)):
+            return
+        lo = max(through + 1, done - span + 1)  # at most one span: a long run audited for the first time
+        self.rec.progress(f"🔎 the auditor reads rounds {lo}–{done}")
+        self.log(f"  🔎 audit of rounds {lo}–{done}")
+        try:
+            res = _audit.run_audit(self.mon, a, self.rec.run_dir, lo, done, au.get("prompts"),
+                                   should_stop=self.should_stop, log=self.log)
+        except Exception as e:  # an audit never stops the run
+            res = {"status": "error", "error": f"{type(e).__name__}: {e}", "points": ""}
+        if res.get("status") == "stopped":
+            return  # audited again after the restart
+        au.update(through=done, prompts=res.get("prompts") or au.get("prompts") or {}, last=now_iso(),
+                  status=res.get("status"))
+        if res.get("cost_usd"):
+            self.st["cost_usd"] = float(self.st.get("cost_usd") or 0) + float(res["cost_usd"])
+        self.rec.event("audit", rounds=[lo, done], status=res.get("status"), points=res.get("count", 0),
+                       file=res.get("file", ""), cost_usd=res.get("cost_usd", 0))
+        if res.get("status") == "ok":
+            self.rec.progress(f"🔎 audit of rounds {lo}–{done}: {res.get('count', 0)} point(s) → {res.get('file')}")
+        else:
+            self.rec.progress(f"🔎 audit of rounds {lo}–{done} did not finish ({res.get('status')}"
+                              f"{': ' + res['error'] if res.get('error') else ''})")
+        self.rec.save()
 
     # ---- planning
     def ph_plan(self, mg: Dict[str, Any]) -> Optional[str]:
@@ -1143,6 +1189,21 @@ class ManagedRunner(MonitorRunner):
         work that isn't done. When the job ends (or after job_wait), the worker picks up again; I can skip ahead."""
         c, job = self.mon.controller, mg.get("job") or {}
         agents = job.get("agents") or {}
+        for name in list(agents):  # a wait saved by an older orch may hold processes that were never jobs
+            j = agents[name]
+            ws = [self.mon.agent(name).working_dir or self.mon.working_dir]
+            keep = set(_jobs.inside(j["pids"], ws))
+            if keep != set(j["pids"]):
+                j["lines"] = [l for x, l in zip(j["pids"], j["lines"]) if x in keep]
+                j["cmds"] = {k: v for k, v in (j.get("cmds") or {}).items() if int(k) in keep}
+                j["pids"] = [x for x in j["pids"] if x in keep]
+            if not j["pids"]:
+                del agents[name]
+        if not agents:
+            mg.pop("job", None)
+            self.rec.progress("▶ none of the processes I was waiting for runs in the workspace: review now")
+            mg["phase"] = "review"
+            return None
         self.rec.set(status="waiting_job")
         why = "finished"
         try:

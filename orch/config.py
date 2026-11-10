@@ -137,6 +137,9 @@ class ControllerConfig:
     note_pattern: str = r"^\W*NOTES? FOR\s+([^:\n]+?)\s*:"
     accept_pattern: str = r"DECISION:\s*\**\s*ACCEPT"
     revise_pattern: str = r"DECISION:\s*\**\s*REVISE"
+    # ---- the auditor (an agent with role: auditor): reads how the agents talk, never the task
+    audit_every: int = 10  # rounds between audits (0 = only `orch audit`); one more when the run ends
+    audit_points: int = 5  # at most this many points per audit
 
 
 @dataclass
@@ -304,7 +307,7 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
 
 ROLE_ALIASES = {"critic": "verifier", "reviewer": "verifier", "writer": "worker"}
 PROMPTS_DIR = Path(__file__).with_name("prompts")
-DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "worker.md"}
+DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "worker.md", "auditor": "auditor.md"}
 # workflow settings an agent.yaml may carry (usually: the manager's goal and approvals, the critic's checklist
 # and rounds, the worker's snapshot). Two agents setting the same one differently is an error.
 MONITOR_KEYS = ("goal", "goal_file", "max_rounds", "output_dir", "workspace")
@@ -312,7 +315,7 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "stop_on_error", "max_report_chars", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
-             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder")
+             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "audit_every", "audit_points")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -434,7 +437,8 @@ def load_config(path: str) -> Config:
                       "stop_on_error", "max_report_chars", "templates", "agent",
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
-                      "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder"}
+                      "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
+                      "audit_every", "audit_points"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
@@ -464,6 +468,8 @@ def load_config(path: str) -> Config:
             protocol=bool(craw.get("protocol", True)),
             tag_reminder=float(craw.get("tag_reminder", ControllerConfig.tag_reminder) or 0),
             job_ignore=[str(x) for x in (craw.get("job_ignore") or [])],
+            audit_every=int(craw.get("audit_every", ControllerConfig.audit_every) or 0),
+            audit_points=int(craw.get("audit_points", ControllerConfig.audit_points) or 5),
             **{k: str(craw[k]) for k in ("question_pattern", "note_pattern", "accept_pattern", "revise_pattern")
                if craw.get(k)},
         )
@@ -567,9 +573,13 @@ def validate(cfg: Config, check_paths: bool = False) -> List[str]:
             if m.max_rounds <= c.milestone_rounds:
                 warnings.append(f"{where}: max_rounds ({m.max_rounds}) counts rounds over all milestones; at or below "
                                 f"milestone_rounds ({c.milestone_rounds}) the run can stop in the middle of a milestone")
-            others = [a.name for a in m.agents if a.role not in ("worker", "verifier", "manager")]
+            others = [a.name for a in m.agents if a.role not in ("worker", "verifier", "manager", "auditor")]
             if others:
                 warnings.append(f"{where}: managed mode ignores agents with custom roles: {', '.join(others)}")
+            if len(m.by_role("auditor")) > 1:
+                raise ConfigError(f"{where}: at most one agent with role: auditor")
+            if c.audit_every < 0 or c.audit_points < 1:
+                raise ConfigError(f"{where}: controller.audit_every must be >= 0 and audit_points >= 1")
         if check_paths:
             if not Path(m.workspace).is_dir():
                 raise ConfigError(f"{where}: workspace does not exist: {m.workspace}")

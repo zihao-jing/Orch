@@ -30,6 +30,8 @@ def render(template: str, **values: Any) -> str:
 
 
 DEFAULT_TEMPLATES: Dict[str, str] = {
+    # the auditor (managed mode): the digest of the last stretch of rounds; its system prompt says what to do with it
+    "audit_request": "Audit of rounds {{lo}}–{{hi}} (run {{run}}). At most {{points}} points.\n\n{{digest}}",
     # ---------------- pipeline mode ----------------
     "worker_initial": """\
 # Overall goal
