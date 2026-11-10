@@ -78,20 +78,7 @@ def checklist_of(text: str) -> Tuple[int, int]:
 
 
 def pid_alive(pid: int) -> bool:
-    try:  # a finished child of ours stays a zombie until reaped
-        if os.waitpid(pid, os.WNOHANG)[0] == pid:
-            return False
-    except (ChildProcessError, OSError):
-        pass
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    return _jobs.alive(pid)
 
 
 
@@ -224,9 +211,14 @@ class ManagedRunner(MonitorRunner):
 
     def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str, seq: Optional[int] = None,
              extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Now and then (`tag_reminder`, a probability per turn) a short reminder of the tags is added to the
-        message. It only reminds; nothing is required of the agent because of it."""
+        """Keep critic reply routing explicit, including in resumed sessions; optionally remind other tags."""
         role = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(agent.role)
+        routing_template = ("manager_direct_voice" if role == "manager" else "critic_reply_routing"
+                            if role == "critic" and purpose not in ("checkin", "report") else None)
+        if routing_template and self.mon.controller.protocol:
+            note = self.mtpl(routing_template).strip()
+            if note:
+                prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
         p = self.mon.controller.tag_reminder
         if role and p > 0 and random.random() < p:
             note = self.mtpl(f"tag_reminder_{role}").strip()
@@ -363,7 +355,7 @@ class ManagedRunner(MonitorRunner):
     def notes_up(self, text: str) -> List[str]:
         """<message to="manager"> blocks in a critic reply: things the manager should know."""
         m = self.manager
-        return [b for a, b in T.blocks(text, "message") if b and T.addressed(a, m.called, m.name, "manager")]
+        return [b for a, b in T.blocks(text, "message") if b and T.addressed(a, m.called, m.name, "manager", "you")]
 
     def sync_chat_session(self, agent: AgentConfig) -> None:
         """If my board chat moved the manager to a new session id, continue from there."""

@@ -157,6 +157,16 @@ end, so orch never guesses where a block stops (`orch/tags.py`); tags quoted in 
 open runs to the next tag or the end of the reply. Text outside the tags is for whoever the agent is replying to:
 the critic's review goes to the worker, the manager's text to me.
 
+When the manager asks a side question during a critic review, the critic puts its answer inside
+`<message to="you">…</message>` and keeps worker feedback outside it. For a critic reply, `you` routes to the
+manager without exposing that role in the prompt; explicit agent names remain supported. The manager speaks
+as "I" to the critic, and the critic addresses it as "you". Downstream messages present decisions as the
+sender's own, without naming an upstream user. Use neutral display names to keep role names out of prompts.
+With the protocol enabled, every
+critic review/instruction turn includes this routing reminder, including resumed sessions; it is independent
+of `tag_reminder`. Tagged answers are queued for the manager's next run turn, without creating an immediate
+board-chat response. Dedicated critic reports and check-ins still address the manager directly.
+
 | tag | written by | what orch does |
 |---|---|---|
 | `<message to="…">…</message>` | anyone | delivers the block to that agent only (the manager's instructions and answers to the critic, the critic's notes to the manager) |
@@ -363,6 +373,16 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
 * **claude**: runs `claude -p --output-format json` with the prompt on stdin. The first turn uses `--session-id <uuid>`, and later turns use `--resume <uuid>`. The system prompt is passed with `--append-system-prompt`, or with `--system-prompt` if you set `system_prompt_mode: replace`. Options: `model`, `effort`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `add_dirs`, `max_turns`, `mcp_config`, `extra_args`, `executable`. Cost, number of turns and error flags are recorded for each turn.
   Agents run with no one watching, so set `permission_mode` (for example `acceptEdits`) and `allowed_tools`. Use `bypassPermissions` only in a sandbox.
 * **codex**: runs `codex exec --json` and continues sessions with `codex exec resume <id>`. Options: `model`, `effort` (sent as `model_reasoning_effort`), `sandbox`, `full_auto`, `extra_args`. This backend is experimental: Codex flags change between versions, so check them with `codex exec --help`.
+  For incremental text on the board, set `backend_options.transport: app-server` (tested with Codex CLI 0.167.0).
+  This uses `codex app-server` with `thread/start`, `thread/resume` and `turn/start`; text deltas and tool activity
+  appear while the turn runs. Sessions remain resumable, and stop/urgent-message handling still applies.
+  The board's **Prompt** section shows the turn input immediately, with system instructions expandable separately.
+  How finely text streams depends on the provider: a gateway may send a whole reply as one delta.
+  The default transport remains `exec`. Both transports accept `model`, `effort`, `sandbox` and `executable`.
+  With `app-server`, use `app_server_args` for CLI config overrides (`-c key=value`); when absent, it uses
+  `extra_args`. Exec-only flags such as `--ignore-user-config` and `--full-auto` are not supported by app-server.
+  App-server reads normal Codex configuration plus these overrides, uses `approval_policy="never"`, and defaults
+  to `workspace-write` if `sandbox` is omitted. It does not automatically approve tool requests.
 * **command**: wraps any CLI. Options:
   * `command` and an optional `resume_command`, with the placeholders `{session_id} {cwd} {agent} {prompt} {prompt_file} {system_prompt} {system_prompt_file}`
   * `prompt_via: stdin|arg|file`

@@ -200,8 +200,14 @@ class Board:
             text, status, new_sid, cost = "", "error", sid, None
             try:
                 with self._chat_lock, agent_lock(rd, mgr.name):
+                    prompt = message
+                    if self.mon.controller.protocol:
+                        critic = (self.mon.by_role("verifier") or [mgr])[0]
+                        note = render(self.mon.controller.templates["manager_direct_voice"], critic=critic.called).strip()
+                        if note:
+                            prompt += f"\n\n<system-reminder>\n{note}\n</system-reminder>"
                     res = get_backend(mgr.backend).run(TurnRequest(
-                        agent=mgr.name, role=mgr.role, prompt=message, system_prompt=mgr.current_system_prompt(),
+                        agent=mgr.name, role=mgr.role, prompt=prompt, system_prompt=mgr.current_system_prompt(),
                         session_id=sid, cwd=mgr.working_dir, timeout=mgr.timeout, options=mgr.backend_options,
                         env=mgr.env, context={"purpose": "chat", "monitor": self.mon.name},
                         on_event=lambda ev: live_event(rd, cid, ev)), lambda: False)
@@ -363,8 +369,8 @@ def _handler(boards: Dict[str, Board]):
             if rel == "run":
                 rd = self.board(q).run_dir
                 if rd is None:
-                    return self.redirect("/log/index.html")
-                return self.redirect(f"/log/{rd.parent.name}/{rd.name}/report.html")
+                    return self.redirect("index.html")
+                return self.redirect(f"{rd.parent.name}/{rd.name}/report.html")
             rel = rel or "index.html"
             for root in roots:
                 f = (root / rel).resolve()
@@ -418,6 +424,7 @@ def _handler(boards: Dict[str, Board]):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             offsets: Dict[str, int] = {}

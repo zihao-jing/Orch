@@ -146,7 +146,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
   <span class="mute mono" id="runid"></span>
   <span style="flex:1"></span>
   <select id="mon" style="display:none"></select>
-  <a class="sm btn" id="loglink" href="/log/run" target="_blank" title="Every turn's full input and output, folded by milestone and round">📜 Log</a>
+  <a class="sm btn" id="loglink" href="log/run" target="_blank" title="Every turn's full input and output, folded by milestone and round">📜 Log</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
   <button class="sm" id="theme" title="Toggle light/dark">◐</button>
   <button class="sm" id="stop" title="Stop after the current turn">Stop run</button>
@@ -181,7 +181,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
 const MONS = __MONITORS__;
 const qsM = new URLSearchParams(location.search).get('m');
 let M = MONS.includes(qsM) ? qsM : MONS[0];
-document.getElementById('loglink').href = '/log/run?m=' + encodeURIComponent(M);
+document.getElementById('loglink').href = 'log/run?m=' + encodeURIComponent(M);
 let D = null, sel = null, tab = 'all';
 const live = {}, expanded = new Set(), openRounds = new Set();
 const $ = id => document.getElementById(id);
@@ -262,7 +262,7 @@ const tm = s => s ? String(s).slice(11,16) : '';
 function setHTML(el, html){ if (el._h !== html){ el._h = html; el.innerHTML = html; } }
 
 async function load(){
-  try { const r = await fetch('/api/state?m=' + encodeURIComponent(M), {cache:'no-store'}); D = await r.json(); }
+  try { const r = await fetch('api/state?m=' + encodeURIComponent(M), {cache:'no-store'}); D = await r.json(); }
   catch(e){ return; }
   for (const k in (D.live||{})){ const L = D.live[k]; if (!live[k] || (live[k].text||'').length < (L.text||'').length) live[k] = {text:L.text||'', tools:L.tools||[]}; }
   render();
@@ -270,7 +270,7 @@ async function load(){
 }
 let tmr = null; const soon = () => { clearTimeout(tmr); tmr = setTimeout(load, 200); };
 function connect(){
-  const es = new EventSource('/api/events?m=' + encodeURIComponent(M));
+  const es = new EventSource('api/events?m=' + encodeURIComponent(M));
   es.addEventListener('state', soon);
   es.addEventListener('live', e => { const ev = JSON.parse(e.data); const L = live[ev.turn] || (live[ev.turn] = {text:'', tools:[]});
     if (ev.k === 'text') L.text += ev.s; else if (ev.k === 'tool') { L.tools.push(ev.s); L.tools = L.tools.slice(-12); }
@@ -377,21 +377,21 @@ function renderNeeds(mg){
 }
 // what follows a question that is meant for me, up to a divider or the part addressed to the critic
 function forMe(t){ return String(t||'').replace(TAGBLOCK, '').replace(/\n{3,}/g, '\n\n').trim(); }  // outside the tags
-async function qSend(qid, text){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('/api/chat', {qid, message: text}); }
+async function qSend(qid, text){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('api/chat', {qid, message: text}); }
 document.addEventListener('keydown', e => { const t = e.target;
   if (t.id && t.id.startsWith('qa-') && e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); qSend(t.id.slice(3), t.value.trim()); } });
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
-  if (b.dataset.job){ b.disabled = true; await post('/api/job', {}); }
+  if (b.dataset.job){ b.disabled = true; await post('api/job', {}); }
   if (b.dataset.gate){ const msg = ($('gate-msg')||{}).value || '';
     if (b.dataset.gate === 'revise' && !msg.trim() && !confirm('Send it back without a note?')) return;
-    b.disabled = true; await post('/api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}); }
+    b.disabled = true; await post('api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}); }
   else if (b.dataset.qo){ b.disabled = true; await qSend(b.dataset.qo, b.dataset.a); }
   else if (b.dataset.qs){ const v = (($('qa-'+b.dataset.qs)||{}).value || '').trim(); if (!v) return; b.disabled = true; await qSend(b.dataset.qs, v); }
   else if (b.dataset.qd){ const v = (($('qa-'+b.dataset.qd)||{}).value || '').trim();
     if (!qThread(b.dataset.qd).length && !v && !confirm('Settle without talking? The manager writes up its current assumption as the answer.')) return;
     b.disabled = true; const ta = $('qa-' + b.dataset.qd); if (ta) ta.value = '';
-    await post('/api/chat', {qid: b.dataset.qd, message: v, settle: true}); }
+    await post('api/chat', {qid: b.dataset.qd, message: v, settle: true}); }
   else if (b.dataset.more){ expanded.has(b.dataset.more) ? expanded.delete(b.dataset.more) : expanded.add(b.dataset.more); render(); }
   else if (b.dataset.older){ shown[b.dataset.older] = b.dataset.n === 'all' ? 1e9 : shown[b.dataset.older] + (+b.dataset.n); render(); }
   else if (b.dataset.less){ shown[b.dataset.less] = LIMIT[b.dataset.less]; render(); }
@@ -482,6 +482,33 @@ function preview(text){  // first line of prose, without markdown, for a folded 
   return ln.replace(/[*_`]/g, '').replace(/^\s*([-+]|\d+\.)\s+/, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').slice(0, 220);
 }
 const CLAMP_CHARS = 900;  // longer messages show their first ~240px; "Show all" opens the rest
+const prompts = new Map(), promptOpen = new Set(), promptShut = new Set();
+const promptKey = t => `${D.run_id}:${t}`;
+function promptBody(t){
+  return `<pre>${esc(t.input || '(empty prompt)')}</pre>`
+    + (t.system_prompt ? `<details><summary>System instructions</summary><pre>${esc(t.system_prompt)}</pre></details>` : '');
+}
+function promptPanel(t){
+  const key = promptKey(t.turn_id), saved = prompts.get(key);
+  const open = promptOpen.has(key) || (t.status === 'running' && !promptShut.has(key));
+  return `<details data-prompt="${esc(t.turn_id)}"${open ? ' open' : ''}><summary>Prompt</summary><div class="prompt-body">${saved ? promptBody(saved) : 'Loading prompt…'}</div></details>`;
+}
+document.addEventListener('toggle', async e => {
+  const d = e.target, id = d.dataset && d.dataset.prompt;
+  if (!id) return;
+  const key = promptKey(id);
+  if (!d.open){ promptOpen.delete(key); promptShut.add(key); return; }
+  promptOpen.add(key); promptShut.delete(key);
+  if (prompts.has(key)) return;
+  const body = d.querySelector('.prompt-body');
+  try {
+    const r = await fetch('api/turn?m=' + encodeURIComponent(M) + '&id=' + encodeURIComponent(id), {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const t = await r.json();
+    if (t.error) throw new Error(t.error);
+    prompts.set(key, t); body.innerHTML = promptBody(t);
+  } catch(e){ body.textContent = 'Could not load prompt. Close and reopen to retry.'; }
+}, true);
 function fold(t, defOpen){
   const f = (D.flow||{})[t.purpose] || [t.role, ''];
   let to = f[1]; if (t.purpose === 'review' && /<decision>\s*REVISE/i.test(t.output||'')) to = 'critic';
@@ -494,7 +521,7 @@ function fold(t, defOpen){
     <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
     <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
     ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
-    <span class="pv">${esc(run ? 'writing…' : preview(t.output))}</span></summary><div class="fb">${body}</div></details>`;
+    <span class="pv">${esc(run ? 'writing…' : preview(t.output))}</span></summary><div class="fb">${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;
 }
 const openMsgs = new Set(), shutMsgs = new Set();
 const LIMIT = {thread: 8, rounds: 5}, shown = {thread: 8, rounds: 5};  // newest first; older ones behind a link
@@ -581,7 +608,7 @@ function relayLine(id){  // what became of the messages this reply passed on
       : (r.urgent ? `⚡ waiting for ${to}: urgent, cuts into the running turn` : `⏳ waiting for ${to}'s next turn`);
     return `<div class="w">${s}</div>`; }).join('');
 }
-async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true; await post('/api/chat', {message: m}); }
+async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true; await post('api/chat', {message: m}); }
 let chatOpen, replies = 0, seen = null;
 function seenReplies(n){ replies = n; if (seen === null || chatOpen) seen = n; badge(); }  // replies already there on load count as read
 function badge(){ const k = seen === null ? 0 : replies - seen; $('chatbadge').innerHTML = !chatOpen && k > 0 ? `<span class="badge">${k}</span>` : ''; }
@@ -596,7 +623,7 @@ document.querySelector('.side').addEventListener('mousedown', e => { if (e.targe
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen) setChat(false); });
 $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
-$('stop').addEventListener('click', () => { if (confirm('Stop the run after the current turn? You can resume it later.')) post('/api/stop', {}); });
+$('stop').addEventListener('click', () => { if (confirm('Stop the run after the current turn? You can resume it later.')) post('api/stop', {}); });
 $('theme').addEventListener('click', () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('orch-theme', r.dataset.theme); } catch(e){} });
 try { const t = localStorage.getItem('orch-theme'); if (t) document.documentElement.dataset.theme = t; } catch(e){}

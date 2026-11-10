@@ -19,16 +19,16 @@ _INIT = re.compile(r"(^|/)(launchd|systemd|init)(\s|$)")
 
 
 def snapshot() -> Dict[int, Proc]:
-    """Every process now: {pid: (ppid, command)}. Empty if `ps` is unavailable."""
+    """Live processes now: {pid: (ppid, command)}. Empty if `ps` is unavailable."""
     try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=20).stdout
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,stat=,command="], capture_output=True, text=True, timeout=20).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
     procs: Dict[int, Proc] = {}
     for line in out.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-            procs[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+        parts = line.strip().split(None, 3)
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit() and parts[2][0] not in "ZXx":
+            procs[int(parts[0])] = (int(parts[1]), parts[3] if len(parts) > 3 else "")
     return procs
 
 
@@ -113,11 +113,16 @@ def alive(pid: int, command: str = "") -> bool:
         pass
     except OSError:
         return False
-    if command:
-        try:
-            now = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True,
-                                 timeout=10).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            return True
-        return not now or now == command.strip()
-    return True
+    # kill(pid, 0) also succeeds for zombies owned by another parent; waitpid cannot reap them.
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,command="], capture_output=True, text=True,
+                                timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if result.returncode not in (0, 1):
+        return True  # unable to inspect it: keep waiting conservatively
+    parts = result.stdout.strip().split(None, 1)
+    if not parts or parts[0][0] in "ZXx":
+        return False
+    now = parts[1] if len(parts) > 1 else ""
+    return not command or now == command.strip()

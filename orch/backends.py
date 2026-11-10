@@ -301,13 +301,19 @@ def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
 class CodexBackend(Backend):
     """OpenAI Codex CLI (experimental — flags change between versions; verify with `codex exec --help`).
 
-    options: executable, model, effort, sandbox, full_auto (bool), extra_args
+    options: executable, model, effort, sandbox, full_auto (bool), extra_args,
+             transport (exec or app-server), app_server_args
     """
 
     name = "codex"
 
     def run(self, req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
         o = req.options
+        if o.get("transport", "exec") == "app-server":
+            from .codex_app_server import run_turn
+            return run_turn(req, should_stop)
+        if o.get("transport", "exec") != "exec":
+            return TurnResult("error", "", req.session_id, stderr="Unknown Codex transport")
         exe = str(o.get("executable", "codex"))
         flags = ["--json", "--skip-git-repo-check"]
         if o.get("model"):

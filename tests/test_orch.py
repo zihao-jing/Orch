@@ -410,6 +410,43 @@ class TestManaged(unittest.TestCase):
         self.assertNotIn("seeds", w2["input"])  # the note was for the manager only
         self.assertNotIn("report", [p for a, p in seq if a == "critic"][:3])
 
+    def test_manager_side_question_in_a_review_has_explicit_reply_routing(self):
+        request = "Please explain the ledger columns to me. Reply directly; no new experiments."
+        answer = "The ledger counts attempts, including retries."
+        status, rec = run(make_cfg(self.tmp, [managed(
+            controller={"checkin_every": 1, "tag_reminder": 0},
+            mgr={"milestones": 1, "replies": {"ack": [
+                f'<message to="Jordan">{request}</message>', "Thanks."]}},
+            critic={"replies": {"verify": [
+                "Fix the labels.\n<checklist>- [ ] labels</checklist><verdict>FAIL</verdict>",
+                f'<message to="you">{answer}</message>\nFinish checking the labels.\n'
+                '<checklist>- [ ] labels</checklist><verdict>FAIL</verdict>',
+                "Done.\n<checklist>- [x] labels</checklist><verdict>PASS</verdict>"]}})]))
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        reviews = [t for t in ts if t["purpose"] == "verify"]
+        self.assertIn(request, reviews[1]["input"])
+        self.assertTrue(reviews[1]["resumed_session"])
+        self.assertIn('complete answer inside `<message to="you">', reviews[1]["input"])
+        self.assertIn("If I asked you a question", reviews[1]["input"])
+        self.assertNotRegex(reviews[1]["input"], r"(?i)\b(manager|user|human|Alex)\b")
+        self.assertFalse(reviews[1].get("tag_reminder"))  # routing does not depend on random reminders
+        ack = [t for t in ts if t["purpose"] == "ack"][1]
+        self.assertIn(answer, ack["input"])
+        worker = [t for t in ts if t["purpose"] == "work"][2]
+        self.assertIn("Finish checking the labels.", worker["input"])
+        self.assertNotIn(answer, worker["input"])
+        for t in ts:
+            if t["purpose"] in ("report", "checkin") or t["role"] != "verifier":
+                self.assertNotIn("complete answer inside", t["input"])
+
+    def test_reply_routing_reminder_respects_protocol_opt_out(self):
+        status, rec = run(make_cfg(self.tmp, [managed(controller={"protocol": False}, mgr={"milestones": 1})]))
+        self.assertEqual(status, "completed")
+        for t in turns(rec):
+            self.assertNotIn("complete answer inside", t["input"])
+            self.assertNotIn('speak as "I"', t["input"])
+
     def test_worker_timeout_is_not_fatal(self):
         m = managed(mgr={"milestones": 1})
         m["agents"][2].update(backend="command", timeout=0.5, retries=2, backend_options={
@@ -448,7 +485,7 @@ class TestManaged(unittest.TestCase):
         r.control({"kind": "answer", "qid": "q1", "message": "a"})
         r.check_control()
         self.assertEqual((q["status"], q["answered_by"], q["answer"]), ("answered", "human", "A) Gemini"))
-        self.assertIn('I got an answer on "Which model?": A) Gemini', r.st["fwd"]["critic"][0])
+        self.assertIn('My answer about "Which model?": A) Gemini', r.st["fwd"]["critic"][0])
         self.assertIn("About your question (Which model?)", r.st["fwd"]["boss"][0])
 
     def test_gates_approve_and_send_back(self):
@@ -502,6 +539,20 @@ class TestManaged(unittest.TestCase):
         try:
             page = urllib.request.urlopen(url).read().decode()
             self.assertIn("Talk to the manager", page)
+            # Relative URLs must stay under a reverse proxy's external prefix.
+            from urllib.parse import urljoin
+            import http.client
+            conn = http.client.HTTPConnection("127.0.0.1", 8890)
+            conn.request("GET", "/log/run?m=m")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 302)
+            location = response.getheader("Location")
+            self.assertEqual(
+                urljoin("https://example.test/proxy/8765/log/run?m=m", location),
+                f"https://example.test/proxy/8765/log/m/{rec.run_dir.name}/report.html",
+            )
+            response.read()
+            conn.close()
             st = json.loads(urllib.request.urlopen(url + "api/state").read())
             self.assertEqual(st["run_id"], rec.run_dir.name)
             req = urllib.request.Request(url + "api/chat", data=json.dumps({"message": "How is it going?"}).encode(),
@@ -518,6 +569,7 @@ class TestManaged(unittest.TestCase):
             self.assertTrue(any(json.loads(p.read_text()).get("kind") == "answer" for p in (rec.run_dir / "inbox").glob("*.json")))
         finally:
             srv.shutdown()
+            srv.server_close()
 
     def test_question_settled_in_conversation(self):
         from orch.board import Board
@@ -545,7 +597,7 @@ class TestManaged(unittest.TestCase):
         self.assertIn("error", b.chat("again", qid="Q1", settle=True))  # one settle per question
         r.check_control()
         self.assertEqual((q["status"], q["answered_by"], q.get("via")), ("answered", "human", "conversation"))
-        self.assertIn("over with the authors", r.st["fwd"]["critic"][0])
+        self.assertIn("Here is what I decided", r.st["fwd"]["critic"][0])
         self.assertNotIn("boss", r.st.get("fwd") or {})  # the manager was in the conversation
 
     def test_settle_with_my_answer_sends_it_to_the_manager(self):
@@ -574,6 +626,7 @@ class TestManaged(unittest.TestCase):
                 time.sleep(0.05)
         self.assertIn("These are the real labels.", seen[0])
         self.assertIn("not by your earlier recommendation", seen[0])
+        self.assertIn('speak as "I" and address them as "you"', seen[0])
 
     def test_claude_can_skip_my_hooks(self):
         from orch.backends import ClaudeBackend, TurnRequest
@@ -998,7 +1051,9 @@ class TestManaged(unittest.TestCase):
         status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
         sp = {t["agent"]: t["system_prompt"] for t in turns(rec)}
         self.assertIn("<decision>PAUSE</decision>", sp["boss"])
-        self.assertIn('<message to="Alex">', sp["critic"])  # names filled in
+        self.assertIn('<message to="you">', sp["critic"])
+        self.assertNotRegex(sp["critic"], r"(?i)\b(manager|user|human|Alex)\b")
+        self.assertNotRegex(sp["writer"], r"(?i)\b(manager|critic|user|human|Alex|Jordan)\b")
         self.assertIn('<no-wait pid="123"/>', sp["writer"])
         self.assertNotIn("{{", sp["writer"])
         off = managed(name="n", controller={"protocol": False}, mgr={"milestones": 1})
@@ -1033,11 +1088,16 @@ class TestManaged(unittest.TestCase):
         ts = turns(rec)
         self.assertTrue(all("<system-reminder>" in t["input"] and t.get("tag_reminder") for t in ts))
         crit = next(t for t in ts if t["agent"] == "critic")["input"]
-        self.assertIn('<message to="Alex">', crit)
+        self.assertIn('<message to="you">', crit)
         self.assertIn("not a request to add anything", crit)
         status, rec = run(make_cfg(self.tmp / "x" if (self.tmp / "x").mkdir() is None else self.tmp,
                                    [managed(controller={"tag_reminder": 0}, mgr={"milestones": 1})]))
-        self.assertFalse(any("<system-reminder>" in t["input"] for t in turns(rec)))
+        self.assertFalse(any(t.get("tag_reminder") for t in turns(rec)))
+        for t in turns(rec):
+            if "<system-reminder>" in t["input"]:
+                self.assertIn(t["role"], ("verifier", "manager"))
+                self.assertIn("complete answer inside" if t["role"] == "verifier" else 'speak as "I"',
+                              t["input"])  # deterministic communication reminders still apply
 
     def test_reset_sessions_keeps_the_run_and_hands_over(self):
         cfg_path = make_cfg(self.tmp, [managed(mgr={"milestones": 2})])

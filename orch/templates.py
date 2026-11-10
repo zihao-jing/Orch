@@ -384,8 +384,8 @@ the work must keep to. The repository is at `{{cwd}}`.
                         "(and any logs or running jobs) before you change anything, and carry on from there.",
     # relayed answers (put in front of the agent's next message)
     "relay_answer_manager": "About your question ({{question}}): {{answer}}",
-    "relay_answer_critic": "I got an answer on \"{{question}}\": {{answer}}",
-    "relay_settled_critic": "I talked \"{{question}}\" over with the authors. Here is where we landed:\n\n{{answer}}",
+    "relay_answer_critic": "My answer about \"{{question}}\": {{answer}}",
+    "relay_settled_critic": "Here is what I decided about \"{{question}}\":\n\n{{answer}}",
     # my conversation with the manager about one of its questions (sent from the board)
     "manager_question_chat": "About your question {{qid}} (\"{{question}}\"):\n\n{{message}}",
     "manager_question_settle": "Let's settle {{qid}} here. In a few lines, write what {{critic}} should go by "
@@ -399,6 +399,19 @@ the work must keep to. The repository is at `{{cwd}}`.
     "manager_resumed": "I ended the pause and said this (it went to {{critic}} too): \"{{message}}\"\n\n"
                        "What the pause was waiting for: {{waited}}",
     "relay_note": "{{note}}",
+    "critic_reply_routing": """\
+If I asked you a question or requested an explanation alongside this review or instruction, put your
+complete answer inside `<message to="you">…</message>`. This sends the answer to me; address me as "you" in it.
+Plain text outside that tag goes to {{worker}}, so use it only for their instructions or feedback, written as
+your own request to "you". Keep any requested checklist and verdict separate. Answer my question yourself when
+you can; it does not replace the ongoing review or create a new task for {{worker}}.
+""",
+    "manager_direct_voice": """\
+When writing to {{critic}}, speak as "I" and address them as "you". Present instructions, questions and decisions
+as your own. Keep my identity, our conversation and your role out of that message; do not attribute requests to
+a user, manager or anyone above you. Ask for explanations as "Please explain this to me". Keep your reply to me separate
+from the message you send to {{critic}}.
+""",
     "urgent_resume": "I stopped you mid-turn for this, because it can't wait until you finish:\n\n{{note}}\n\n"
                      "Take it into account from here. Anything you were running in the foreground was ended; check "
                      "where it got to before you rely on it. Then finish the request you were working on, and reply "
@@ -414,8 +427,8 @@ the work must keep to. The repository is at `{{cwd}}`.
                             "<score>…</score> and <decision>…</decision>; your working state in <state>…</state> when it changes. "
                             "Everything outside tags is read by me.",
     "tag_reminder_critic": "A reminder, in case it helps (not a request to add anything): text outside tags reaches "
-                           "{{worker}}; what is only for {{manager}} goes in <message to=\"{{manager}}\">…</message>; "
-                           "questions for {{manager}} in <question>…</question>; proposing to stop the whole run until "
+                           "{{worker}}; what is only for me goes in <message to=\"you\">…</message>; "
+                           "questions for me in <question>…</question>; proposing to stop the whole run until "
                            "a person acts in <pause>…</pause>; each review ends with <checklist>…</checklist> and "
                            "<verdict>PASS</verdict> or <verdict>FAIL</verdict>.",
     "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for me goes in "
