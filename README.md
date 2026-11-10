@@ -381,15 +381,16 @@ With a file, the steering commands take the output directory and a monitor name,
 
 ### Urgent messages
 
-A message normally waits for its agent's next turn. An urgent one cuts into the turn that is running now:
+A message normally waits for its agent's next turn. An urgent one is delivered immediately:
 
 * `orch inject <project> "Stop the provenance checks" --to worker --urgent`: if the worker is mid-turn, that turn is
   stopped and resumed in the same session with the message first; the agent then finishes the turn.
-* Managed mode, `--to critic --urgent` while the worker is mid-turn: the worker's turn ends where it is (its partial
-  report is marked as cut short, and the review does not wait for jobs it left running), so the critic reads the
-  message at once and redirects the work. The worker is told at its next turn why its last one ended early.
-* In a board chat, the manager can pass a change of course on with `<message to="critic" urgent="yes">`, which
-  works the same way. Its protocol tells it to do so only for what can't wait.
+* Managed mode, `--to critic --urgent` while the worker is mid-turn: the critic answers in a separate check-in
+  while the worker continues its current turn and session. The reply goes directly to the manager. It does not
+  become worker feedback, trigger a review, or release a background-job wait. Explicit **Review now** still
+  releases a job wait.
+* In a board chat, the manager can request this check-in with `<message to="critic" urgent="yes">`. If the critic
+  itself is already mid-turn, it receives the message through the usual same-session interruption.
 
 The turn record lists each interruption (`interruptions`, `cut_short`), and the board's progress log marks it with ⚡.
 

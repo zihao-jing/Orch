@@ -605,7 +605,7 @@ function relayLine(id){  // what became of the messages this reply passed on
     const a = (D.agents||[]).find(x => x.name === r.to), to = esc(a ? a.called : who(r.to || 'critic'));
     const s = r.status === 'delivered'
       ? `✓ passed to ${to}${r.at ? ' at ' + tm(r.at) : ''}${r.turn ? ` · read in ${esc(r.turn)} (${esc(r.purpose || '')}${r.turn_status === 'running' ? ', running now' : ''})` : ''}`
-      : (r.urgent ? `⚡ waiting for ${to}: urgent, cuts into the running turn` : `⏳ waiting for ${to}'s next turn`);
+      : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}'s next turn`);
     return `<div class="w">${s}</div>`; }).join('');
 }
 async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true; await post('api/chat', {message: m}); }

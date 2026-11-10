@@ -636,7 +636,7 @@ class TestManaged(unittest.TestCase):
         cmd, _ = ClaudeBackend().build_command(req({}))
         self.assertNotIn("--settings", cmd)
 
-    def _urgent_run(self, note: dict, worker_opts: dict):
+    def _urgent_run(self, note: dict, worker_opts: dict, critic_opts=None):
         """Run a one-milestone project; drop `note` (urgent) into the inbox while the writer's first turn runs."""
         from unittest import mock
         from orch.backends import MockBackend
@@ -658,7 +658,8 @@ class TestManaged(unittest.TestCase):
         th = threading.Thread(target=drop, daemon=True)
         th.start()
         with mock.patch.object(MockBackend, "run", spy):
-            status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=worker_opts)]))
+            status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=worker_opts,
+                                                        critic=critic_opts)]))
         th.join(timeout=5)
         return status, rec, sent
 
@@ -799,22 +800,45 @@ class TestManaged(unittest.TestCase):
         self.assertFalse((rec.state.get("fwd") or {}).get("writer"))
         self.assertEqual(list((rec.run_dir / "inbox").glob("*.json")), [])
 
-    def test_an_urgent_message_for_the_critic_ends_the_workers_turn(self):
-        status, rec, sent = self._urgent_run({"to": ["critic"], "message": "Drop the inventory checks."},
-                                             {"delay": 3})
+    def test_an_urgent_critic_checkin_leaves_the_worker_running(self):
+        question = "How is the inventory check going?"
+        answer = "You can see the first results; the remaining checks are pending."
+        status, rec, sent = self._urgent_run({"to": ["critic"], "from": "boss", "message": question},
+                                             {"delay": 3}, {"replies": {"checkin": [
+                                                 f'<message to="you">{answer}</message>']}})
         self.assertEqual(status, "completed")
         ts = turns(rec)
-        i = next(k for k, t in enumerate(ts) if t["agent"] == "writer")
-        w = ts[i]
-        self.assertTrue(w.get("cut_short"))
-        self.assertIn("ended this turn early so Jordan could act", w["output"])
-        self.assertLess(w["duration_s"], 3)
-        nxt = ts[i + 1]  # the critic goes next, with my message
-        self.assertEqual(nxt["agent"], "critic")
-        self.assertIn("Drop the inventory checks.", nxt["input"])
-        self.assertEqual(sum("Drop the inventory checks." in t["input"] for t in ts), 1)
-        w2 = next(t for t in ts[i + 1:] if t["agent"] == "writer")
-        self.assertIn("I ended your last turn early", w2["input"])
+        workers = [t for t in ts if t["agent"] == "writer"]
+        checkin = next(t for t in ts if t["purpose"] == "checkin")
+        ack = next(t for t in ts if t["purpose"] == "ack")
+        w = workers[0]
+        self.assertEqual(w["status"], "ok")
+        self.assertFalse(w.get("cut_short") or w.get("interruptions"))
+        self.assertGreaterEqual(w["duration_s"], 3)
+        self.assertLessEqual(w["started_at"], checkin["started_at"])
+        self.assertLess(ack["ended_at"], w["ended_at"])
+        self.assertIn(question, checkin["input"])
+        self.assertIn(answer, ack["input"])
+        self.assertEqual(ack["input"].count(answer), 1)
+        self.assertNotIn("manager", checkin["input"].lower())
+        self.assertEqual(sum(question in t["input"] for t in ts), 1)
+        self.assertEqual(len([x for x in sent if x[0] == "writer"]), len(workers))
+        for t in workers:
+            self.assertNotIn(question, t["input"])
+            self.assertNotIn(answer, t["input"])
+            self.assertEqual(t["session_id"], w["session_id"])
+        review = next(t for t in ts if t["purpose"] == "verify")
+        self.assertLessEqual(w["ended_at"], review["started_at"])
+        self.assertEqual(list((rec.run_dir / "inbox").glob("*.json")), [])
+
+    def test_a_failed_urgent_checkin_does_not_interrupt_the_worker(self):
+        status, rec, sent = self._urgent_run({"to": ["critic"], "message": "How is it going?"},
+                                             {"delay": 2}, {"replies": {"checkin": [""]}})
+        self.assertEqual(status, "completed")
+        workers = [t for t in turns(rec) if t["agent"] == "writer"]
+        self.assertEqual(len([x for x in sent if x[0] == "writer"]), len(workers))
+        self.assertTrue(all(t["status"] == "ok" and not t.get("cut_short") for t in workers))
+        self.assertIn("Urgent check-in did not finish", (rec.run_dir / "progress.md").read_text())
 
     def test_the_board_shows_when_a_message_from_the_chat_was_delivered(self):
         from orch.board import _relays
@@ -1137,6 +1161,67 @@ class TestManaged(unittest.TestCase):
         status, rec = holder["res"]
         self.assertEqual(status, "completed")
         self.assertEqual(subprocess.run(["pgrep", "-f", "sleep 60.17"], capture_output=True).returncode, 0)  # left alone
+
+    def test_urgent_checkin_preserves_a_background_job_wait(self):
+        from unittest import mock
+        from orch.backends import MockBackend
+        cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1}, critic={"replies": {"checkin": [
+            '<message to="you">The experiment is still running.</message>']}})])
+        stop, holder, jobs = threading.Event(), {}, []
+        orig = MockBackend.run
+
+        def spy(backend, req, cancel):
+            result = orig(backend, req, cancel)
+            if req.role == "worker" and not jobs:
+                jobs.append(subprocess.Popen(["sleep", "30"], cwd=req.cwd))
+            return result
+
+        def wait_for(predicate):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if predicate():
+                    return
+                time.sleep(0.05)
+            self.fail("Timed out waiting for the job/check-in")
+
+        # Keep ownership of the real process for cleanup; simulate its discovery as a detached job.
+        def detect(before, *args):
+            return ([{"pid": jobs[0].pid, "command": "sleep 30"}]
+                    if jobs and jobs[0].pid not in before else [])
+
+        with mock.patch.object(MockBackend, "run", spy), mock.patch("orch.jobs.detect", side_effect=detect):
+            th = threading.Thread(target=lambda: holder.update(res=run(cfg, stop=stop)), daemon=True)
+            th.start()
+            try:
+                out = self.tmp / "out" / "m"
+                wait_for(lambda: any((read_json(p) or {}).get("status") == "waiting_job"
+                                     for p in out.glob("*/state.json")))
+                rd = next(p.parent for p in out.glob("*/state.json"))
+                before = read_json(rd / "state.json")["managed"]["job"]
+                (rd / "inbox" / "urgent.json").write_text(json.dumps({
+                    "to": ["critic"], "from": "boss", "urgent": True, "message": "Is the experiment still running?"}))
+                wait_for(lambda: any((read_json(p) or {}).get("purpose") == "ack"
+                                     and (read_json(p) or {}).get("status") == "ok"
+                                     for p in rd.glob("rounds/r*/t*.json")))
+                state = read_json(rd / "state.json")
+                self.assertEqual(state["status"], "waiting_job")
+                self.assertEqual(state["managed"]["phase"], "job")
+                self.assertEqual(state["managed"]["job"], before)
+                self.assertIsNone(jobs[0].poll())
+                self.assertFalse(holder)
+                self.assertFalse(any((read_json(p) or {}).get("purpose") == "verify"
+                                     for p in rd.glob("rounds/r*/t*.json")))
+                (rd / "inbox" / "release.json").write_text(json.dumps({"kind": "job"}))
+                th.join(10)
+                self.assertFalse(th.is_alive())
+                self.assertEqual(holder["res"][0], "completed")
+                self.assertIsNone(jobs[0].poll())
+            finally:
+                stop.set()
+                for job in jobs:
+                    job.terminate()
+                    job.wait(timeout=5)
+                th.join(5)
 
     def test_manager_pauses_the_work_itself(self):
         mgr = {"milestones": 1, "replies": {"ack": [

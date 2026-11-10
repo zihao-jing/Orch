@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -182,12 +183,6 @@ class ManagedRunner(MonitorRunner):
     def inbox_broadcast(self, agent: AgentConfig) -> bool:
         return agent.role == "manager"  # notes to nobody in particular are for the manager
 
-    def yields_to(self, agent: AgentConfig, to: List[str]) -> bool:
-        return agent.role == "worker" and self.critic.name in to  # the critic redirects the work now, not after it
-
-    def cut_short_note(self, agent: AgentConfig) -> str:
-        return self.mtpl("worker_cut_short").strip()
-
     @property
     def mg(self) -> Dict[str, Any]:
         return self.st.setdefault("managed", {"phase": "plan", "ms": 0, "ms_round": 0, "milestones": [],
@@ -221,7 +216,7 @@ class ManagedRunner(MonitorRunner):
             if note:
                 prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
         p = self.mon.controller.tag_reminder
-        if role and p > 0 and random.random() < p:
+        if role and not (role == "critic" and purpose == "checkin") and p > 0 and random.random() < p:
             note = self.mtpl(f"tag_reminder_{role}").strip()
             if note:
                 prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
@@ -1211,9 +1206,9 @@ class ManagedRunner(MonitorRunner):
                 if self.should_stop():
                     raise StopRequested()
                 self.check_control()
-                if mg.pop("job_release", False) or any(n["to"] and self.critic.name in n["to"]
-                                                        for n in self.rec.urgent_notes()):
-                    why = "released"  # "Review now" on the board, or an urgent message for the critic
+                self.urgent_checkin()
+                if mg.pop("job_release", False):
+                    why = "released"  # explicit "Review now" on the board
                     break
                 if not any(_jobs.alive(x, (j.get("cmds") or {}).get(str(x), "")) for j in agents.values()
                            for x in j["pids"]):
@@ -1255,9 +1250,37 @@ class ManagedRunner(MonitorRunner):
         for a, p, purpose in items:  # workers of one milestone run one after another
             self.sync_state(a)
             self.write_handover(a)
-            out.append(self.turn(a, p, rnd, purpose, extra=extra))
+            # Keep draining the worker's backend while the main thread handles a critic check-in.
+            # Finish both conversations before advancing the phase or starting another worker turn.
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(self.turn, a, p, rnd, purpose, extra=extra)
+                while not wait([future], timeout=0.2).done:
+                    self.urgent_checkin()
+                out.append(future.result())
             self.after_state_turn(a, out[-1])
         return out
+
+    def urgent_checkin(self) -> None:
+        """Answer an urgent critic note alongside work, without changing its phase or job wait."""
+        if self.should_stop() or not any(n["to"] and self.critic.name in n["to"]
+                                         for n in self.rec.urgent_notes()):
+            return
+        self.rec.progress(f"⚡ {self.critic.name}: urgent check-in; the worker continues")
+        self.rec.event("urgent", agent=self.critic.name, how="checkin")
+        try:
+            r = self.say(self.critic, self.mtpl("critic_urgent_checkin"), "checkin")
+            if r["status"] != "ok":
+                raise _Failed(f"{self.critic.name} check-in ended with status {r['status']}")
+            # say() already queues <message to="you"> for the manager. Plain text and questions
+            # from this dedicated check-in also go up, never into worker feedback or verdicts.
+            update = "\n\n".join(x for x in [T.outside(r["output"]), self.ask_block(r["output"], "verifier")] if x)
+            a = self.say(self.manager, self.mtpl("manager_checkin", update=update, human_messages=""), "ack")
+            if a["status"] == "ok":
+                self.after_manager(a)
+        except _Failed as e:
+            self.rec.event("checkin_error", error=str(e))
+            self.rec.progress(f"Urgent check-in did not finish: {e}; the worker continues")
+        self.rec.save()
 
     def ph_review(self, mg: Dict[str, Any]) -> Optional[str]:
         c, v = self.mon.controller, self.critic

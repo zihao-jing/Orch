@@ -430,7 +430,7 @@ class MonitorRunner:
         return None
 
     def yields_to(self, agent: AgentConfig, to: List[str]) -> bool:
-        """Does an urgent message for one of `to` end this agent's running turn? (Managed: a worker yields to its critic.)"""
+        """Does an urgent message for one of `to` end this agent's running turn?"""
         return False
 
     def cut_short_note(self, agent: AgentConfig) -> str:

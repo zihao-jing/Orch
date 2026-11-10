@@ -315,6 +315,13 @@ Please add what is needed to your checklist and tell {{worker}} what to do next.
 A quick update for me, please: two or three lines on how it is going and anything I should know. No full
 report needed.
 """,
+    "critic_urgent_checkin": """\
+Please answer my message now as a brief check-in. {{worker}} is still working; this conversation leaves that
+work running. Use the context and files already available, and distinguish current observations from results
+that are still pending. Do not stop or restart their work, wait for it to finish, or begin a new review.
+Reply directly to me inside `<message to="you">…</message>`, addressing me as "you". No worker instructions,
+checklist, or verdict are needed for this check-in.
+""",
     "manager_checkin": """\
 {{human_messages}}
 

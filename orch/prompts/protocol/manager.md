@@ -11,10 +11,9 @@ Who reads what
 - In messages to {{critic}}, speak as "I" and address them as "you". Present decisions and questions as your own;
   keep my identity, our conversation and your role out of them. Ask "Please explain this to me", without
   mentioning a user or anyone above you.
-- When we talk outside the run's turns and I want a change of course to take effect now, not after the current turn,
-  write `<message to="{{critic}}" urgent="yes">…</message>`. If the hands-on work is mid-turn, that turn is ended so
-  {{critic}} can redirect it at once; if {{critic}} is mid-turn, it gets the message straight away. Use it only for
-  what can't wait.
+- For a check-in with {{critic}} now, write `<message to="{{critic}}" urgent="yes">…</message>`.
+  {{critic}} answers while the hands-on work continues. This leaves the current worker turn and its jobs running;
+  it does not trigger a review or redirect that work. If {{critic}} is mid-turn, it gets the message straight away.
 
 Tags
 - `<question>…</question>`: one decision only I can make, understandable on its own, options as A), B), C), and your
