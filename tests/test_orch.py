@@ -840,6 +840,109 @@ class TestManaged(unittest.TestCase):
         self.assertTrue(all(t["status"] == "ok" and not t.get("cut_short") for t in workers))
         self.assertIn("Urgent check-in did not finish", (rec.run_dir / "progress.md").read_text())
 
+    def _critic_codex_update(self, mode="steer"):
+        from test_codex_stream import PEER
+        peer = self.tmp / "peer"
+        peer.write_text("#!" + sys.executable + "\n" + PEER)
+        peer.chmod(0o700)
+        log = self.tmp / "peer.jsonl"
+        instruction = "Keep the current experiment running; also evaluate the missing independent cases."
+        private = "You can track the results in the report."
+        m = managed(mgr={"milestones": 1}, critic={"pass_after": 1, "replies": {"checkin": [
+            f'<message to="you">{private}</message>\n<message to="writer">{instruction}</message>']}})
+        m["agents"][2].update(backend="codex", timeout=8, retries=0,
+            backend_options={"transport": "app-server", "executable": str(peer)},
+            env={"PEER_MODE": mode, "PEER_LOG": str(log)})
+        stop_drop = threading.Event()
+        def drop():
+            while not stop_drop.wait(0.02):
+                if log.exists() and '"turn/start"' in log.read_text():
+                    for p in (self.tmp / "out").glob("**/inbox"):
+                        (p / "urgent.json").write_text(json.dumps({"to": ["critic"], "from": "boss",
+                            "urgent": True, "message": "I want independent cases run concurrently."}))
+                        return
+        th = threading.Thread(target=drop, daemon=True)
+        th.start()
+        try:
+            status, rec = run(make_cfg(self.tmp, [m]))
+        finally:
+            stop_drop.set()
+            th.join(2)
+        self.assertEqual(status, "completed")
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(Path(str(log) + '.tool').read_text(), 'finished naturally')
+        return rec, calls, instruction, private
+
+    def test_critic_update_reaches_codex_while_its_tool_is_running(self):
+        from orch.board import Board
+        rec, calls, instruction, private = self._critic_codex_update()
+        steers = [c for c in calls if c.get("method") == "turn/steer"]
+        self.assertEqual(len(steers), 1)
+        self.assertEqual(steers[0]["params"]["input"][0]["text"], instruction)
+        self.assertFalse(any(c.get("method") == "turn/interrupt" for c in calls))
+        self.assertEqual(sum(c.get("method") == "turn/start" for c in calls), 1)
+        ts = turns(rec)
+        w = next(t for t in ts if t["agent"] == "writer")
+        self.assertEqual(w["status"], "ok")
+        self.assertFalse(w.get("cut_short") or w.get("interruptions"))
+        data = Board("m", lambda: rec.run_dir).data()
+        note, = data["worker_messages"]
+        checkin = next(t for t in ts if t["purpose"] == "checkin")
+        self.assertEqual((note["status"], note["via"], note["delivery_turn"], note["source_turn"]),
+                         ("accepted", "steer", w["turn_id"], checkin["turn_id"]))
+        ack = next(t for t in ts if t["purpose"] == "ack")
+        self.assertIn(private, ack["input"])
+        self.assertNotIn(private, steers[0]["params"]["input"][0]["text"])
+
+    def test_rejected_live_input_gets_a_followup_before_review(self):
+        rec, calls, instruction, private = self._critic_codex_update("steer-race")
+        workers = [t for t in turns(rec) if t["agent"] == "writer"]
+        self.assertEqual(len(workers), 2)
+        self.assertNotIn(instruction, workers[0]["input"])
+        self.assertIn(instruction, workers[1]["input"])
+        self.assertNotIn(private, workers[1]["input"])
+        self.assertEqual(workers[0]["session_id"], workers[1]["session_id"])
+        review = next(t for t in turns(rec) if t["purpose"] == "verify")
+        self.assertLessEqual(workers[1]["ended_at"], review["started_at"])
+        self.assertEqual(sum(c.get("method") == "turn/steer" for c in calls), 1)
+        self.assertFalse(any(c.get("method") == "turn/interrupt" for c in calls))
+        note, = rec.state["worker_messages"]
+        self.assertEqual((note["status"], note["via"], note["delivery_turn"]),
+                         ("accepted", "prompt", workers[1]["turn_id"]))
+
+    def test_critic_update_waits_for_next_turn_on_other_backends(self):
+        instruction = "Keep the existing result files and add the missing independent case."
+        status, rec, sent = self._urgent_run({"to": ["critic"], "message": "Add the missing case."},
+            {"delay": 2}, {"replies": {"checkin": [
+                f'<message to="Sam">{instruction}</message><message to="you">I queued the change.</message>']}})
+        self.assertEqual(status, "completed")
+        workers = [t for t in turns(rec) if t["agent"] == "writer"]
+        self.assertNotIn(instruction, workers[0]["input"])
+        self.assertIn(instruction, workers[1]["input"])
+        self.assertEqual(sum(instruction in t["input"] for t in workers), 1)
+        self.assertTrue(all(not t.get("interruptions") for t in workers))
+        note, = rec.state["worker_messages"]
+        self.assertEqual((note["status"], note["via"]), ("accepted", "prompt"))
+        self.assertEqual(note["delivery_turn"], workers[1]["turn_id"])
+
+    def test_worker_message_queue_survives_restart_without_replaying_uncertain_sends(self):
+        from orch.recorder import Recorder
+        mon = load_config(make_cfg(self.tmp, [managed()])).monitor("m")
+        rec = Recorder.create(str(self.tmp / "out"), "m", mon.snapshot())
+        a = rec.queue_worker_message("writer", "Keep working.", "r001-t02-critic", "critic")
+        rec.queue_worker_message("writer", "Keep working.", "r001-t02-critic", "critic")
+        self.assertEqual(len(rec.pending_worker_messages("writer")), 1)
+        rec.worker_message_status(a["id"], "sending", delivery_turn="r001-t01-writer")
+        b = rec.queue_worker_message("writer", "Add a case.", "r001-t03-critic", "critic")
+        rec.worker_message_status(b["id"], "deferred", delivery_turn="r001-t01-writer")
+        self.assertEqual(rec.pending_worker_messages("writer", "r001-t01-writer"), [])
+        restarted = Recorder(rec.run_dir, rec.output_root)
+        restarted.recover_worker_messages()
+        self.assertEqual(restarted.state["worker_messages"][0]["status"], "unknown")
+        self.assertEqual([m["id"] for m in restarted.pending_worker_messages("writer")], [b["id"]])
+        restarted.worker_message_status(b["id"], "accepted")
+        self.assertEqual(restarted.pending_worker_messages("writer"), [])
+
     def test_the_board_shows_when_a_message_from_the_chat_was_delivered(self):
         from orch.board import _relays
         rd = self.tmp / "run"

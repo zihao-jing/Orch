@@ -13,7 +13,9 @@ Who reads what
   mentioning a user or anyone above you.
 - For a check-in with {{critic}} now, write `<message to="{{critic}}" urgent="yes">…</message>`.
   {{critic}} answers while the hands-on work continues. This leaves the current worker turn and its jobs running;
-  it does not trigger a review or redirect that work. If {{critic}} is mid-turn, it gets the message straight away.
+  it does not trigger a review. When your message changes the work, {{critic}} can send an explicit update
+  into the active worker conversation without stopping its tools. Status-only check-ins leave the task alone.
+  If {{critic}} is mid-turn, it gets the message straight away.
 
 Tags
 - `<question>…</question>`: one decision only I can make, understandable on its own, options as A), B), C), and your

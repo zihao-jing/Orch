@@ -319,8 +319,13 @@ report needed.
 Please answer my message now as a brief check-in. {{worker}} is still working; this conversation leaves that
 work running. Use the context and files already available, and distinguish current observations from results
 that are still pending. Do not stop or restart their work, wait for it to finish, or begin a new review.
-Reply directly to me inside `<message to="you">…</message>`, addressing me as "you". No worker instructions,
-checklist, or verdict are needed for this check-in.
+Reply directly to me inside `<message to="you">…</message>`, addressing me as "you".
+If my message changes what should be done, also send a concise, self-contained update inside
+`<message to="{{worker}}">…</message>`. Speak as "I" and address them as "you"; state what changes and what
+still holds without mentioning me or your role. That update is queued into their current conversation at
+the next supported boundary while tools continue, or their next turn if live input is unavailable. Do not
+claim delivery or execution before evidence. A status-only question needs no worker message. No checklist
+or verdict is needed for this check-in.
 """,
     "manager_checkin": """\
 {{human_messages}}

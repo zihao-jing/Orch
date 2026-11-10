@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import hashlib
 import json
 import os
 import threading
@@ -225,6 +226,42 @@ class Recorder:
             self.save()
 
     # ------------------------------------------------------------------ control files
+
+    def queue_worker_message(self, agent: str, message: str, source_turn: str, sender: str) -> Dict[str, Any]:
+        """Keep explicit check-in instructions separate from interrupting inbox notes and review feedback."""
+        ident = hashlib.sha256(json.dumps([source_turn, agent, message]).encode()).hexdigest()[:24]
+        with self.lock:
+            rows = self.state.setdefault("worker_messages", [])
+            existing = next((m for m in rows if m["id"] == ident), None)
+            if existing:
+                return dict(existing)
+            row = {"id": ident, "to": agent, "from": sender, "message": message,
+                   "source_turn": source_turn, "status": "queued", "created_at": now_iso()}
+            rows.append(row)
+            self.save()
+            self.event("worker_message", **row)
+            return dict(row)
+
+    def pending_worker_messages(self, agent: str, turn: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self.lock:
+            return [dict(m) for m in self.state.get("worker_messages", []) if m["to"] == agent
+                    and (m["status"] in ("queued", "deferred")
+                         or (turn is None and m["status"] == "in_prompt"))
+                    and (turn is None or m.get("delivery_turn") != turn)]
+
+    def worker_message_status(self, ident: str, status: str, **details: Any) -> None:
+        with self.lock:
+            row = next(m for m in self.state["worker_messages"] if m["id"] == ident)
+            row.update(status=status, updated_at=now_iso(), **details)
+            self.save()
+            self.event("worker_message", **row)
+
+    def recover_worker_messages(self) -> None:
+        """A crash after send but before acknowledgement has an unknown outcome; never blindly replay it."""
+        with self.lock:
+            for row in self.state.get("worker_messages", []):
+                if row["status"] == "sending":
+                    self.worker_message_status(row["id"], "unknown", reason="Run restarted before acknowledgement")
 
     def stop_requested(self) -> bool:
         return (self.run_dir / "STOP").exists()

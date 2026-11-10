@@ -62,6 +62,29 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
     sid, active_turn, completed = req.session_id, None, None
     streamed, finished = {}, set()
     final, request_id, text_deltas = "", 0, 0
+    steering, attempted = {}, set()
+    ready_to_steer = False
+
+    def message_status(note, status, **details):
+        if req.on_message:
+            req.on_message(note["id"], status, {"via": "steer", **details})
+
+    def steer_pending():
+        nonlocal request_id
+        if not ready_to_steer or completed is not None or not req.poll_messages or steering:
+            return
+        # Send one at a time to preserve instruction order. Never interrupt or restart the active turn.
+        for note in req.poll_messages():
+            if note["id"] in attempted:
+                continue
+            attempted.add(note["id"])
+            request_id += 1
+            steering[request_id] = note
+            message_status(note, "sending", thread_id=sid, codex_turn_id=active_turn)
+            send({"id": request_id, "method": "turn/steer", "params": {
+                "threadId": sid, "expectedTurnId": active_turn,
+                "input": [{"type": "text", "text": note["message"]}]}})
+            break
 
     def emit(event):
         if req.on_event:
@@ -118,6 +141,7 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
                 raise _Cancelled()
             if deadline and time.monotonic() >= deadline:
                 raise TimeoutError("Codex app-server turn timed out")
+            steer_pending()
             try:
                 message = incoming.get(timeout=0.1)
             except queue.Empty:
@@ -132,6 +156,16 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
                 raise RuntimeError("Codex requested unsupported interaction: " + message["method"])
             if "method" in message:
                 notification(message)
+            elif message.get("id") in steering:
+                note = steering.pop(message["id"])
+                if "error" in message:
+                    # Turn ended, old server, or another explicit refusal: keep it for the next turn.
+                    message_status(note, "deferred", reason=json.dumps(message["error"]))
+                elif (message.get("result") or {}).get("turnId") == active_turn:
+                    message_status(note, "accepted")
+                    emit({"k": "tool", "s": "Additional instruction accepted; current tools continue."})
+                else:
+                    message_status(note, "unknown", reason="Steer acknowledgement did not match the active turn")
             return message
 
     def call(method, params):
@@ -165,8 +199,28 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
             params["effort"] = o["effort"]
         turn = call("turn/start", params)
         active_turn = turn["turn"]["id"]
+        emit({"k": "input_accepted"})
+        ready_to_steer = True
         while completed is None:
             receive()
+        # A completion can precede the response to a steer that raced it. Drain already queued replies
+        # without starting another turn or waiting indefinitely for an acknowledgement.
+        ready_to_steer = False
+        while steering:
+            try:
+                message = incoming.get(timeout=0.2)
+            except queue.Empty:
+                break
+            if not isinstance(message, dict):
+                break
+            if message.get("id") in steering:
+                note = steering.pop(message["id"])
+                if "error" in message:
+                    message_status(note, "deferred", reason=json.dumps(message["error"]))
+                elif (message.get("result") or {}).get("turnId") == active_turn:
+                    message_status(note, "accepted")
+                else:
+                    message_status(note, "unknown", reason="Unrecognized steer acknowledgement")
         status = {"completed": "ok", "interrupted": "stopped"}.get(completed.get("status"), "error")
         if completed.get("error"):
             errors.append(json.dumps(completed["error"]))
@@ -179,6 +233,8 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
     except Exception as e:
         errors.append(str(e))
     finally:
+        for note in steering.values():
+            message_status(note, "unknown", reason="No steer acknowledgement; not automatically replayed")
         if status in ("stopped", "timeout") and sid and active_turn:
             try:
                 send({"id": request_id + 1, "method": "turn/interrupt", "params": {"threadId": sid, "turnId": active_turn}})

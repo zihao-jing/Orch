@@ -366,6 +366,7 @@ class MonitorRunner:
         """On resume: turns left 'running' were cut off by the restart. Keep each agent's session (found in
         the live log, or in Claude's own transcript for older runs) and tell the agent to pick up from there."""
         rec, out = self.rec, []
+        rec.recover_worker_messages()
         for p in sorted((rec.run_dir / "rounds").glob("r*/t*.json")):
             if p.name.endswith(".input.json"):
                 continue
@@ -541,6 +542,9 @@ class MonitorRunner:
         if self.should_stop():
             raise StopRequested()
         rec = self.rec
+        updates = rec.pending_worker_messages(agent.name) if agent.role == "worker" else []
+        if updates:
+            prompt = "\n\n".join(m["message"] for m in updates) + "\n\n" + prompt
         human = self.human_text(agent.name, rec.take_inbox(agent.name, broadcast=self.inbox_broadcast(agent)))
         if human:  # queued with the relayed messages, so a restart mid-turn re-sends it instead of losing it
             self.st.setdefault("fwd", {}).setdefault(agent.name, []).append(human)
@@ -562,6 +566,17 @@ class MonitorRunner:
             **(extra or {}),
         }
         rec.write_turn(record)  # relayed messages stay queued until the turn ends, so a restart re-sends them
+        for m in updates:
+            rec.worker_message_status(m["id"], "in_prompt", delivery_turn=record["turn_id"], via="prompt")
+
+        def message_status(ident: str, status: str, details: Dict[str, Any]) -> None:
+            rec.worker_message_status(ident, status, delivery_turn=record["turn_id"], **details)
+
+        def live_event(ev: Dict[str, Any]) -> None:
+            if ev.get("k") == "input_accepted":
+                for m in updates:
+                    message_status(m["id"], "accepted", {"via": "prompt"})
+            rec.live(record["turn_id"], ev)
         self.log(f"r{rnd} ▶ {agent.name} ({purpose}{', resume ' + sid[:8] if sid else ', new session'})")
         backend = get_backend(agent.backend)
         t0 = time.monotonic()
@@ -587,7 +602,10 @@ class MonitorRunner:
                 options=agent.backend_options, env=agent.env,
                 context={"round": rnd, "purpose": purpose, "monitor": self.mon.name,
                          "roster": [a.name for a in self.mon.agents], **(extra or {})},
-                on_event=lambda ev, tid=record["turn_id"]: rec.live(tid, ev),
+                on_event=live_event,
+                poll_messages=(lambda: rec.pending_worker_messages(agent.name, record["turn_id"]))
+                              if agent.role == "worker" else None,
+                on_message=message_status if agent.role == "worker" else None,
             )
             try:
                 res = backend.run(req, cancel)
@@ -629,6 +647,9 @@ class MonitorRunner:
             self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} → {res.status}")
             attempt += 1
         lock.__exit__(None, None, None)
+        if res.status == "ok":
+            for m in updates:
+                message_status(m["id"], "accepted", {"via": "prompt"})
         if fwd and res.status != "stopped" and not self.should_stop():  # a stopped turn is re-sent on resume
             left = (self.st.get("fwd") or {}).get(agent.name) or []
             if left[:len(fwd)] == fwd:

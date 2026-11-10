@@ -162,6 +162,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
    </div></div>
    <div class="card" id="report"></div>
    <div class="card"><h2>Manager ↔ critic</h2><div id="thread"></div></div>
+   <div class="card" id="worker-updates-card" hidden><h2>Updates to running workers</h2><div id="worker-updates"></div></div>
    <div class="card"><h2>Critic ↔ worker, round by round</h2><div id="rounds"></div></div>
    <div class="card"><h2>Questions</h2><div id="qs"></div></div>
    <div class="card"><h2 id="dec-h">Decisions</h2><div id="decs"></div></div>
@@ -292,7 +293,7 @@ function render(){
   $('title').textContent = D.monitor; setHTML($('status'), stPill(D.status)); $('runid').textContent = D.run_id;
   document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderTiles(mg); renderSteps(mg); renderCharts(mg); renderReport(mg);
-  renderThread(mg); renderRounds(mg); renderQs(); renderDecisions(); renderChat();
+  renderThread(mg); renderWorkerUpdates(); renderRounds(mg); renderQs(); renderDecisions(); renderChat();
   Object.keys(live).forEach(paintLive);
 }
 
@@ -529,6 +530,19 @@ function olderLink(list, total){ const hid = total - shown[list]; if (hid <= 0) 
   return `<div class="older"><span>${hid} older not shown</span><button class="more" data-older="${list}" data-n="20">Show ${Math.min(20, hid)} more</button>`
     + (hid > 20 ? `<button class="more" data-older="${list}" data-n="all">Show all</button>` : '') + `</div>`; }
 const UPPER = ['plan','kickoff','restart','answer','review','feedback','report','checkin','ack'];
+function renderWorkerUpdates(){
+  const rows = D.worker_messages || [];
+  $('worker-updates-card').hidden = !rows.length;
+  const labels = {queued:'Queued for worker', sending:'Sending to active turn',
+    accepted:'Accepted by backend', deferred:'Waiting for next worker turn',
+    in_prompt:'Included in turn prompt', unknown:'Delivery unconfirmed — not automatically resent'};
+  setHTML($('worker-updates'), rows.slice(-20).reverse().map((m, i) =>
+    `<details class="fold"${i===0 ? ' open' : ''}><summary><span class="mute">${tm(m.created_at)}</span>
+    <b>${esc(called(m.from))} → ${esc(called(m.to))}</b><span class="pill">${esc(labels[m.status] || m.status)}</span></summary>
+    <div class="fb"><div class="mute">From ${esc(m.source_turn)}${m.delivery_turn ? ' · to ' + esc(m.delivery_turn) : ''}
+    ${m.via==='steer' && m.status==='accepted' ? ' · queued into the active conversation; this does not yet confirm execution' : ''}</div>
+    <div class="md">${md(m.message)}</div>${m.reason ? `<div class="mute">${esc(m.reason)}</div>` : ''}</div></details>`).join(''));
+}
 function renderThread(mg){
   const ts = (D.turns||[]).filter(t => UPPER.includes(t.purpose) && (tab === 'all' || t.purpose === 'plan' || t.milestone === sel));
   const tabs = `<div class="tabs"><button class="sm${tab==='all'?' on':''}" data-tab="all">All milestones</button><button class="sm${tab==='sel'?' on':''}" data-tab="sel">Milestone ${sel+1} only</button></div>`;

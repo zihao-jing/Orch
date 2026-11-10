@@ -10,8 +10,10 @@ from orch.backends import CodexBackend, TurnRequest
 
 
 PEER = r'''
-import json, os, sys, time
+import json, os, sys, time, subprocess
 mode = os.environ.get('PEER_MODE', 'stream')
+tool = None
+steers = []
 def send(m):
     print(json.dumps(m), flush=True)
 def event(method, **params):
@@ -26,11 +28,21 @@ for line in sys.stdin:
     elif method in ('thread/start', 'thread/resume'):
         send({'id': m['id'], 'result': {'thread': {'id': 'session-test'}}})
     elif method == 'turn/start':
+        if mode.startswith('steer') and os.path.exists(os.environ['PEER_LOG'] + '.tool'):
+            mode = 'stream'  # a later Orch turn after an explicit steer rejection
         if mode == 'rpc-error':
             send({'id': m['id'], 'error': {'code': -1, 'message': 'model unavailable'}})
             continue
         send({'id': m['id'], 'result': {'turn': {'id': 'turn-test'}}})
         event('turn/started', turn={'id': 'turn-test'})
+        if mode.startswith('steer'):
+            # A real child stays alive until the protocol peer lets its current tool finish.
+            tool = subprocess.Popen([sys.executable, '-c',
+                'import sys; print("ready", flush=True); sys.stdin.readline(); print("tool finished", flush=True)'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            assert tool.stdout.readline().strip() == 'ready'
+            event('item/started', item={'id': 'tool-1', 'type': 'commandExecution', 'command': 'running tool'})
+            continue
         if mode == 'unsupported':
             send({'id': 99, 'method': 'item/tool/requestUserInput', 'params': {}})
             continue
@@ -44,6 +56,27 @@ for line in sys.stdin:
         event('item/completed', item={'id': 'reply', 'type': 'agentMessage', 'text': 'hello world'})
         event('turn/completed', turn={'id': 'turn-test', 'status': 'failed' if mode == 'failed' else 'completed',
               'error': {'message': 'provider failed'} if mode == 'failed' else None})
+    elif method == 'turn/steer':
+        assert m['params']['expectedTurnId'] == 'turn-test'
+        assert m['params']['threadId'] == 'session-test'
+        assert tool.poll() is None, 'The running tool was interrupted'
+        steers.append(m['params']['input'][0]['text'])
+        if mode == 'steer-rejected':
+            send({'id': m['id'], 'error': {'code': -32601, 'message': 'steer unsupported'}})
+        elif mode not in ('steer-race', 'steer-unconfirmed'):
+            send({'id': m['id'], 'result': {'turnId': 'turn-test'}})
+        if mode == 'steer-multiple' and len(steers) < 2:
+            continue
+        tool.stdin.write('finish\n'); tool.stdin.flush(); tool.stdin.close()
+        assert tool.stdout.read().strip() == 'tool finished'
+        assert tool.wait(timeout=2) == 0
+        tool.stdout.close()
+        with open(os.environ['PEER_LOG'] + '.tool', 'w') as f: f.write('finished naturally')
+        event('item/completed', item={'id': 'tool-1', 'type': 'commandExecution', 'exitCode': 0})
+        event('item/completed', item={'id': 'reply', 'type': 'agentMessage', 'text': 'work finished'})
+        event('turn/completed', turn={'id': 'turn-test', 'status': 'completed'})
+        if mode == 'steer-race':
+            send({'id': m['id'], 'error': {'code': -32600, 'message': 'no active turn'}})
 '''
 
 
@@ -110,6 +143,38 @@ class CodexStreamTests(unittest.TestCase):
                 result = CodexBackend().run(self.request(mode), lambda: False)
                 self.assertEqual(result.status, 'error')
                 self.assertIn(error, result.stderr)
+
+    def test_live_input_preserves_the_tool_and_turn(self):
+        for mode, expected in [('steer-multiple', 'accepted'), ('steer-rejected', 'deferred'),
+                               ('steer-race', 'deferred'), ('steer-unconfirmed', 'unknown')]:
+            with self.subTest(mode=mode):
+                self.events.clear()
+                self.log.unlink(missing_ok=True)
+                Path(str(self.log) + '.tool').unlink(missing_ok=True)
+                count = 2 if mode == 'steer-multiple' else 1
+                notes = [{'id': str(i), 'message': 'updated requirement ' + str(i), 'status': 'queued'}
+                         for i in range(count)]
+                transitions = []
+                def pending():
+                    if not any(e.get('s') == 'run: running tool' for _, e in self.events):
+                        return []
+                    return [dict(n) for n in notes if n['status'] == 'queued']
+                def delivered(ident, status, details):
+                    notes[int(ident)]['status'] = status
+                    transitions.append((ident, status))
+                req = self.request(mode)
+                req.poll_messages, req.on_message = pending, delivered
+                result = CodexBackend().run(req, lambda: False)
+                self.assertEqual((result.status, result.output, result.session_id),
+                                 ('ok', 'work finished', 'session-test'), result.stderr)
+                messages = self.messages()
+                self.assertEqual(sum(m.get('method') == 'turn/start' for m in messages), 1)
+                self.assertFalse(any(m.get('method') == 'turn/interrupt' for m in messages))
+                updates = [m['params']['input'][0]['text'] for m in messages if m.get('method') == 'turn/steer']
+                self.assertEqual(updates, [n['message'] for n in notes])
+                self.assertEqual([n['status'] for n in notes], [expected] * count)
+                self.assertEqual(len(transitions), count * 2)
+                self.assertEqual(Path(str(self.log) + '.tool').read_text(), 'finished naturally')
 
 
 if __name__ == '__main__':

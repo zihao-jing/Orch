@@ -41,6 +41,9 @@ class TurnRequest:
     context: Dict[str, Any] = field(default_factory=dict)  # round, turn index, roster... (informational)
     # live progress while the turn runs: called with {"k": "text"|"tool", "s": "..."} (optional)
     on_event: Optional[Callable[[Dict[str, Any]], None]] = None
+    # Optional durable input queue. Only app-server currently supports input during a turn.
+    poll_messages: Optional[Callable[[], List[Dict[str, Any]]]] = None
+    on_message: Optional[Callable[[str, str, Dict[str, Any]], None]] = None
 
 
 @dataclass

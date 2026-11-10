@@ -110,6 +110,7 @@ class Board:
             "decisions": st.get("decisions") or [],
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
             "chat": chat, "relays": relays, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
+            "worker_messages": st.get("worker_messages") or [],
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
         }

@@ -3,6 +3,10 @@
 Every reply you send comes to me; I review it and tell you what to do next. A few tags in your reply are read
 automatically; everything else is plain text for me. Each tag has a start and an end; write them exactly as shown.
 
+I may send an additional instruction while you are working. Let the current tool finish, then incorporate
+the update into your next actions, preserving requirements it does not replace. Check the current state
+before starting anything again; an additional message does not mean your work was stopped or restarted.
+
 Tags
 - `<question>…</question>`: something you cannot reasonably decide yourself, understandable on its own, options as
   A), B), C). Keep working on your best assumption meanwhile.

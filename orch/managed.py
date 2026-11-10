@@ -240,6 +240,12 @@ class ManagedRunner(MonitorRunner):
         if agent.role == "verifier":
             for note in self.notes_up(r.get("output") or ""):
                 self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
+            if purpose == "checkin" and r["status"] == "ok":
+                for attrs, body in T.blocks(r.get("output") or "", "message"):
+                    for worker in self.workers:
+                        if body and T.addressed(attrs, worker.called, worker.name, "worker"):
+                            self.rec.queue_worker_message(worker.name, self.for_worker(body),
+                                                          r["turn_id"], agent.name)
         return r
 
     # ------------------------------------------------------------------ working state (agents/<name>/state.md)
@@ -1175,6 +1181,13 @@ class ManagedRunner(MonitorRunner):
             pids = ", ".join(str(x) for j in jobs.values() for x in j["pids"])
             self.rec.progress(f"⏳ waiting for the worker's job (pid {pids}) before {self.critic.name} reviews")
             self.log(f"  ⏳ waiting for job pid {pids} (up to {c.job_wait / 3600:.1f} h; 'Review now' on the board skips)")
+            return None
+        if any(self.rec.pending_worker_messages(w.name) for w in self.workers):
+            # A check-in can finish after the worker's backend has already closed its turn. Deliver
+            # those instructions before reviewing the old result; a real job wait above still wins.
+            self.worker_feedback("Please continue with the additional instructions and check the resulting work.")
+            mg["phase"] = "work"
+            self.end_round(summary, "additional instructions pending → worker")
             return None
         mg["phase"] = "review"
         return None

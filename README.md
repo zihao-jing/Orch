@@ -392,6 +392,19 @@ A message normally waits for its agent's next turn. An urgent one is delivered i
 * In a board chat, the manager can request this check-in with `<message to="critic" urgent="yes">`. If the critic
   itself is already mid-turn, it receives the message through the usual same-session interruption.
 
+During a check-in, the critic can also send an explicit `<message to="worker">…</message>` with changed
+instructions. With the worker's Codex `transport: app-server`, Orch submits it using `turn/steer` into the
+same active turn. Current tools keep running; Codex incorporates the update at its next input boundary.
+Only the critic's addressed message reaches the worker; the manager conversation and the critic's reply
+to the manager stay separate. Status-only check-ins do not change worker instructions.
+
+The board's **Updates to running workers** section shows each message, its source and destination turns,
+and whether it is queued, accepted, deferred, or unconfirmed. Acceptance means the backend accepted the
+input, not that the requested work has been performed. If live input is unsupported or explicitly rejected
+(including a turn that just finished), the message stays available for the next worker turn. An unacknowledged
+send is marked unconfirmed and is not automatically resent, including after a restart. A background-job
+wait is not released by these updates. Direct `orch inject --to worker --urgent` retains its interrupting behavior.
+
 The turn record lists each interruption (`interruptions`, `cut_short`), and the board's progress log marks it with ⚡.
 
 ## Backends
