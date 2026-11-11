@@ -90,6 +90,10 @@ class AgentConfig:
                 + "\n\n".join(notes)
         return sp
 
+    def preference_path(self) -> Optional[Path]:
+        """agents/<name>/preference.md, beside state.md. Not part of the prompt: the agent reads it when relevant."""
+        return Path(self.state_file).parent / "preference.md" if self.state_file else None
+
     def public(self) -> Dict[str, Any]:
         d = dict(self.__dict__)
         d["env"] = sorted(self.env)  # don't leak env values into logs
@@ -118,11 +122,12 @@ class ControllerConfig:
     # pipeline: when I answer a worker's question, the reviewers' next message includes this ("" = off)
     answer_note: str = "One open question is now settled; I decided: {answer}"
     snapshot: List[str] = field(default_factory=list)  # files/dirs (relative to the workspace) saved after every turn that changes them
-    max_report_chars: int = 8000  # how much of each agent output is embedded in routed prompts
+    max_report_chars: int = 0  # cap on an agent output embedded in another agent's prompt; 0 = no cap (the default)
+    provider_retry_wait: float = 30.0  # seconds to wait before re-running a turn the provider refused (an API error)
     templates: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TEMPLATES))
     agent: Optional[AgentConfig] = None  # llm mode: the controller agent itself
     # ---- managed mode (manager -> critic -> worker)
-    milestone_rounds: int = 5  # worker/critic rounds per milestone before the manager and I take a look
+    milestone_rounds: int = 40  # worker/critic rounds per milestone before the manager and I take a look
     approve_plan: bool = True  # pause for my OK on the manager's milestone plan
     approve_milestones: bool = True  # pause for my OK after the manager accepts each milestone
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
@@ -312,7 +317,7 @@ DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "w
 # and rounds, the worker's snapshot). Two agents setting the same one differently is an error.
 MONITOR_KEYS = ("goal", "goal_file", "max_rounds", "output_dir", "workspace")
 CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require", "pass_pattern", "fail_pattern",
-             "stop_on_error", "max_report_chars", "templates", "human_pattern", "permission_pattern", "snapshot",
+             "stop_on_error", "max_report_chars", "provider_retry_wait", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
              "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "audit_every", "audit_points")
@@ -350,7 +355,7 @@ def _agent_folder(d: Path) -> Dict[str, Any]:
         raw["system_prompt_file"] = _expand(raw["system_prompt_file"], d)
     if role == "manager" and "goal" not in raw and "goal_file" not in raw and (d / "goal.md").is_file():
         raw["goal_file"] = str(d / "goal.md")
-    raw.setdefault("memory_files", [str(d / "memory.md"), str(d / "memory")])
+    raw.setdefault("memory_files", [])  # notes read into the prompt; preference.md is read on demand instead
     raw.setdefault("state_file", str(d / "state.md"))
     return raw
 
@@ -434,7 +439,7 @@ def load_config(path: str) -> Config:
             araw.setdefault("role", "controller")
             ctrl_agent = _build_agent(araw, defaults, base, working_dir, f"{where}.controller.agent")
         ctrl_known = {"mode", "instructions", "parallel", "require", "pass_pattern", "fail_pattern",
-                      "stop_on_error", "max_report_chars", "templates", "agent",
+                      "stop_on_error", "max_report_chars", "provider_retry_wait", "templates", "agent",
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
                       "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
@@ -456,10 +461,11 @@ def load_config(path: str) -> Config:
             checklist=bool(craw.get("checklist", False)),
             answer_note=str(craw.get("answer_note", ControllerConfig.answer_note) or "").strip(),
             checklist_nudge=str(craw.get("checklist_nudge", ControllerConfig.checklist_nudge)).strip(),
-            max_report_chars=int(craw.get("max_report_chars", 8000)),
+            max_report_chars=int(craw.get("max_report_chars", 0)),
+            provider_retry_wait=float(craw.get("provider_retry_wait", 30.0)),
             templates=templates,
             agent=ctrl_agent,
-            milestone_rounds=int(craw.get("milestone_rounds", 5)),
+            milestone_rounds=int(craw.get("milestone_rounds", 40)),
             approve_plan=bool(craw.get("approve_plan", True)),
             approve_milestones=bool(craw.get("approve_milestones", True)),
             min_score=float(craw["min_score"]) if craw.get("min_score") is not None else None,
@@ -494,7 +500,7 @@ def load_config(path: str) -> Config:
             workspace=workspace,
             working_dir=working_dir,
             goal=str(mraw.get("goal", "") or "").strip(),
-            max_rounds=int(mraw.get("max_rounds", 5)),
+            max_rounds=int(mraw.get("max_rounds", 200)),
             controller=controller,
             agents=agents,
             output_dir=_expand(mraw["output_dir"], base) if mraw.get("output_dir") else output_dir,

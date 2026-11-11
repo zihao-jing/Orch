@@ -30,6 +30,6 @@ Tags
   (only when every item is `[x]`) or `<verdict>FAIL</verdict>`.
 
 Boundaries
-- You review only: no file edits, and no replacement text or fixes written for {{worker}}.
+- You review only: no file edits (except your own preference.md, if you have one), and no replacement text or fixes written for {{worker}}.
 - Work from my instructions; do not widen the scope or plan beyond them.
 - When {{worker}} leaves a background job running, I wait until it ends before asking you to review it.

@@ -39,7 +39,7 @@ from . import tags as T
 
 from .backends import StopRequested
 from .config import AgentConfig
-from .controller import MonitorRunner, checklist_state, parse_options, resolve_choice, strip_checklist, truncate
+from .controller import MonitorRunner, checklist_state, parse_options, relayed, resolve_choice, strip_checklist, truncate
 from .report import CHECKBOX
 from .recorder import now_iso
 
@@ -340,10 +340,39 @@ class ManagedRunner(MonitorRunner):
             if bodies:
                 self.write_state(a, bodies[-1], a.called)
                 self.write_critic_state()
+            self.apply_preferences(a, out)
         elif a.role == "verifier" and checklist_text(out):
             self.write_critic_state()
         elif a.role == "worker":
             self.write_state(a, T.outside(out), "orch, from the latest report")
+
+    def apply_preferences(self, manager: AgentConfig, out: str) -> None:
+        """The manager's <preference to="critic|worker">…</preference> tags: one line each in that agent's preference.md."""
+        for attrs, body in T.blocks(out, "preference"):
+            try:
+                target = self.mon.agent(attrs.get("to", ""))
+            except Exception:
+                target = None
+            if target is None or target.role not in ("verifier", "worker"):
+                self.rec.progress(f"📝 {manager.called}'s preference note had no valid target (critic or worker); not saved")
+                continue
+            if self.write_preference(target, body, manager.name):
+                self.rec.progress(f"📝 {manager.called} added a preference for {target.called}")
+
+    def write_preference(self, a: AgentConfig, text: str, by: str) -> bool:
+        """Append one line to the agent's preference.md (the file is read into its system prompt each turn)."""
+        p = a.preference_path()
+        line = " ".join((text or "").split())
+        if p is None or not line:
+            return False
+        old = p.read_text(encoding="utf-8") if p.exists() else ""
+        if line in old:
+            return False  # already noted
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(old.rstrip() + ("\n" if old.strip() else "") + f"- {now_iso()[:10]} (from {by}): {line}\n",
+                     encoding="utf-8")
+        self.rec.event("preference", agent=a.name, by=by)
+        return True
 
     def write_handover(self, agent: AgentConfig) -> None:
         """A reset leaves a placeholder in the agent's queue; the notes are written now, from where the run is at
@@ -429,7 +458,7 @@ class ManagedRunner(MonitorRunner):
 
     def settle(self, q: Dict[str, Any], by: str, answer: str, turn: str = "", status: str = "answered") -> None:
         q.update(status=status, answered_by=by if status == "answered" else q.get("answered_by", ""),
-                 answer=truncate(answer, 4000) if status == "answered" else q.get("answer", ""),
+                 answer=answer if status == "answered" else q.get("answer", ""),  # whole: an answer is an instruction
                  answer_turn=turn, answered_at=now_iso())
         if status == "answered":
             for pid in q.get("parent") or []:
@@ -469,12 +498,13 @@ class ManagedRunner(MonitorRunner):
     # ------------------------------------------------------------------ decisions register
 
     def decide(self, text: str, by: str, source: str, at: str = "") -> None:
-        """Record something settled: my answers and notes, gate messages, the manager's answers to the critic."""
+        """Record something settled: my answers and notes, gate messages, the manager's answers to the critic.
+        Entries are kept whole; nothing is cut from the register."""
         text = (text or "").strip()
         regs = self.st.setdefault("decisions", [])
         if not text or any(d["text"] == text for d in regs):
             return
-        d = {"id": f"S{len(regs) + 1}", "text": truncate(text, 1500), "by": by, "source": source, "at": at or now_iso()}
+        d = {"id": f"S{len(regs) + 1}", "text": text, "by": by, "source": source, "at": at or now_iso()}
         regs.append(d)
         self.rec.event("decision", id=d["id"], by=by, source=source)
         self.write_decisions()
@@ -641,7 +671,7 @@ class ManagedRunner(MonitorRunner):
         if a.role == "worker":
             body, _at = self.read_state(a)
             work = body or ((mg.get("work") or {}).get(a.name) or {}).get("output") or ""
-            state = "" if top_down or not work else "Your latest report, in short:\n\n" + _clip(work, 2500)
+            state = "" if top_down or not work else "Your latest report:\n\n" + work
             return self.mtpl("worker_fresh", cwd=a.working_dir, state=state).strip()
         parts = []
         if ms:
@@ -662,7 +692,8 @@ class ManagedRunner(MonitorRunner):
             if rows:
                 parts.append("| # | milestone | status | score |\n|---|---|---|---|\n" + "\n".join(rows))
             if mine:
-                parts.append(f"Your working state (`{self.state_path(a)}`, written {mine_at[5:16].replace('T', ' ')}):\n\n{mine}")
+                parts.append(f"Your working state (`{self.state_path(a)}`, written {mine_at[5:16].replace('T', ' ')}):\n\n"
+                             + mine)
             t = self.last_turn(self.critic.name, ("report", "checkin", "verify", "amend", "guidance", "brief"))
             if t:  # the critic's newest message of any kind: a report or check-in can be many rounds old
                 text = strip_checklist(self.clean_report(t.get("output") or ""))
@@ -671,7 +702,7 @@ class ManagedRunner(MonitorRunner):
                 parts.append(_cap(f"{self.critic.called}'s latest message ({t.get('purpose')}, "
                                   f"{(t.get('started_at') or '')[5:16].replace('T', ' ')}"
                                   + (f"; its checklist: {done} of {done + open_} done" if ck else "") + "):\n\n")
-                             + _clip(text, 4000))
+                             + text)
         elif a.role == "verifier":
             body, _at = self.read_state(a)
             ck = self.latest_checklist()
@@ -679,7 +710,8 @@ class ManagedRunner(MonitorRunner):
                 if ck:
                     parts.append("Your checklist (keep the items as they are):\n\n" + ck)
             elif body:
-                parts.append(f"Your working state (`{self.state_path(a)}`):\n\n{body}")
+                parts.append(f"Your working state (`{self.state_path(a)}`):\n\n"
+                             + body)
             else:  # a run from before state files
                 when = lambda k: f" ({mg[k][5:16].replace('T', ' ')})" if mg.get(k) else ""
                 if mg.get("note"):
@@ -692,7 +724,7 @@ class ManagedRunner(MonitorRunner):
             last = "" if top_down else self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
             if last:  # the prose briefly; the checklist is above
                 prose = strip_checklist(T.without_markup(last, drop=("checklist", "verdict")))
-                parts.append("Your latest review, in short:\n\n" + _clip(prose, 2500))
+                parts.append("Your latest review:\n\n" + prose)
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
         if qs:
             parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
@@ -1119,11 +1151,27 @@ class ManagedRunner(MonitorRunner):
                 prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
             items.append((w, prompt, "work"))
         extra = {"milestone": mg.get("ms", 0), "milestone_round": mg["ms_round"]}
-        self._procs = _jobs.snapshot() if c.job_wait > 0 else {}  # to find jobs the worker leaves running
-        recs = self._stage(items, rnd, extra)
+        if c.job_wait > 0:  # to find jobs the worker leaves running; a redone round compares with the first snapshot
+            if redo and mg.get("procs_before") is not None:
+                self._procs = {int(k): tuple(v) for k, v in mg["procs_before"].items()}
+            else:
+                self._procs = _jobs.snapshot()
+                mg["procs_before"] = {str(k): list(v) for k, v in self._procs.items()}
+        else:
+            self._procs = {}
+        self.rec.save()
+        # a redone round keeps the workers' turns that already finished; only the unfinished ones run again
+        done = self.rec.finished_turns(rnd, "work") if redo else {}
+        for w, _p, _pur in items:
+            if w.name in done:
+                self.after_state_turn(w, done[w.name])  # idempotent: writes the same state again
+                self.rec.progress(f"↻ {w.name}'s turn `{done[w.name]['turn_id']}` had finished before the restart; kept")
+        ran = {r["agent"]: r for r in self._stage([it for it in items if it[0].name not in done], rnd, extra)}
+        recs = [done.get(w.name) or ran[w.name] for w, _p, _pur in items]
         if self.should_stop() or any(r["status"] == "stopped" for r in recs):
             raise StopRequested()  # keep the round open; `orch run --resume` redoes it in the same session
         mg.pop("in_work", None)
+        mg.pop("procs_before", None)
         for r in recs:
             block = self.ask_block(r.get("output") or "", "worker")
             if block:
@@ -1400,7 +1448,7 @@ class ManagedRunner(MonitorRunner):
             self.settle(q, "", "", r["turn_id"], status="passed_up")  # gone up to me; the manager's guess is in `text`
         else:
             self.settle(q, self.manager.name, self.for_critic(text), r["turn_id"])
-            self.decide(f"{self.short_question(q['text'])}: {truncate(self.for_critic(text), 1200)}", self.manager.called, q["id"])
+            self.decide(f"{self.short_question(q['text'])}: {self.for_critic(text)}", self.manager.called, q["id"])
         mg.update(answer_text=self.for_critic(text), phase="amend")
         return None
 

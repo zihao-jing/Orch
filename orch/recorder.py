@@ -166,6 +166,16 @@ class Recorder:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def finished_turns(self, rnd: int, purpose: str) -> Dict[str, Dict[str, Any]]:
+        """Turns of one round and purpose that already finished ok, by agent (a redone round keeps them)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        d = self.run_dir / "rounds" / f"r{rnd:03d}"
+        for p in sorted(d.glob("t*.json")) if d.is_dir() else []:
+            t = read_json(p, {}) or {}
+            if t.get("purpose") == purpose and t.get("status") == "ok" and t.get("agent"):
+                out[t["agent"]] = t
+        return out
+
     def next_seq(self, rnd: int) -> int:
         with self.lock:
             key = f"r{rnd:03d}"

@@ -31,7 +31,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .backends import StopRequested, TurnRequest, TurnResult, get_backend
 from .config import AgentConfig, MonitorConfig
-from .recorder import Recorder, now_iso
+from .recorder import Recorder, now_iso, read_json
+from . import tags as T
 from .report import CHECKBOX
 from .templates import render
 
@@ -119,12 +120,39 @@ def classify(c: Any, res: TurnResult) -> Tuple[str, str]:
     return "ok", ""
 
 
+# A refusal from the provider, reported by the backend as a failed turn: its text is the provider's message, not an answer.
+PROVIDER_ERROR = re.compile(r"^\s*API Error\b|can't receive replies|portal\.anthropic\.com/verify|overloaded_error|rate[ _]limit",
+                            re.I | re.M)
+
+
+def provider_error(res: TurnResult) -> str:
+    """The provider's message when a failed turn carries one; '' for anything else."""
+    if res.status != "error":
+        return ""
+    text = (res.output or "")[:2000]
+    if not PROVIDER_ERROR.search(text):
+        return ""
+    return truncate((text.strip().splitlines() or [""])[0], 300)
+
+
+LARGE_TEXT = 50_000  # a prompt or reply longer than this is flagged in the progress log (never cut)
+
+
 def truncate(text: str, limit: int) -> str:
     if limit <= 0 or len(text) <= limit:
         return text
     head = int(limit * 0.3)
     tail = limit - head
     return f"{text[:head]}\n\n[... {len(text) - limit} characters omitted ...]\n\n{text[-tail:]}"
+
+
+def relayed(text: str, limit: int) -> str:
+    """What of an agent's reply another agent receives: its <instruction> blocks whole when it wrote any, otherwise
+    the reply cut to `limit` characters (the start and the end, with the number of characters left out)."""
+    blocks = T.bodies(text, "instruction")
+    if blocks:
+        return "\n\n".join(b.strip() for b in blocks)
+    return truncate(text, limit)
 
 
 class MonitorRunner:
@@ -485,7 +513,23 @@ class MonitorRunner:
         """On resume: if an agent's question is still open (nothing queued in the inbox), ask it now."""
         asked = self.st.get("asked") or {}
         agent = asked.get("agent")
-        if not agent or not sys.stdin.isatty() or list((self.rec.run_dir / "inbox").glob("*.json")):
+        if not agent:
+            return
+        answered = False  # an answer for this agent already waiting in the inbox (unrelated files don't count)
+        for p in (self.rec.run_dir / "inbox").glob("*.json"):
+            try:
+                to = (read_json(p, {}) or {}).get("to") or []
+            except Exception:
+                continue
+            if agent in ([to] if isinstance(to, str) else to):
+                answered = True
+        if answered:
+            return
+        if not sys.stdin.isatty():  # nobody to ask here: say so in the log, so the wait is visible after a restart
+            msg = (f"⏸ waiting for your answer for {agent} (see NEEDS_HUMAN.md): "
+                   f"orch inject <run> \"<answer>\" --to {agent}")
+            self.rec.progress(msg)
+            self.log(msg)
             return
         turn = (self.st["sessions"].get(agent) or {}).get("last_turn")
         f = self.rec.run_dir / "rounds" / f"r{int(asked['round']):03d}" / f"{turn}.json"
@@ -553,6 +597,8 @@ class MonitorRunner:
         late = "\n\n".join(x for x in fwd if x)
         if late:
             prompt = f"{late}\n\n{prompt}" if prompt.strip() else late
+        if len(prompt) > LARGE_TEXT:
+            rec.progress(f"⚠ {agent.name}: a large prompt for `{rnd}` ({len(prompt):,} characters)")
         seq = seq or rec.next_seq(rnd)
         sess = self.st["sessions"].get(agent.name) or {}
         sid = sess.get("session_id")
@@ -576,6 +622,11 @@ class MonitorRunner:
             if ev.get("k") == "input_accepted":
                 for m in updates:
                     message_status(m["id"], "accepted", {"via": "prompt"})
+            if ev.get("k") == "session" and ev.get("s") and ev["s"] != record.get("session_id"):
+                # save the session the moment the backend names it, so a restart resumes it without guessing
+                record["session_id"] = str(ev["s"])
+                rec.write_turn(record)
+                rec.update_session(agent.name, session_id=record["session_id"], backend=agent.backend, role=agent.role)
             rec.live(record["turn_id"], ev)
         self.log(f"r{rnd} ▶ {agent.name} ({purpose}{', resume ' + sid[:8] if sid else ', new session'})")
         backend = get_backend(agent.backend)
@@ -588,11 +639,12 @@ class MonitorRunner:
         hit: List[str] = []
         cancel = self.turn_cancel(agent, hit)
         attempt, urgent_send = 0, ""
+        last_pe = ""  # the provider's message from the last attempt, if it refused the request
         while attempt <= agent.retries:
             send = prompt
             if urgent_send:  # an urgent message cut in: the same session carries on with it
                 send, urgent_send = urgent_send, ""
-            elif attempt and res.session_id:  # correction: tell the agent what went wrong in its own session
+            elif attempt and res.session_id and not last_pe:  # correction: tell the agent what went wrong in its own session
                 send = (f"Your previous reply was unusable ({reason or res.status}). "
                         f"Please redo the last request and reply with text.\n\n{prompt}")
             hit.clear()
@@ -611,6 +663,10 @@ class MonitorRunner:
                 res = backend.run(req, cancel)
             except Exception:
                 res = TurnResult("error", "", sid, None, traceback.format_exc(), [], {})
+            pe = provider_error(res)
+            if pe:  # the provider's refusal is not the agent's reply: it stays out of the turn's output
+                res = dataclasses.replace(res, output="")
+            last_pe = pe
             if res.status == "stopped" and hit and not self.should_stop():
                 if hit[0] == "resume":  # the message is for this agent: it continues, with the message first
                     note = self.human_text(agent.name, rec.take_inbox(agent.name, broadcast=self.inbox_broadcast(agent)))
@@ -635,6 +691,7 @@ class MonitorRunner:
                 rec.progress(f"⚡ `{record['turn_id']}` **{agent.name}**: ended early for an urgent message")
                 self.log(f"r{rnd} ⚡ {agent.name}: ended early for an urgent message")
             st_, reason = classify(self.mon.controller, res)
+            reason = pe or reason
             if st_ != res.status:
                 res = dataclasses.replace(res, status=st_)
             attempts.append({"attempt": attempt + 1, "status": res.status, "exit_code": res.exit_code,
@@ -644,7 +701,9 @@ class MonitorRunner:
                 record["asked"] = reason
             if res.status in ("ok", "stopped", "needs_human", "timeout") or self.should_stop():
                 break  # a timed-out turn is not re-run from scratch (it may have been running a long job)
-            self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} → {res.status}")
+            self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} → {res.status}" + (f" ({pe})" if pe else ""))
+            if pe and attempt < agent.retries and not self.should_stop():
+                self.wait_provider(agent, pe)
             attempt += 1
         lock.__exit__(None, None, None)
         if res.status == "ok":
@@ -664,6 +723,8 @@ class MonitorRunner:
             exit_code=res.exit_code, stderr=res.stderr[-6000:], command=res.command, meta=res.meta,
             attempts=attempts, ended_at=now_iso(), duration_s=dur,
         )
+        if last_pe:
+            record["provider_error"] = last_pe
         if res.session_id:
             rec.update_session(agent.name, session_id=res.session_id, backend=agent.backend, role=agent.role,
                                turns=int(sess.get("turns", 0)) + 1, last_turn=record["turn_id"],
@@ -673,7 +734,10 @@ class MonitorRunner:
             self.snapshot(record)
         except Exception:
             self.log("snapshot failed:\n" + traceback.format_exc())
-        rec.progress(f"- `{record['turn_id']}` **{agent.name}** · {purpose} → **{res.status}** ({dur}s)")
+        if len(res.output or "") > LARGE_TEXT:
+            rec.progress(f"⚠ `{record['turn_id']}` **{agent.name}**: a large reply ({len(res.output):,} characters)")
+        rec.progress(f"- `{record['turn_id']}` **{agent.name}** · {purpose} → **{res.status}** ({dur}s)"
+                     + (f" · provider: {last_pe}" if last_pe else ""))
         self.log(f"r{rnd} ■ {agent.name} → {res.status} in {dur}s")
         if res.status == "stopped":
             raise StopRequested()
@@ -711,10 +775,18 @@ class MonitorRunner:
 
     # ------------------------------------------------------------------ helpers
 
+    def wait_provider(self, agent: AgentConfig, reason: str) -> None:
+        """Pause before re-running a turn the provider refused; a stop request ends the wait."""
+        secs = max(0.0, float(getattr(self.mon.controller, "provider_retry_wait", 0) or 0))
+        self.rec.progress(f"⏳ {agent.name}: the provider refused the request ({reason}); retrying in {secs:g}s")
+        end = time.monotonic() + secs
+        while time.monotonic() < end and not self.should_stop():
+            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+
     def report_text(self, r: Optional[Dict[str, Any]]) -> str:
         if not r:
             return "(no report yet)"
-        body = truncate(r.get("output") or "(empty output)", self.mon.controller.max_report_chars)
+        body = relayed(r.get("output") or "(empty output)", self.mon.controller.max_report_chars)
         if r.get("status") != "ok" and r.get("stderr"):
             body += "\n\nstderr (tail):\n```\n" + r["stderr"][-1500:] + "\n```"
         return body
@@ -872,7 +944,7 @@ class MonitorRunner:
                         prose = strip_checklist(fb)
                         fb = prose or "\n".join("- " + _BOX.sub("", ln).strip()
                                                 for ln in fb.split("\n") if _BOX.match(ln) and "[ ]" in ln)
-                    routed.setdefault(t, []).append(truncate(fb, c.max_report_chars))
+                    routed.setdefault(t, []).append(relayed(fb, c.max_report_chars))
             for r in errors:
                 routed.setdefault(r["agent"], []).append(
                     f"## Your previous turn ended with status `{r['status']}`\n"

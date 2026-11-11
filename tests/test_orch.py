@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from orch.config import ConfigError, load_config  # noqa: E402
-from orch.controller import MonitorRunner  # noqa: E402
+from orch.backends import TurnResult  # noqa: E402
+from orch.controller import MonitorRunner, provider_error, relayed  # noqa: E402
 from orch.recorder import read_json  # noqa: E402
 from orch import cli  # noqa: E402
 
@@ -140,6 +141,30 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(second["status"], "ok")
         self.assertEqual([a["status"] for a in second["attempts"]], ["error", "ok"])
         self.assertTrue(second["resumed_session"])
+
+    def test_provider_refusal_is_not_kept_as_a_reply_and_retries_once(self):
+        m = pipeline()
+        msg = "API Error: Your account can't receive replies from Claude right now."
+        m["agents"][0].update(retries=1, backend_options={"fail_turns": [2], "error_text": msg})
+        m["controller"]["provider_retry_wait"] = 0
+        status, rec = run(make_cfg(self.tmp, [m]))
+        self.assertEqual(status, "completed")
+        second = [t for t in turns(rec) if t["agent"] == "w1"][1]
+        self.assertEqual(second["status"], "ok")
+        self.assertEqual([a["status"] for a in second["attempts"]], ["error", "ok"])
+        self.assertIn("can't receive replies", second["attempts"][0]["reason"])
+        self.assertNotIn("API Error", second["output"])
+
+    def test_a_refused_turn_that_fails_again_keeps_the_provider_message_out_of_its_output(self):
+        m = pipeline()
+        msg = "API Error: Your account can't receive replies from Claude right now."
+        m["agents"][0].update(retries=1, backend_options={"fail_turns": [2, 3], "error_text": msg})
+        m["controller"]["provider_retry_wait"] = 0
+        status, rec = run(make_cfg(self.tmp, [m]))
+        failed = [t for t in turns(rec) if t["agent"] == "w1"][1]
+        self.assertEqual(failed["status"], "error")
+        self.assertEqual(failed["output"], "")
+        self.assertIn("can't receive replies", failed["provider_error"])
 
     def test_stop_on_error(self):
         m = pipeline()
@@ -1033,6 +1058,189 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(rec3.state["managed"]["milestones"][0]["rounds"], 2)  # as without the crash, not 3
         self.assertEqual(sorted({x["round"] for x in turns(rec3) if x["agent"] == "writer"}), [1, 2])
 
+    def test_a_redone_round_keeps_a_worker_turn_that_already_finished(self):
+        from orch.managed import ManagedRunner
+        from orch.recorder import Recorder
+        cfg = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        mon = cfg.monitor("m")
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        rec2 = Recorder.create(str(self.tmp / "out"), "m", mon.snapshot())
+        st = json.loads(json.dumps(rec.state))
+        w = next(t for t in turns(rec) if t["agent"] == "writer")
+        st["managed"].update(phase="work", ms=0, ms_round=1, in_work=1, feedback={"writer": "Make the tables."})
+        st["managed"]["milestones"][0].update(status="active", score=None)
+        st.update(round=0, status="running", sessions={k: v for k, v in st["sessions"].items() if k != "writer"})
+        rec2.state.update(st)
+        rec2.save()
+        # the writer's round-1 turn finished before the crash; the round itself was not finished
+        done = dict(w, status="ok", output="FINISHED-BEFORE-CRASH", round=1, seq=1, turn_id="r001-t01-writer",
+                    session_id="mock-keep")
+        rec2.write_turn(done)
+        r = ManagedRunner(mon, threading.Event(), resume=True, log=lambda s: None)
+        self.assertEqual(r.run(), "completed")
+        rec3 = Recorder(rec2.run_dir, rec2.output_root)
+        writer_work_r1 = [x for x in turns(rec3) if x["agent"] == "writer" and x["round"] == 1
+                          and x.get("purpose") == "work"]
+        self.assertEqual([x["turn_id"] for x in writer_work_r1], ["r001-t01-writer"])  # not run a second time
+        self.assertEqual(read_json(rec2.run_dir / "rounds" / "r001" / "t01-writer.json")["output"],
+                         "FINISHED-BEFORE-CRASH")
+
+    def test_resume_without_a_terminal_says_which_question_waits(self):
+        from orch.recorder import Recorder
+        cfg = load_config(make_cfg(self.tmp, [pipeline()]))
+        mon = cfg.monitor("m")
+        rec = Recorder.create(cfg.output_dir, "m", mon.snapshot())
+        rec.set(asked={"agent": "w1", "round": 1})
+        r = MonitorRunner(mon, threading.Event(), log=lambda s: None)
+        r.rec = rec
+        inbox = rec.run_dir / "inbox"
+        inbox.mkdir(exist_ok=True)
+        (inbox / "unrelated.json").write_text(json.dumps({"message": "a note for nobody in particular"}))
+        r.ask_unanswered()  # no terminal: the wait is written down, unrelated files don't hide it
+        self.assertIn("waiting for your answer for w1", (rec.run_dir / "progress.md").read_text())
+        (inbox / "answer.json").write_text(json.dumps({"to": ["w1"], "message": "use option B"}))
+        before = (rec.run_dir / "progress.md").read_text()
+        r.ask_unanswered()  # an answer for w1 is already queued: nothing more to say
+        self.assertEqual((rec.run_dir / "progress.md").read_text(), before)
+
+    def test_manager_preference_tag_writes_the_targets_preference_file(self):
+        from orch.managed import ManagedRunner
+        from orch import tags as T
+        cfg = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        mon = cfg.monitor("m")
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        r = ManagedRunner(mon, threading.Event(), resume=True, log=lambda s: None)
+        r.rec = rec
+        mgr = next(a for a in mon.agents if a.role == "manager")
+        w = next(a for a in mon.agents if a.role == "worker")
+        pref = self.tmp / "prefs" / "preference.md"
+        w.state_file = str(self.tmp / "prefs" / "state.md")  # preference.md lives beside state.md
+        text = f'<preference to="{w.name}">Keep tables under one page.</preference> Noted.'
+        r.after_state_turn(mgr, {"status": "ok", "output": text})
+        r.after_state_turn(mgr, {"status": "ok", "output": text})  # the same note twice is written once
+        lines = pref.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Keep tables under one page.", lines[0])
+        self.assertIn(f"(from {mgr.name})", lines[0])
+        self.assertEqual(T.outside(text).strip(), "Noted.")  # the tag is not passed on as text
+        r.after_state_turn(mgr, {"status": "ok", "output": '<preference to="nobody">x</preference>'})
+        self.assertEqual(len(pref.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_board_talks_to_a_worker_in_its_own_conversation(self):
+        import time as _t
+        from orch.board import Board
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        mon = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})])).monitor("m")
+        b = Board("m", lambda: rec.run_dir, mon)
+        w = next(a for a in mon.agents if a.role == "worker")
+        self.assertIn("error", b.chat("are you there?", agent="nobody"))
+        self.assertIn("error", b.chat("hi", agent=w.name, qid="Q1"))
+        cid = b.chat("What did you do last?", agent=w.name)["id"]
+        for _ in range(100):
+            rows = [json.loads(x) for x in (rec.run_dir / "chat.jsonl").read_text().splitlines()]
+            done = [r for r in rows if r.get("id") == cid and r.get("status") not in (None, "running")]
+            if done:
+                break
+            _t.sleep(0.1)
+        self.assertTrue(done, "the worker's reply did not arrive")
+        self.assertEqual((done[0]["role"], done[0]["who"], done[0]["with"]), ("agent", w.name, w.name))
+        human = [r for r in rows if r.get("id") == cid + "-q"][0]
+        self.assertEqual((human["role"], human["with"]), ("human", w.name))
+
+    def test_board_state_sends_previews_and_rereads_only_changed_turns(self):
+        from unittest import mock
+        from orch import board as B
+        from orch.board import Board
+        from orch.recorder import Recorder
+        cfg = load_config(make_cfg(self.tmp, [pipeline()]))
+        rec = Recorder.create(cfg.output_dir, "m", cfg.monitor("m").snapshot())
+        long = "x" * 5000 + " END"
+        for i in range(1, 4):
+            rec.write_turn({"turn_id": f"r001-t0{i}-w1", "round": 1, "seq": i, "agent": "w1", "role": "worker",
+                            "purpose": "work", "status": "ok", "output": long, "started_at": f"2026-11-11T10:0{i}:00"})
+        b = Board("m", lambda: rec.run_dir, None)
+        d = b.data()
+        self.assertEqual(len(d["turns"]), 3)
+        for t in d["turns"]:
+            self.assertLessEqual(len(t["output"]), B.PREVIEW_CHARS)
+            self.assertEqual(t["output_len"], len(long))
+        self.assertEqual(b.turn("r001-t01-w1")["output"], long)  # the whole output is still there, on request
+        # a second refresh reads only the state and config files, not the turns again
+        with mock.patch("orch.board.read_json", wraps=B.read_json) as rj:
+            b.data()
+        self.assertFalse([c for c in rj.call_args_list if "rounds" in str(c.args[0])])
+        # a changed turn is read again
+        rec.write_turn({"turn_id": "r001-t01-w1", "round": 1, "seq": 1, "agent": "w1", "role": "worker",
+                        "purpose": "work", "status": "ok", "output": "short now", "started_at": "2026-11-11T10:01:00"})
+        t1 = next(t for t in b.data()["turns"] if t["turn_id"] == "r001-t01-w1")
+        self.assertEqual((t1["output"], t1["output_len"]), ("short now", 9))
+
+    def test_checklist_text_and_revise_flag_are_sent_without_the_whole_review(self):
+        from orch.board import Board
+        from orch.recorder import Recorder
+        cfg = load_config(make_cfg(self.tmp, [pipeline()]))
+        rec = Recorder.create(cfg.output_dir, "m", cfg.monitor("m").snapshot())
+        review = ("A long analysis. " * 300 + "\n<checklist>\n- [x] tables done\n- [ ] figure 2 — missing legend\n</checklist>\n"
+                  "<decision>REVISE</decision>")
+        rec.write_turn({"turn_id": "r001-t01-critic", "round": 1, "seq": 1, "agent": "critic", "role": "verifier",
+                        "purpose": "verify", "status": "ok", "output": review, "milestone": 0,
+                        "started_at": "2026-11-11T10:00:00"})
+        t = Board("m", lambda: rec.run_dir, None).data()["turns"][0]
+        self.assertEqual(t["checklist"], [1, 2])
+        self.assertIn("figure 2", t["checklist_text"])
+        self.assertNotIn("long analysis", t["checklist_text"])
+        self.assertTrue(t["revise"])
+        self.assertLess(len(t["output"]), len(review))
+
+    def test_chat_is_tailed_and_older_messages_load_on_request(self):
+        from orch.board import Board, CHAT_TAIL
+        from orch.recorder import Recorder
+        cfg = load_config(make_cfg(self.tmp, [pipeline()]))
+        rec = Recorder.create(cfg.output_dir, "m", cfg.monitor("m").snapshot())
+        lines = []
+        for i in range(150):  # manager messages, each written twice (running, then the reply) as the board does
+            lines.append({"id": f"c{i:03d}", "role": "human", "text": f"q{i}", "ts": "2026-11-11T10:00:00"})
+            lines.append({"id": f"c{i:03d}-r", "role": "manager", "status": "running", "ts": "2026-11-11T10:00:01"})
+            lines.append({"id": f"c{i:03d}-r", "role": "manager", "status": "ok", "text": f"a{i}", "ts": "2026-11-11T10:00:02"})
+        lines.append({"id": "qq", "role": "human", "text": "about Q1", "qid": "Q1", "ts": "2026-11-11T10:00:03"})
+        (rec.run_dir / "chat.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+        b = Board("m", lambda: rec.run_dir, None)
+        d = b.data()
+        mgr_rows = [c for c in d["chat"] if not c.get("qid")]
+        self.assertEqual(len(mgr_rows), CHAT_TAIL)
+        self.assertEqual(mgr_rows[-1]["text"], "a149")  # the latest reply, merged from its two lines
+        self.assertTrue(any(c.get("qid") == "Q1" for c in d["chat"]))  # question threads are always sent
+        self.assertTrue(d["chat_more"].get("manager"))
+        older = b.chat_before("manager", mgr_rows[0]["id"])
+        self.assertEqual(len(older["rows"]), CHAT_TAIL)
+        self.assertEqual(older["rows"][-1]["id"], "c119-r")  # right before the first message the state sent
+        self.assertTrue(older["more"])
+        rows, cur = list(older["rows"]), older
+        while cur["more"]:  # walking back through the history reaches the first message, and then stops
+            cur = b.chat_before("manager", cur["rows"][0]["id"])
+            rows = cur["rows"] + rows
+        self.assertEqual(rows[0]["text"], "q0")
+        self.assertEqual(len([c for c in rows if c["role"] == "human"]), 120)  # 120 messages before the tail
+
+    def test_plan_shows_the_resume_without_running_anything(self):
+        from orch.managed import ManagedRunner  # noqa: F401  (managed mode is what the plan describes)
+        from orch.recorder import Recorder
+        import contextlib
+        import io
+        cfg_path = make_cfg(self.tmp, [managed(mgr={"milestones": 1})])
+        status, rec = run(cfg_path)
+        rec.set(status="failed", error="critic verify turn ended with status error")
+        before = sorted(p.name for p in rec.run_dir.parent.iterdir())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli.main(["run", cfg_path, "--resume", "--plan"])
+        out = buf.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("status failed", out)
+        self.assertIn("critic verify turn ended with status error", out)
+        self.assertIn("writer", out)
+        self.assertEqual(sorted(p.name for p in rec.run_dir.parent.iterdir()), before)  # no new run was started
+
     def test_a_reset_after_a_cut_off_turn_is_not_undone_by_resume(self):
         from orch.managed import ManagedRunner
         from orch.recorder import Recorder, live_event
@@ -1100,9 +1308,9 @@ class TestManaged(unittest.TestCase):
     def test_resume_redoes_a_cut_off_round_even_at_the_round_limit(self):
         from orch.managed import ManagedRunner
         from orch.recorder import Recorder
-        cfg = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        cfg = load_config(make_cfg(self.tmp, [managed(controller={"milestone_rounds": 5}, mgr={"milestones": 1})]))
         mon = cfg.monitor("m")
-        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
+        status, rec = run(make_cfg(self.tmp, [managed(controller={"milestone_rounds": 5}, mgr={"milestones": 1})]))
         rec2 = Recorder.create(str(self.tmp / "out"), "m", mon.snapshot())
         st = json.loads(json.dumps(rec.state))
         w = next(t for t in turns(rec) if t["agent"] == "writer")
@@ -1572,7 +1780,7 @@ class TestProjectFolder(unittest.TestCase):
     def test_init_layout_settings_split_and_default_prompts(self):
         self.assertEqual(cli.main(["init", str(self.tmp), "--project"]), 0)
         d = self.tmp / ".orch"
-        for f in (".gitignore", "agents/manager/agent.yaml", "agents/manager/goal.md", "agents/critic/memory.md",
+        for f in (".gitignore", "agents/manager/agent.yaml", "agents/manager/goal.md", "agents/critic/preference.md",
                   "agents/worker/agent.yaml"):
             self.assertTrue((d / f).is_file(), f)
         self.assertFalse(list(d.glob("*.yaml")) + list(d.rglob("task.md")))
@@ -1598,10 +1806,11 @@ class TestProjectFolder(unittest.TestCase):
         self.assertIn("<question>", sp)
         self.assertNotIn("{{", sp)
         self.assertNotIn("Things to keep in mind", sp)  # the memory stub is only a comment
-        (d / "agents/critic/memory.md").write_text("<!-- note -->\nPrefer short reviews.")
-        (d / "agents/critic/memory").mkdir()
-        (d / "agents/critic/memory/style.md").write_text("British spelling.")
-        self.assertTrue(critic.current_system_prompt().endswith("Things to keep in mind:\n\nPrefer short reviews.\n\nBritish spelling."))
+        (d / "agents/critic/preference.md").write_text("- 2026-11-01: Prefer short reviews.\n")
+        self.assertNotIn("Prefer short reviews", critic.current_system_prompt())  # read on demand, never injected
+        (d / "agents/critic/notes.md").write_text("British spelling.")
+        critic.memory_files = [str(d / "agents/critic/notes.md")]  # explicit memory notes are still injected
+        self.assertTrue(critic.current_system_prompt().endswith("Things to keep in mind:\n\nBritish spelling."))
         dsp = mon.agent("worker").current_system_prompt()  # the worker knows only "me": no other roles, no framework
         self.assertNotRegex(dsp.lower(), r"critic|manager|orch\b|agents")
         (d / "agents/worker/system_prompt.md").write_text("You are {{worker}}; {{critic}} reviews you.")
@@ -1627,6 +1836,38 @@ class TestProjectFolder(unittest.TestCase):
         self.assertTrue(read_json(t)["system_prompt"].startswith("You are the manager, who leads this work."))
         w = next((d / "runs").glob("*/*/rounds/r001/t01-worker.json"))
         self.assertTrue(read_json(w)["input"].startswith("Here is what I need"))  # the critic's brief, no task text
+
+
+class TestRelayAndHandoverSizes(unittest.TestCase):
+    def test_a_provider_refusal_is_recognised_and_an_answer_is_not(self):
+        refused = TurnResult("error", "API Error: Your account can't receive replies from Claude right now.", None, 1)
+        self.assertIn("can't receive replies", provider_error(refused))
+        self.assertEqual(provider_error(TurnResult("error", "Here is my answer about API Errors.", None, 1)), "")
+        self.assertEqual(provider_error(TurnResult("ok", "API Error: quoted text", None, 0)), "")
+
+    def test_an_instruction_block_is_relayed_whole_and_the_rest_is_not(self):
+        long_report = "x" * 9000
+        reply = f"{long_report}\n<instruction>Fix the parser and rerun the tests.</instruction>\n{long_report}"
+        self.assertEqual(relayed(reply, 8000), "Fix the parser and rerun the tests.")
+
+    def test_a_reply_without_an_instruction_goes_whole_by_default(self):
+        text = "a" * 9000
+        self.assertEqual(relayed(text, 0), text)
+
+    def test_a_cap_is_applied_only_when_one_is_set(self):
+        out = relayed("a" * 9000, 8000)
+        self.assertLess(len(out), 8100)
+        self.assertIn("characters omitted", out)
+
+    def test_the_decision_register_keeps_long_entries_whole(self):
+        from orch.managed import ManagedRunner
+        long_text = "\n".join(f"Step {i}: check item {i} carefully." for i in range(2000))
+        fake = type("Fake", (), {})()
+        fake.st = {}
+        fake.rec = type("R", (), {"event": lambda self, *a, **k: None})()
+        fake.write_decisions = lambda: None
+        ManagedRunner.decide(fake, "Q1 ask: " + long_text, "manager", "Q1")
+        self.assertEqual(fake.st["decisions"][0]["text"], "Q1 ask: " + long_text)
 
 
 if __name__ == "__main__":

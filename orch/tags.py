@@ -11,6 +11,8 @@ Every signal is an XML-style tag with a start and an end, so orch never has to g
     <decision>ACCEPT</decision>        the manager's decision: ACCEPT, REVISE, PAUSE or CONTINUE
     <no-wait pid="123"/>               the worker: don't hold the review for this process
     <state>…</state>                   the manager's working state (saved to its state.md)
+    <preference to="critic">…</preference>  the manager: one line added to that agent's preference.md
+    <instruction>…</instruction>       what the next agent must act on: passed on whole, in place of the rest of the reply
 
 Text outside the tags is for whoever the agent is replying to. Tags inside `code` or ``` fences are only quoted,
 not used. A tag left open runs to the next protocol tag or to the end of the reply.
@@ -20,7 +22,8 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
-NAMES = ("message", "question", "pause", "checklist", "verdict", "score", "decision", "no-wait", "state")
+NAMES = ("message", "question", "pause", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
+         "instruction")
 _ALT = "|".join(re.escape(n) for n in NAMES)
 _OPEN = re.compile(rf"<({_ALT})((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)
 _ATTR = re.compile(r"([\w-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>/]+))")

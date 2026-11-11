@@ -40,10 +40,52 @@ _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
 }
 
 
+PREVIEW_CHARS = 900  # a turn's output is sent in full up to this length; longer ones are fetched with /api/turn
+CHAT_TAIL = 60       # chat messages per conversation in the state payload; older ones come from /api/chat
+
+
+def _chat_rows(rd: Path) -> List[Dict[str, Any]]:
+    """chat.jsonl with the lines of each message merged by id, in the order the messages first appeared."""
+    rows: Dict[Any, Dict[str, Any]] = {}
+    for x in _lines(rd / "chat.jsonl"):
+        try:
+            c = json.loads(x)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(c, dict):
+            rows.setdefault(c.get("id"), {}).update(c)
+    return list(rows.values())
+
+
+def _chat_view(rows: List[Dict[str, Any]], mgr: str) -> Tuple[List[Dict[str, Any]], Dict[str, bool]]:
+    """Every question message, and the latest CHAT_TAIL of each conversation. ``more`` names the conversations
+    that have older messages."""
+    groups: Dict[str, List[int]] = {}
+    keep = {i for i, c in enumerate(rows) if c.get("qid")}
+    for i, c in enumerate(rows):
+        if not c.get("qid"):
+            groups.setdefault(c.get("with") or mgr, []).append(i)
+    more: Dict[str, bool] = {}
+    for k, idx in groups.items():
+        keep.update(idx[-CHAT_TAIL:])
+        if len(idx) > CHAT_TAIL:
+            more[k] = True
+    return [c for i, c in enumerate(rows) if i in keep], more
+
+
+def _chat_before(rows: List[Dict[str, Any]], with_: str, before: str, mgr: str) -> Dict[str, Any]:
+    """The CHAT_TAIL messages of one conversation that come before message ``before``."""
+    group = [c for c in rows if not c.get("qid") and (c.get("with") or mgr) == with_]
+    cut = next((i for i, c in enumerate(group) if c.get("id") == before), len(group))
+    older = group[:cut]
+    return {"rows": older[-CHAT_TAIL:], "more": len(older) > CHAT_TAIL}
+
+
 class Board:
     def __init__(self, name: str, run_dir: Callable[[], Optional[Path]], mon: Optional[MonitorConfig] = None):
         self.name, self._run_dir, self.mon = name, run_dir, mon
         self._chat_lock = threading.Lock()
+        self._rows: Dict[Path, Any] = {}  # turn file -> ((mtime, size), (row, checklist item) or None)
 
     @property
     def run_dir(self) -> Optional[Path]:
@@ -58,41 +100,24 @@ class Board:
         cfg = read_json(rd / "config.json", {}) or {}
         turns, series = [], []
         for p in sorted((rd / "rounds").glob("r*/t*.json")):
-            t = read_json(p) or {}
-            if "turn_id" not in t:
-                continue
-            out = t.get("output") or ""
-            row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
-                                         "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder",
-                                         "cut_short", "interruptions")}
-            row["output"] = out[:30000]
-            row["cost"] = (t.get("meta") or {}).get("total_cost_usd")  # a session's running total; see _turn_costs
-            row["session_id"] = t.get("session_id")
-            if t.get("role") == "verifier":
-                from . import tags as T
-                ck = T.bodies(out, "checklist")
-                items = checklist_items("\n".join(ck) if ck else out)  # older runs: lines anywhere
-                if items and t.get("purpose") == "verify":  # briefs and amends list items still to do, not progress
-                    row["checklist"] = [sum(1 for d, _ in items if d), len(items)]
-                    series.append({"turn": t["turn_id"], "milestone": t.get("milestone"),
-                                   "done": row["checklist"][0], "total": row["checklist"][1],
-                                   "purpose": t.get("purpose")})
-                v = T.value(out, "verdict")
-                m = [v] if v in ("PASS", "FAIL") else re.findall(r"VERDICT:\s*\**\s*(PASS|FAIL)", out, re.I)
-                if m:
-                    row["verdict"] = m[-1].upper()
-            turns.append(row)
+            hit = self._turn_entry(p)
+            if hit is not None:
+                turns.append(hit[0])
+                if hit[1] is not None:
+                    series.append(hit[1])
         turns.sort(key=lambda r: (r.get("started_at") or "", r["turn_id"]))
         live = {}
         for t in turns:
             if t["status"] == "running":
                 live[t["turn_id"]] = self._live_text(rd / "live" / f"{t['turn_id']}.jsonl")
-        chat = [json.loads(x) for x in _lines(rd / "chat.jsonl")]
+        chat_all = _chat_rows(rd)
+        mgr_name = self.mon.by_role("manager")[0].name if self.mon is not None and self.mon.by_role("manager") else "manager"
+        chat, chat_more = _chat_view(chat_all, mgr_name)
         for c in chat:
             if c.get("status") == "running":
                 live[c["id"]] = self._live_text(rd / "live" / f"{c['id']}.jsonl")
         relays = _relays(rd, chat, turns)
-        total_cost = _turn_costs(turns, chat)
+        total_cost = _turn_costs(turns, chat_all)
         queued: Dict[str, List[str]] = {}  # answers sent but not yet picked up (the run reads them between turns)
         for p in sorted((rd / "inbox").glob("*.json")):
             d = read_json(p) or {}
@@ -109,7 +134,7 @@ class Board:
             "managed": st.get("managed") or {}, "questions": st.get("questions") or [],
             "decisions": st.get("decisions") or [],
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
-            "chat": chat, "relays": relays, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
+            "chat": chat, "chat_more": chat_more, "relays": relays, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
             "worker_messages": st.get("worker_messages") or [],
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
@@ -154,6 +179,55 @@ class Board:
                 text.append("\n\n")
         return {"text": "".join(text)[-6000:], "tools": tools[-12:]}
 
+    def _turn_entry(self, p: Path) -> Optional[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
+        """One turn file as the page sees it, parsed again only when the file has changed."""
+        try:
+            stt = p.stat()
+        except OSError:
+            return None
+        key = (stt.st_mtime_ns, stt.st_size)
+        hit = self._rows.get(p)
+        if hit and hit[0] == key:
+            return hit[1]
+        entry = None
+        t = read_json(p) or {}
+        if "turn_id" in t:
+            out = t.get("output") or ""
+            row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
+                                         "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder",
+                                         "cut_short", "interruptions")}
+            row["output"] = out[:PREVIEW_CHARS]
+            row["output_len"] = len(out)
+            row["revise"] = bool(re.search(r"<decision>\s*REVISE", out, re.I))
+            row["cost"] = (t.get("meta") or {}).get("total_cost_usd")  # a session's running total; see _turn_costs
+            row["session_id"] = t.get("session_id")
+            item = None
+            if t.get("role") == "verifier":
+                from . import tags as T
+                ck = T.bodies(out, "checklist")
+                body = "\n".join(ck) if ck else out  # older runs: the list lines anywhere in the reply
+                items = checklist_items(body)
+                if items and t.get("purpose") == "verify":  # briefs and amends list items still to do, not progress
+                    row["checklist"] = [sum(1 for d, _ in items if d), len(items)]
+                    row["checklist_text"] = body
+                    item = {"turn": t["turn_id"], "milestone": t.get("milestone"),
+                            "done": row["checklist"][0], "total": row["checklist"][1], "purpose": t.get("purpose")}
+                v = T.value(out, "verdict")
+                m = [v] if v in ("PASS", "FAIL") else re.findall(r"VERDICT:\s*\**\s*(PASS|FAIL)", out, re.I)
+                if m:
+                    row["verdict"] = m[-1].upper()
+            entry = (row, item)
+        self._rows[p] = (key, entry)
+        return entry
+
+    def chat_before(self, with_: str, before: str) -> Dict[str, Any]:
+        """Older chat messages of one conversation (for "show older")."""
+        rd = self.run_dir
+        if rd is None:
+            return {"rows": [], "more": False}
+        mgr = self.mon.by_role("manager")[0].name if self.mon is not None and self.mon.by_role("manager") else "manager"
+        return _chat_before(_chat_rows(rd), with_ or mgr, before, mgr)
+
     def turn(self, tid: str) -> Dict[str, Any]:
         rd = self.run_dir
         for p in (rd / "rounds").glob("r*/t*.json") if rd else []:
@@ -171,11 +245,64 @@ class Board:
         (inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{time.monotonic_ns() % 100000:05d}-board-{kind}.json") \
             .write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    def chat(self, message: str, qid: Optional[str] = None, settle: bool = False) -> Dict[str, Any]:
+    def chat_agent(self, name: str, message: str) -> Dict[str, Any]:
+        """Talk to the critic or a worker directly. Its reply goes into its own conversation (the same session the run
+        uses) and is shown here. Its reply does not route <message> tags: nothing is sent on by this chat."""
+        rd = self.run_dir
+        try:
+            a = self.mon.agent(name)
+        except Exception:
+            return {"error": f"no agent named {name}"}
+        if a.role not in ("verifier", "worker"):
+            return {"error": f"{a.called} is not talked to from here"}
+        st = read_json(rd / "state.json", {}) or {}
+        if not ((st.get("sessions") or {}).get(a.name) or {}).get("session_id"):
+            return {"error": f"{a.called} has no conversation yet; try again after its first turn"}
+        last = [json.loads(x) for x in _lines(rd / "chat.jsonl")]
+        cid = f"chat-{len(last) + 1:03d}-{int(time.time())}"
+        _append(rd / "chat.jsonl", {"id": cid + "-q", "role": "human", "text": message, "ts": now_iso(), "with": a.name})
+        _append(rd / "chat.jsonl", {"id": cid, "role": "agent", "who": a.name, "with": a.name, "status": "running",
+                                    "ts": now_iso()})
+
+        def work() -> None:
+            text, status, new_sid, cost = "", "error", None, None
+            try:
+                with self._chat_lock, agent_lock(rd, a.name):  # waits for the agent's current turn to end
+                    # read the session now, not when the message was sent: a milestone may have started a new one
+                    sid = ((read_json(rd / "state.json", {}) or {}).get("sessions") or {}).get(a.name, {}).get("session_id")
+                    if not sid:
+                        raise RuntimeError(f"{a.called} has no conversation now")
+                    prompt = (message + "\n\n<system-reminder>\nThe user is talking to you directly from the board. "
+                              "Answer them. Do not start new work or change files unless they ask for it. Your reply is "
+                              "shown to them.\n</system-reminder>")
+                    res = get_backend(a.backend).run(TurnRequest(
+                        agent=a.name, role=a.role, prompt=prompt, system_prompt=a.current_system_prompt(),
+                        session_id=sid, cwd=a.working_dir, timeout=a.timeout, options=a.backend_options,
+                        env=a.env, context={"purpose": "chat", "monitor": self.mon.name},
+                        on_event=lambda ev: live_event(rd, cid, ev)), lambda: False)
+                text, status, new_sid = res.output, res.status, res.session_id or sid
+                cost = (res.meta or {}).get("total_cost_usd")
+                if res.status != "ok" and not text:
+                    text = (res.stderr or "")[-1500:] or f"(chat turn ended with status {res.status})"
+            except Exception as e:  # pragma: no cover
+                text = f"({e})"
+            _append(rd / "chat.jsonl", {"id": cid, "role": "agent", "who": a.name, "with": a.name, "status": status,
+                                        "text": text, "ts": now_iso(), "session_id": new_sid, "cost": cost})
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"id": cid}
+
+    def chat(self, message: str, qid: Optional[str] = None, settle: bool = False,
+             agent: Optional[str] = None) -> Dict[str, Any]:
         """Talk to the manager, either in general or about one of its questions (``qid``). ``settle`` asks
-        the manager to sum up what was agreed; that summary becomes the answer the critic receives."""
+        the manager to sum up what was agreed; that summary becomes the answer the critic receives.
+        ``agent`` names the critic or a worker instead: a plain talk in that agent's own conversation."""
         if self.mon is None or not self.mon.by_role("manager"):
             return {"error": "chat needs the run's config (start the board with `orch serve <config>`)"}
+        if agent and agent != self.mon.by_role("manager")[0].name:
+            if qid or settle:
+                return {"error": "questions are settled with the manager"}
+            return self.chat_agent(agent, message)
         rd = self.run_dir
         st = read_json(rd / "state.json", {}) or {}
         mgr = self.mon.by_role("manager")[0]
@@ -365,6 +492,8 @@ def _handler(boards: Dict[str, Board]):
                           "text/html; charset=utf-8")
             elif u.path == "/api/state":
                 self.js(self.board(q).data())
+            elif u.path == "/api/chat":
+                self.js(self.board(q).chat_before((q.get("with") or [""])[0], (q.get("before") or [""])[0]))
             elif u.path == "/api/turn":
                 self.js(self.board(q).turn((q.get("id") or [""])[0]))
             elif u.path == "/api/events":
@@ -426,7 +555,7 @@ def _handler(boards: Dict[str, Board]):
                 settle = bool(body.get("settle"))
                 if not msg and not settle:
                     return self.js({"error": "empty message"})
-                return self.js(b.chat(msg, qid=body.get("qid"), settle=settle))
+                return self.js(b.chat(msg, qid=body.get("qid"), settle=settle, agent=body.get("agent") or None))
             if u.path == "/api/answer":
                 b.control({"kind": "answer", "qid": body.get("qid"), "message": msg})
             elif u.path == "/api/job":

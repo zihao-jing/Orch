@@ -464,6 +464,7 @@ class MockBackend(Backend):
       pass_after:   verifiers reply PASS from this round on (default 2)
       done_after:   llm controllers declare done at this round (default 2)
       fail_turns:   list of per-session turn numbers (1-based) that return an error
+      error_text:   the reply text of a failed turn (e.g. a provider's message)
       write_file:   workers append a line to this file (relative to cwd) each turn
     """
 
@@ -487,7 +488,7 @@ class MockBackend(Backend):
         rnd = int(req.context.get("round", 1))
         purpose = str(req.context.get("purpose", ""))
         if n in [int(x) for x in o.get("fail_turns", [])]:
-            return TurnResult("error", "", sid, 1, "mock: simulated failure", ["mock"], {"turn": n})
+            return TurnResult("error", str(o.get("error_text", "")), sid, 1, "mock: simulated failure", ["mock"], {"turn": n})
         script = o.get("script")
         if o.get("spawn") and purpose == "work" and n == 1:  # tests: leave a detached job running in the workspace
             subprocess.run(["sh", "-c", f"nohup {o['spawn']} >/dev/null 2>&1 &"], cwd=req.cwd or None)

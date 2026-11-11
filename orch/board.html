@@ -170,7 +170,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
   </main>
   <aside class="side">
    <div class="card chat">
-    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
+    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" title="Who to talk to" style="font-size:13px;max-width:45%"></select><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
     <div class="chatlog" id="chatlog"></div>
     <div class="row"><textarea id="chatin" rows="2" placeholder="Ask anything or give direction… (Enter to send, Shift+Enter for a new line)"></textarea></div>
     <div class="row" style="justify-content:space-between;align-items:center"><span class="mute" style="font-size:12px" id="chat-hint"></span><button class="pri" id="chatsend">Send</button></div>
@@ -185,6 +185,7 @@ const qsM = new URLSearchParams(location.search).get('m');
 let M = MONS.includes(qsM) ? qsM : MONS[0];
 document.getElementById('loglink').href = 'log/run?m=' + encodeURIComponent(M);
 let D = null, sel = null, tab = 'all';
+const chatOlder = new Map(), chatMoreFlag = new Map(); let chatFirstId = '';  // older chat messages fetched on request
 const live = {}, expanded = new Set(), openRounds = new Set();
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -206,7 +207,7 @@ function tagsToMd(s){
     .replace(/<no-wait\s+pid\s*=\s*["']?(\d+)["']?\s*\/?>/gi, (_, p) => `\n\n*(not waited on: pid ${p})*\n\n`)
     .replace(/<\/(message|question|pause|checklist|verdict|score|decision|no-wait)\s*>/gi, '\n\n');
 }
-const TAGBLOCK = /<(message|question|pause|checklist|verdict|score|decision|no-wait)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
+const TAGBLOCK = /<(message|question|pause|checklist|verdict|score|decision|no-wait|preference)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
 function md(src){
   const L = tagsToMd(src).replace(/\r/g,'').split('\n'); let h = '', i = 0;
   while (i < L.length){
@@ -444,7 +445,7 @@ function renderChecklist(){
   const last = vs[vs.length-1];
   const title = 'Critic checklist · milestone ' + (sel+1) + (last ? ` · round ${last.round}: ${last.checklist[0]}/${last.checklist[1]}` : '');
   if (!last){ setHTML($('ch-check'), `<h2>${esc(title)}</h2><div class="empty">The critic has not reviewed this milestone yet.</div>`); return; }
-  const items = checklistItems(last.output), open = items.filter(i => !i.done), done = items.filter(i => i.done);
+  const items = checklistItems(last.checklist_text || ''), open = items.filter(i => !i.done), done = items.filter(i => i.done);
   const li = i => `<li class="${i.done ? 'done' : 'open'}"><span class="bx">${i.done ? '✓' : '☐'}</span><span>${inline(i.item)}${i.note ? ` <span class="nt">— ${inline(i.note)}</span>` : ''}</span></li>`;
   const bar = `<div class="bar" title="${last.checklist[0]} of ${last.checklist[1]} items done"><i style="width:${Math.round(100*last.checklist[0]/Math.max(1,last.checklist[1]))}%"></i></div>`;
   let h = '';
@@ -511,14 +512,25 @@ document.addEventListener('toggle', async e => {
     prompts.set(key, t); body.innerHTML = promptBody(t);
   } catch(e){ body.textContent = 'Could not load prompt. Close and reopen to retry.'; }
 }, true);
+const fullOut = new Map(), fullPending = new Set();  // a turn's whole output, fetched when its fold is opened
+function outputOf(t){ return (t.output_len||0) <= (t.output||'').length ? (t.output||'') : fullOut.get(t.turn_id); }
+async function ensureFull(id){
+  if (fullOut.has(id) || fullPending.has(id)) return; fullPending.add(id);
+  try { const r = await fetch('api/turn?m=' + encodeURIComponent(M) + '&id=' + encodeURIComponent(id), {cache:'no-store'});
+        const j = await r.json(); if (!j.error) fullOut.set(id, j.output || ''); } catch(e){}
+  fullPending.delete(id); if (fullOut.has(id)) render();
+}
 function fold(t, defOpen){
   const f = (D.flow||{})[t.purpose] || [t.role, ''];
-  let to = f[1]; if (t.purpose === 'review' && /<decision>\s*REVISE/i.test(t.output||'')) to = 'critic';
+  let to = f[1]; if (t.purpose === 'review' && t.revise) to = 'critic';
   const run = t.status === 'running', open = openMsgs.has(t.turn_id) || ((run || defOpen) && !shutMsgs.has(t.turn_id));
-  const id = 'm-' + t.turn_id, long = !run && (t.output||'').length > CLAMP_CHARS, full = expanded.has(id);
+  const id = 'm-' + t.turn_id, long = !run && (t.output_len||0) > CLAMP_CHARS, full = expanded.has(id);
+  const text = run ? '' : outputOf(t);
+  if (!run && text === undefined && (open || full)) ensureFull(t.turn_id);
+  const shown = text === undefined ? (t.output||'') : text;  // until the rest has arrived, the preview
   const body = run ? `<div data-live="${esc(t.turn_id)}"></div>`
-    : `<div class="md${long && !full ? ' clamp' : ''}">${md(t.output||'(empty)')}</div>`
-      + (long ? `<button class="more" data-more="${id}">${full ? 'Show less' : 'Show all (' + Math.round((t.output||'').length/1000) + 'k characters)'}</button>` : '');
+    : `<div class="md${long && !full ? ' clamp' : ''}">${md(shown || '(empty)')}</div>`
+      + (long ? `<button class="more" data-more="${id}">${full ? 'Show less' : 'Show all (' + Math.round((t.output_len||0)/1000) + 'k characters)'}</button>` : '');
   return `<details class="fold${to==='human'?' to-human':''}" data-t="${esc(t.turn_id)}"${open?' open':''}><summary>
     <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
     <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
@@ -622,19 +634,36 @@ $('audit').addEventListener('toggle', e => { const d = e.target; if (!d.dataset 
   d.open ? openAudits.add(d.dataset.a) : openAudits.delete(d.dataset.a); }, true);
 $('decs').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.d) return;
   d.open ? openDecs.add(d.dataset.d) : openDecs.delete(d.dataset.d); }, true);
+function mgrName(){ const m = (D.agents||[]).find(a => a.role === 'manager'); return m ? m.name : 'manager'; }
+let chatWith = null;  // the agent name being talked to; null = the manager
+function talkable(){ return (D.agents||[]).filter(a => ['manager','verifier','worker'].includes(a.role)); }
 function renderChat(){
   const cl = $('chatlog'), atBottom = cl.scrollHeight - cl.scrollTop - cl.clientHeight < 40;
-  $('chat-h').textContent = 'Talk to ' + who('manager');
-  $('chat-hint').textContent = D.can_chat ? 'Goes to ' + who('manager') + "'s own conversation." : 'Chat needs `orch serve <config>` or `orch run --serve`.';
+  const mg = mgrName(), sel = $('chatwho'), opts = talkable();
+  if (!chatWith || !opts.some(a => a.name === chatWith)) chatWith = mg;
+  const optHtml = opts.map(a => `<option value="${esc(a.name)}"${a.name === chatWith ? ' selected' : ''}>${esc(a.called)} (${esc(a.role === 'verifier' ? 'critic' : a.role)})</option>`).join('');
+  if (sel._h !== optHtml){ sel._h = optHtml; sel.innerHTML = optHtml; }
+  const who2 = called(chatWith);
+  $('chat-h').textContent = 'Talk to ' + who2;
+  $('chat-hint').textContent = !D.can_chat ? 'Chat needs `orch serve <config>` or `orch run --serve`.'
+    : chatWith === mg ? "Goes to " + who2 + "'s own conversation."
+    : "Goes to " + who2 + "'s own conversation. It answers when its current turn ends; its replies are not passed on.";
   $('chatsend').disabled = !D.can_chat;
-  const rows = {}; (D.chat||[]).filter(c => !c.qid).forEach(c => rows[c.id] = Object.assign(rows[c.id]||{}, c));
-  const list = Object.values(rows);
+  const merged = new Map();  // older messages fetched on request first, then the latest ones from the state
+  for (const c of [...(chatOlder.get(chatWith)||[]), ...(D.chat||[]).filter(c => !c.qid && (c.with || mg) === chatWith)])
+    merged.set(c.id, Object.assign(merged.get(c.id)||{}, c));
+  const list = [...merged.values()];
+  chatFirstId = list.length ? list[0].id : '';
+  const moreFlag = chatMoreFlag.has(chatWith) ? chatMoreFlag.get(chatWith) : !!(D.chat_more||{})[chatWith];
+  const olderBtn = moreFlag ? '<div class="older"><button class="more" data-chatmore="1">Show older messages</button></div>' : '';
   const h = list.length ? list.map(c => c.role === 'human'
       ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}</div><div class="b">${md(c.text)}</div></div>`
-      : `<div class="cm"><div class="w">${esc(who('manager'))} · ${tm(c.ts)}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}</div><div class="b">${c.status === 'running' ? `<div data-live="${esc(c.id)}"></div>` : md(c.text)}</div>${relayLine(c.id)}</div>`).join('')
-    : `<div class="empty">Ask ${esc(who('manager'))} how things stand, why a milestone was sent back, or tell them what to prioritise. If they want ${esc(who('critic'))} to change course, they will say so and it is passed on.</div>`;
+      : `<div class="cm"><div class="w">${esc(called(c.who || c.with || mg))} · ${tm(c.ts)}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}</div><div class="b">${c.status === 'running' ? `<div data-live="${esc(c.id)}"></div>` : md(c.text)}</div>${relayLine(c.id)}</div>`).join('')
+    : (chatWith === mg
+      ? `<div class="empty">Ask ${esc(who2)} how things stand, why a milestone was sent back, or tell them what to prioritise. If they want ${esc(who('critic'))} to change course, they will say so and it is passed on.</div>`
+      : `<div class="empty">Talk to ${esc(who2)} directly: a question, a clarification, or a change of approach. Its reply appears here.</div>`);
   seenReplies(list.filter(c => c.role !== 'human' && c.status !== 'running').length);
-  setHTML(cl, h); cl._stick = atBottom || cl._first === undefined; cl._first = 1; if (cl._stick) cl.scrollTop = cl.scrollHeight;
+  setHTML(cl, olderBtn + h); cl._stick = atBottom || cl._first === undefined; cl._first = 1; if (cl._stick) cl.scrollTop = cl.scrollHeight;
 }
 function relayLine(id){  // what became of the messages this reply passed on
   const rs = (D.relays||{})[id]; if (!rs || !rs.length) return '';
@@ -645,7 +674,14 @@ function relayLine(id){  // what became of the messages this reply passed on
       : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}'s next turn`);
     return `<div class="w">${s}</div>`; }).join('');
 }
-async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true; await post('api/chat', {message: m}); }
+async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true;
+  const body = {message: m}; if (chatWith && chatWith !== mgrName()) body.agent = chatWith; await post('api/chat', body); }
+$('chatwho').addEventListener('change', e => { chatWith = e.target.value; const cl = $('chatlog'); cl._first = undefined; render(); });
+$('chatlog').addEventListener('click', async e => { const b = e.target.closest('[data-chatmore]'); if (!b) return; b.disabled = true;
+  try { const r = await fetch('api/chat?m=' + encodeURIComponent(M) + '&with=' + encodeURIComponent(chatWith) + '&before=' + encodeURIComponent(chatFirstId), {cache:'no-store'});
+        const j = await r.json(); chatOlder.set(chatWith, [...(j.rows||[]), ...(chatOlder.get(chatWith)||[])]); chatMoreFlag.set(chatWith, !!j.more); }
+  catch(err){ b.disabled = false; return; }
+  render(); });
 let chatOpen, replies = 0, seen = null;
 function seenReplies(n){ replies = n; if (seen === null || chatOpen) seen = n; badge(); }  // replies already there on load count as read
 function badge(){ const k = seen === null ? 0 : replies - seen; $('chatbadge').innerHTML = !chatOpen && k > 0 ? `<span class="badge">${k}</span>` : ''; }

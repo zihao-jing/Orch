@@ -126,7 +126,7 @@ fresh_session: milestone    # a new session for each milestone: turns stay fast 
     }
     from .config import PROMPTS_DIR
     for name in ("manager", "critic", "worker", "auditor"):
-        files[f"agents/{name}/memory.md"] = MEMORY_STUB
+        files[f"agents/{name}/preference.md"] = PREFERENCE_STUB
         # the role's default prompt, copied so this project can adapt it
         if name != "auditor":  # the auditor keeps orch's prompt: it audits orch, not this project
             files[f"agents/{name}/system_prompt.md"] = (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
@@ -218,9 +218,9 @@ def cmd_audit(a: argparse.Namespace) -> int:
     return rc
 
 
-MEMORY_STUB = """\
-<!-- Notes and preferences for this agent in this project. Everything outside these comment marks is added to
-     the end of its system prompt (re-read before every turn). Files in memory/*.md next to this one are added too. -->
+PREFERENCE_STUB = """\
+<!-- The user's preferences for this agent in this project. Not added to the system prompt: the agent reads this file
+     when a request may touch a preference, and adds a line when the user states one. -->
 """
 
 
@@ -255,6 +255,50 @@ def cmd_validate(a: argparse.Namespace) -> int:
     return 0
 
 
+def _resume_plan(m: Any) -> List[str]:
+    """What `orch run --resume` would do for one monitor, read from its latest run. Changes nothing."""
+    from .recorder import Recorder
+    rec = Recorder.latest(m.output_dir, m.name)
+    if rec is None:
+        return [f"{m.name}: no earlier run; `orch run` starts a new one"]
+    st = rec.state
+    lines = [f"{m.name}: run {rec.run_dir.name} · status {st.get('status')} · round {st.get('round', 0)}"]
+    if st.get("status") == "completed":
+        return lines + ["  already completed; nothing to resume"]
+    if st.get("error"):
+        lines.append(f"  last error: {str(st['error']).strip().splitlines()[-1][:160]}")
+    mg = st.get("managed") or {}
+    if mg:
+        lines.append(f"  phase {mg.get('phase')} · milestone {int(mg.get('ms', 0)) + 1} · round in milestone {mg.get('ms_round', 0)}")
+        if mg.get("in_work"):
+            fin = rec.finished_turns(int(mg["in_work"]), "work")
+            lines.append(f"  round {mg['in_work']} was cut off: redone; workers already finished are kept: "
+                         f"{', '.join(sorted(fin)) or 'none'}")
+        if mg.get("job"):
+            lines.append("  waiting for a worker's background job; the wait resumes")
+        if mg.get("wait") or (mg.get("gate") or {}).get("kind") == "wait":
+            lines.append("  paused until your task is done (waiting on you)")
+    for a in m.agents:
+        sess = (st.get("sessions") or {}).get(a.name) or {}
+        sid = sess.get("session_id")
+        queued = len((st.get("fwd") or {}).get(a.name) or [])
+        if sid and sess.get("backend") not in (None, a.backend):
+            how = f"backend changed {sess.get('backend')} → {a.backend}: new session"
+        elif sid:
+            how = f"session {str(sid)[:8]} kept"
+        elif sess.get("turns"):
+            how = "NO session saved: starts fresh (only files and memory carry over)"
+        else:
+            how = "new session"
+        lines.append(f"  {a.name:<10} {how}; last turn {sess.get('last_status') or '—'}; "
+                     f"{queued} message(s) waiting to be delivered")
+    pending = [w for w in (st.get("worker_messages") or []) if w.get("status") not in ("accepted", "in_prompt")]
+    if pending:
+        lines.append(f"  {len(pending)} worker message(s) not yet acknowledged: "
+                     + ", ".join(sorted({str(w.get('status')) for w in pending})))
+    return lines
+
+
 def cmd_run(a: argparse.Namespace) -> int:
     cfg = _load(a.config, check_paths=True)
     selected = [m for m in cfg.monitors if (m.name in a.monitor if a.monitor else m.enabled)]
@@ -264,6 +308,10 @@ def cmd_run(a: argparse.Namespace) -> int:
             raise SystemExit(f"unknown monitor(s): {', '.join(sorted(missing))}")
     if not selected:
         raise SystemExit("no monitors selected")
+    if a.plan:
+        for m in selected:
+            print("\n".join(_resume_plan(m) if a.resume else [f"{m.name}: `--plan` shows the resume; add --resume"]))
+        return 0
     if a.dry_run:
         def mockify(ag):
             return dataclasses.replace(ag, backend="mock", backend_options={"delay": 0.2})
@@ -572,6 +620,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-m", "--monitor", action="append", help="only this monitor (repeatable); default: all enabled")
     p.add_argument("--resume", action="store_true", help="continue each monitor's latest unfinished run and sessions")
     p.add_argument("--dry-run", action="store_true", help="replace every backend with the mock backend")
+    p.add_argument("--plan", action="store_true",
+                   help="with --resume: print what the resume will do for each agent, then stop (nothing runs)")
     p.add_argument("--max-rounds", type=int, help="override max_rounds for this invocation")
     p.add_argument("--serve", action="store_true", help="also start the board (local web page) for these runs")
     p.add_argument("--port", type=int, default=8765, help="board port (default 8765; the next free one is used)")
