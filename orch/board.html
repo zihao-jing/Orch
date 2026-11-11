@@ -166,6 +166,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
    <div class="card"><h2>Critic ↔ worker, round by round</h2><div id="rounds"></div></div>
    <div class="card"><h2>Questions</h2><div id="qs"></div></div>
    <div class="card"><h2 id="dec-h">Decisions</h2><div id="decs"></div></div>
+  <div class="card" id="audit-card" hidden><h2 id="audit-h">Auditor</h2><div id="audit"></div></div>
   </main>
   <aside class="side">
    <div class="card chat">
@@ -293,7 +294,7 @@ function render(){
   $('title').textContent = D.monitor; setHTML($('status'), stPill(D.status)); $('runid').textContent = D.run_id;
   document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderTiles(mg); renderSteps(mg); renderCharts(mg); renderReport(mg);
-  renderThread(mg); renderWorkerUpdates(); renderRounds(mg); renderQs(); renderDecisions(); renderChat();
+  renderThread(mg); renderWorkerUpdates(); renderRounds(mg); renderQs(); renderDecisions(); renderAudit(); renderChat();
   Object.keys(live).forEach(paintLive);
 }
 
@@ -597,6 +598,28 @@ function renderDecisions(){  // the register: everything settled, newest first; 
     <div class="fb"><div class="md">${md(d.text)}</div></div></details>`).join(''));
 }
 const openDecs = new Set();
+const openAudits = new Set();
+function renderAudit(){  // the auditor (outside the team): its findings file and every audit it has made, newest first
+  const A = D.audit || {}, h = A.history || [];
+  $('audit-card').hidden = !(A.configured || h.length);
+  if ($('audit-card').hidden) return;
+  const f = (A.findings || '').trim(), n = h.length;
+  $('audit-h').textContent = 'Auditor' + (n ? ` · ${n} audit${n > 1 ? 's' : ''}` : '');
+  const findings = f ? `<details class="fold" open><summary><b>Findings</b> <span class="mute">audit.md</span></summary><div class="fb"><div class="md">${md(f)}</div></div></details>`
+    : '<div class="empty">No findings yet.</div>';
+  const hist = h.length ? h.map(a => {
+    const key = a.file, when = (a.file || '').slice(0, 15).replace(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5');
+    const rounds = a.rounds ? `rounds ${a.rounds[0]}–${a.rounds[1]}` : 'rounds ?';
+    const st = a.status === 'ok' ? pill('p-good', '✓ ok') : pill('p-warn', esc(a.status));
+    return `<details class="fold" data-a="${esc(key)}"${openAudits.has(key) ? ' open' : ''}><summary>
+      <span class="mono">${esc(when)}</span><b>${esc(rounds)}</b>${st}${a.cost != null ? `<span class="mute">$${Number(a.cost).toFixed(2)}</span>` : ''}
+      <span class="pv">${esc(preview(a.reply || ''))}</span></summary>
+      <div class="fb"><div class="md">${a.reply ? md(a.reply) : '<span class="mute">No reply.</span>'}</div></div></details>`;
+  }).join('') : '<div class="empty">No audits have run yet.</div>';
+  setHTML($('audit'), `<h2 style="font-size:13px;margin:4px 0">Findings</h2>${findings}<h2 style="font-size:13px;margin:12px 0 4px">Audit history</h2>${hist}`);
+}
+$('audit').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.a) return;
+  d.open ? openAudits.add(d.dataset.a) : openAudits.delete(d.dataset.a); }, true);
 $('decs').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.d) return;
   d.open ? openDecs.add(d.dataset.d) : openDecs.delete(d.dataset.d); }, true);
 function renderChat(){

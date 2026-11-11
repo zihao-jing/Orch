@@ -505,6 +505,39 @@ def cmd_inject(a: argparse.Namespace) -> int:
     return 0
 
 
+def _drop_message(run: Path, text: str, to: Optional[List[str]], urgent: bool) -> Path:
+    """Write one human message into run/inbox/ (the same file format `inject` uses)."""
+    inbox = run / "inbox"
+    inbox.mkdir(exist_ok=True)
+    p = inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.json"
+    write_json(p, {"to": to or None, "message": text, **({"urgent": True} if urgent else {})})
+    return p
+
+
+def cmd_tell(a: argparse.Namespace) -> int:
+    """Message one agent (critic or worker) directly: `orch tell <run> <agent> "<text>" [--urgent]`."""
+    runs = resolve_runs(a.target, a.monitor)
+    if not runs:
+        print("no runs found")
+        return 1
+    text = a.message if a.message != "-" else sys.stdin.read()
+    if not text.strip():
+        print("empty message")
+        return 1
+    status = 0
+    for run in runs:
+        cfg = read_json(run / "config.json", {}) or {}
+        names = [x.get("name") for x in cfg.get("agents", []) if isinstance(x, dict)]
+        if names and a.agent not in names:
+            print(f"{run}: no agent named {a.agent!r} (agents: {', '.join(n for n in names if n)})")
+            status = 1
+            continue
+        p = _drop_message(run, text, [a.agent], a.urgent)
+        print(f"urgent, queued for immediate delivery to {a.agent}: {p}" if a.urgent
+              else f"queued for {a.agent}'s next turn: {p}")
+    return status
+
+
 def cmd_report(a: argparse.Namespace) -> int:
     runs = resolve_runs(a.target, a.monitor)
     roots = set()
@@ -597,6 +630,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("target")
     p.add_argument("-m", "--monitor", action="append")
     p.set_defaults(func=cmd_stop)
+
+    p = sub.add_parser("tell", help="message one agent directly, e.g. orch tell <run> critic \"focus on X\"")
+    p.add_argument("target")
+    p.add_argument("agent", help="agent name from config.json, e.g. critic or worker")
+    p.add_argument("message", help="text, or - to read stdin")
+    p.add_argument("-m", "--monitor", action="append")
+    p.add_argument("--urgent", action="store_true",
+                   help="deliver now: a running turn is interrupted or, for managed critic/worker, the message "
+                        "is injected into the live session")
+    p.set_defaults(func=cmd_tell)
 
     p = sub.add_parser("inject", help="send a human message into the next round")
     p.add_argument("target")

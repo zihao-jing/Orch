@@ -208,6 +208,43 @@ class TestPipeline(unittest.TestCase):
         self.assertNotIn("use tabs please", w1["input"])
         self.assertTrue(list((r.rec.run_dir / "inbox" / "consumed").iterdir()))
 
+    def test_board_lists_audit_history_newest_first(self):
+        from orch.board import Board
+        run = self.tmp / "run"
+        (run / "audits").mkdir(parents=True)
+        (run / "audits" / "20261110-101500-r001-r010.md").write_text(
+            "# Audit of rounds 1–10 (ok, $0.12)\n\n## Sent\n\nprompt\n\n## Reply\n\n1. First point\n", encoding="utf-8")
+        (run / "audits" / "20261111-101500-r011-r020.md").write_text(
+            "# Audit of rounds 11–20 (error, $0.00)\n\n## Sent\n\nprompt\n\n## Reply\n\n\n## stderr\n\nboom\n",
+            encoding="utf-8")
+        (run / "state.json").write_text(json.dumps({"monitor": "m", "status": "running"}))
+        d = Board("m", lambda: run, None).data()["audit"]
+        self.assertFalse(d["configured"])
+        self.assertEqual(d["findings"], "")
+        self.assertEqual([h["file"] for h in d["history"]],
+                         ["20261111-101500-r011-r020.md", "20261110-101500-r001-r010.md"])
+        self.assertEqual(d["history"][0]["status"], "error")
+        self.assertEqual(d["history"][0]["reply"], "")
+        self.assertEqual(d["history"][1]["rounds"], [1, 10])
+        self.assertEqual(d["history"][1]["cost"], 0.12)
+        self.assertEqual(d["history"][1]["reply"], "1. First point")
+
+    def test_tell_writes_a_direct_message_and_rejects_unknown_agents(self):
+        m = pipeline()
+        m["agents"].insert(1, {"name": "w2", "role": "worker"})
+        cfg_obj = load_config(make_cfg(self.tmp, [m]))
+        from orch.recorder import Recorder
+        rec = Recorder.create(cfg_obj.output_dir, "m", cfg_obj.monitor("m").snapshot())
+        self.assertEqual(cli.main(["tell", str(rec.run_dir), "w2", "check the tests first", "--urgent"]), 0)
+        files = list((rec.run_dir / "inbox").glob("*.json"))
+        self.assertEqual(len(files), 1)
+        data = read_json(files[0])
+        self.assertEqual(data["to"], ["w2"])
+        self.assertTrue(data["urgent"])
+        self.assertEqual(data["message"], "check the tests first")
+        self.assertEqual(cli.main(["tell", str(rec.run_dir), "nobody", "hello"]), 1)
+        self.assertEqual(len(list((rec.run_dir / "inbox").glob("*.json"))), 1)
+
 
 class TestLLMController(unittest.TestCase):
     def setUp(self):

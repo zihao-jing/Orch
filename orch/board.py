@@ -113,7 +113,30 @@ class Board:
             "worker_messages": st.get("worker_messages") or [],
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
+            "audit": self._audit(rd),
         }
+
+    def _audit(self, rd: Path) -> Dict[str, Any]:
+        """The auditor's findings file and the history of its audits (newest first), read-only."""
+        from . import audit as A
+        auditors = self.mon.by_role("auditor") if self.mon is not None else []
+        findings = ""
+        if auditors:
+            try:
+                findings = A.findings_path(auditors[0], rd).read_text(encoding="utf-8")
+            except OSError:
+                findings = ""
+        history = []
+        files = sorted((rd / "audits").glob("*.md"), reverse=True)[:20] if (rd / "audits").is_dir() else []
+        for p in files:
+            text = p.read_text(encoding="utf-8", errors="replace")
+            m = re.match(r"# Audit of rounds (\d+)–(\d+) \((\w+), \$([\d.]+)\)", text)
+            reply = text.split("## Reply\n\n", 1)[1] if "## Reply\n\n" in text else ""
+            reply = re.split(r"\n## stderr\n", reply, 1)[0].strip()
+            history.append({"file": p.name, "rounds": [int(m.group(1)), int(m.group(2))] if m else None,
+                            "status": m.group(3) if m else "unknown", "cost": float(m.group(4)) if m else None,
+                            "reply": reply[:30000]})
+        return {"configured": bool(auditors), "findings": findings[:60000], "history": history}
 
     @staticmethod
     def _live_text(p: Path) -> Dict[str, Any]:
