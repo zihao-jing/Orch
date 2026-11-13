@@ -150,8 +150,14 @@ class Board:
             "audit": self._audit(rd),
         }
 
-    def _audit(self, rd: Path) -> Dict[str, Any]:
-        """The auditor's findings file and the history of its audits (newest first), read-only."""
+    def audit(self) -> Dict[str, Any]:
+        """The audit texts in full, for GET /api/audit (the state poll sends only the list)."""
+        rd = self.run_dir
+        return self._audit(rd, full=True) if rd is not None else {"configured": False, "history": []}
+
+    def _audit(self, rd: Path, full: bool = False) -> Dict[str, Any]:
+        """The auditor's findings file and the history of its audits (newest first), read-only. Without `full`
+        the texts are left out: the board loads them only when the Auditor card is opened."""
         from . import audit as A
         auditors = self.mon.by_role("auditor") if self.mon is not None else []
         findings = ""
@@ -169,8 +175,11 @@ class Board:
             reply = re.split(r"\n## stderr\n", reply, 1)[0].strip()
             history.append({"file": p.name, "rounds": [int(m.group(1)), int(m.group(2))] if m else None,
                             "status": m.group(3) if m else "unknown", "cost": float(m.group(4)) if m else None,
-                            "reply": reply[:30000]})
-        return {"configured": bool(auditors), "findings": findings[:60000], "history": history}
+                            **({"reply": reply[:30000]} if full else {})})
+        out = {"configured": bool(auditors), "history": history, "has_findings": bool(findings.strip())}
+        if full:
+            out["findings"] = findings[:60000]
+        return out
 
     @staticmethod
     def _live_text(p: Path) -> Dict[str, Any]:
@@ -734,6 +743,8 @@ def _handler(boards: Dict[str, Board]):
                 self.js(self.board(q).chat_before((q.get("with") or [""])[0], (q.get("before") or [""])[0]))
             elif u.path == "/api/turn":
                 self.js(self.board(q).turn((q.get("id") or [""])[0]))
+            elif u.path == "/api/audit":
+                self.js(self.board(q).audit())
             elif u.path == "/api/events":
                 self.events(self.board(q))
             elif u.path == "/log" or u.path.startswith("/log/"):

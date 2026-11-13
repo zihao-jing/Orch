@@ -244,7 +244,12 @@ class TestPipeline(unittest.TestCase):
             "# Audit of rounds 11–20 (error, $0.00)\n\n## Sent\n\nprompt\n\n## Reply\n\n\n## stderr\n\nboom\n",
             encoding="utf-8")
         (run / "state.json").write_text(json.dumps({"monitor": "m", "status": "running"}))
-        d = Board("m", lambda: run, None).data()["audit"]
+        b = Board("m", lambda: run, None)
+        light = b.data()["audit"]  # the state poll sends the list only; the texts load when the card is opened
+        self.assertNotIn("findings", light)
+        self.assertNotIn("reply", light["history"][0])
+        self.assertEqual(light["history"][1]["rounds"], [1, 10])
+        d = b.audit()
         self.assertFalse(d["configured"])
         self.assertEqual(d["findings"], "")
         self.assertEqual([h["file"] for h in d["history"]],
@@ -813,6 +818,36 @@ class TestManaged(unittest.TestCase):
         self.assertEqual([j["pid"] for j in found], [71])
         self.assertTrue(jobs.is_tool(vscode))
         self.assertFalse(jobs.is_tool("python build_report.py"))
+
+    def test_only_processes_the_worker_started_are_its_jobs(self):
+        # A browser or server someone else opened in the project folder looks like a detached job (new, in the
+        # workspace, parent is init) but lacks the ORCH_JOB tag every process of the worker's turn inherits.
+        from orch import jobs
+        from unittest import mock
+        import os
+        ws = str(Path(tempfile.mkdtemp()).resolve())
+        tag = jobs.tag_for("run1", "writer")
+        py = [sys.executable, "-c", "import time; time.sleep(30)"]
+        mine = subprocess.Popen(py, cwd=ws, env={**os.environ, jobs.TAG_VAR: tag})
+        other = subprocess.Popen(py, cwd=ws, env={k: v for k, v in os.environ.items() if k != jobs.TAG_VAR})
+        bare = subprocess.Popen(["/bin/sleep", "30"], cwd=ws, env={**os.environ, jobs.TAG_VAR: tag})
+        try:
+            time.sleep(0.5)
+            before = {10: (1, "launchd")}
+            after = {**before, mine.pid: (1, "python mine"), other.pid: (1, "python other"),
+                     bare.pid: (1, "/bin/sleep 30")}
+            with mock.patch.object(jobs, "cwds", lambda pids: {p: ws for p in pids}):
+                found = {j["pid"] for j in jobs.detect(before, [ws], after=after, tags=[tag])}
+                untagged = {j["pid"] for j in jobs.detect(before, [ws], after=after)}
+            self.assertIn(mine.pid, found)
+            self.assertNotIn(other.pid, found)
+            if bare.pid not in jobs.tag_check([bare.pid], [tag]):  # environment hidden (macOS system program)
+                self.assertIn(bare.pid, found)                     # → judged the old way
+            self.assertEqual(untagged, {mine.pid, other.pid, bare.pid})  # without tags: the old rule
+        finally:
+            for p in (mine, other, bare):
+                p.kill()
+                p.wait()
 
     AUDIT_REPLY = ("<points>\n1. The critic resends its whole checklist. Evidence: r001. Fix: send the change only.\n"
                    "2. Second point.\n3. Third point.\n</points>\n<findings>\n"
@@ -1607,7 +1642,7 @@ class TestManaged(unittest.TestCase):
             self.fail("Timed out waiting for the job/check-in")
 
         # Keep ownership of the real process for cleanup; simulate its discovery as a detached job.
-        def detect(before, *args):
+        def detect(before, *args, **kw):
             return ([{"pid": jobs[0].pid, "command": "sleep 30"}]
                     if jobs and jobs[0].pid not in before else [])
 

@@ -1350,7 +1350,8 @@ class ManagedRunner(MonitorRunner):
             skip = {int(a["pid"]) for a, _b in T.blocks(outs, "no-wait") if str(a.get("pid", "")).isdigit()}
             found = [j for j in _jobs.detect(getattr(self, "_procs", {}) or {},
                                              {self.mon.agent(r["agent"]).working_dir or self.mon.working_dir for r in recs},
-                                             c.job_ignore)
+                                             c.job_ignore,
+                                             tags=[_jobs.tag_for(self.rec.run_dir.name, r["agent"]) for r in recs])
                      if j["pid"] not in skip]  # orch finds them itself
             self._procs = {}
             for j in found:
