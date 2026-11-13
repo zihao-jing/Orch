@@ -204,6 +204,8 @@ class Recorder:
                 cost = (rec.get("meta") or {}).get("turn_cost_usd")
                 if isinstance(cost, (int, float)):
                     self.state["cost_usd"] = round(self.state.get("cost_usd", 0.0) + cost, 6)
+                    if rec.get("cost_basis") == "estimate":  # Claude Code's own price for another provider's tokens
+                        self.state["cost_estimate_usd"] = round(self.state.get("cost_estimate_usd", 0.0) + cost, 6)
             self.save()
         self.event("turn_" + ("started" if rec["status"] == "running" else "finished"),
                    turn=rec["turn_id"], agent=rec["agent"], status=rec["status"],
@@ -359,6 +361,48 @@ class Recorder:
 
     def agent_lock(self, agent: str):
         return agent_lock(self.run_dir, agent)
+
+    def claim(self) -> Optional[str]:
+        """Take the run lock: one controller per run, also across processes. Returns None when taken, else a
+        description of the process that holds it. The OS drops the lock when its holder exits, so it never goes
+        stale. Idempotent for this Recorder."""
+        import fcntl
+        if getattr(self, "_claim_fh", None) is not None:
+            return None
+        d = self.run_dir / "locks"
+        d.mkdir(exist_ok=True)
+        fh = open(d / "run.lock", "a+", encoding="utf-8")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.seek(0)
+            holder = fh.read().strip()
+            fh.close()
+            try:
+                info = json.loads(holder)
+                return f"pid {info.get('pid')} (since {info.get('since')})"
+            except (ValueError, AttributeError):
+                return "another process"
+        fh.seek(0)
+        fh.truncate()
+        fh.write(json.dumps({"pid": os.getpid(), "since": now_iso()}))
+        fh.flush()
+        self._claim_fh = fh
+        return None
+
+    def release(self) -> None:
+        """Give up the run lock taken by claim()."""
+        import fcntl
+        fh = getattr(self, "_claim_fh", None)
+        if fh is None:
+            return
+        self._claim_fh = None
+        try:
+            fh.seek(0)
+            fh.truncate()
+            fcntl.flock(fh, fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
     # ------------------------------------------------------------------ reports
 

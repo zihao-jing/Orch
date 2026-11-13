@@ -343,7 +343,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         pass
 
     results = {}
-    runners = [MonitorRunner(m, stop, resume=a.resume, log=log) for m in selected]
+    runners = [MonitorRunner(m, stop, resume=a.resume, log=log, max_rounds_given=bool(a.max_rounds)) for m in selected]
     if a.serve:
         from .board import Board, serve
         boards = {r.mon.name: Board(r.mon.name, (lambda r=r: getattr(r, "rec", None) and r.rec.run_dir), r.mon)

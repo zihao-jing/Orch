@@ -23,7 +23,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from . import tags as T
 from .recorder import read_json
+from .report import turn_cost_basis, turn_model
 
 EXCERPT = 600  # chars per excerpt
 MAX_EXCERPTS = 12  # per digest, most notable first
@@ -110,7 +112,7 @@ def load_sources(run_dir: Path) -> List[Dict[str, Any]]:
         for p in sorted(d.glob("*.json")) if d.is_dir() else []:
             m = read_json(p, {}) or {}
             if m.get("message"):
-                out.append({"id": p.name, "origin": "manager-chat" if m.get("from") else "human",
+                out.append({"id": p.name, "origin": f"note from {m['from']}" if m.get("from") else "human",
                             "text": m["message"], "ts": _file_ts(p.name)})
     return out
 
@@ -173,20 +175,46 @@ def trace(turns: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> List[Di
     return traced
 
 
+def passable(src: Dict[str, Any], to: Dict[str, Any]) -> Tuple[str, Dict[str, int]]:
+    """The part of `src`'s reply that orch passes on to the agent of turn `to`, and what it withholds by design
+    ({what: chars}): protocol tags (checklist, verdict, state…) never travel, a <message> goes only to the agent it
+    names, and when the manager writes a <message> to someone, the rest of its reply is for the human."""
+    text = src.get("output") or ""
+    names = [to.get("agent") or "", ROLE.get(to.get("role"), "")]
+    keep, withheld = [], {}
+    mine = False
+    for n, attrs, body, _s, _e in T.parse(text):
+        if n == "message" and T.addressed(attrs, *names):
+            keep.append(body)
+            mine = True
+        elif body:
+            what = f"message to {attrs.get('to', '?')}" if n == "message" else n
+            withheld[what] = withheld.get(what, 0) + len(body)
+    rest = T.outside(text)
+    if mine and src.get("role") == "manager":
+        if rest:
+            withheld["reply to the human"] = len(rest)
+    else:
+        keep.insert(0, rest)
+    return "\n\n".join(k for k in keep if k), withheld
+
+
 def relay_coverage(tr: Dict[str, Any], turns_by_id: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """For each turn output relayed into this input: how much of it arrived, and the first paragraphs left out."""
+    """For each turn output relayed into this input: how much of what orch passes on arrived, the first paragraphs
+    of it left out, and what orch withheld by design."""
     out = []
     used: Dict[str, List[str]] = {}
     for p in tr["paras"]:
         if p["source"] in turns_by_id:
             used.setdefault(p["source"], []).append(p["text"])
     for sid, got in used.items():
-        src = paragraphs(turns_by_id[sid].get("output") or "")
+        text, withheld = passable(turns_by_id[sid], tr["turn"])
+        src = paragraphs(text)
         total = sum(len(x) for x in src) or 1
         carried = set(got)
         left = [x for x in src if x not in carried and not any(x in g or g in x for g in got)]
         out.append({"source": sid, "share": sum(len(x) for x in src if x not in left) / total,
-                    "source_chars": total, "left_out": left[:3]})
+                    "source_chars": total, "left_out": left[:3], "withheld": withheld})
     return out
 
 
@@ -211,6 +239,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     flags: List[Dict[str, Any]] = []  # {kind, weight, turn, line, excerpt}
 
     rows, origin, relays = [], {}, []
+    roles = {t["agent"]: _agent_of(t) for t in allt}
     prev = None
     burst: List[Dict[str, Any]] = []
     for x in win:
@@ -224,8 +253,11 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
             origin.setdefault(who, {}).setdefault(p["origin"], 0)
             origin[who][p["origin"]] += len(p["text"])
         cost = ((t.get("meta") or {}).get("turn_cost_usd")) or 0
-        rows.append(f"| {t['turn_id']} | {t.get('purpose', '')} | {t.get('status', '')} | {len(inp)} | {rep} | "
-                    f"{len(out)} | {int(t.get('duration_s') or 0)} | {cost:.2f} | "
+        est = turn_cost_basis(t) == "estimate"
+        sess = f"resumed #{t.get('session_turn')}" if t.get("resumed_session") else "new"
+        rows.append(f"| {t['turn_id']} | {t.get('purpose', '')} | {t.get('status', '')} | {sess} | "
+                    f"{turn_model(t) or '?'} | {len(inp)} | {rep} | "
+                    f"{len(out)} | {int(t.get('duration_s') or 0)} | {'~' if est else ''}{cost:.2f} | "
                     + ", ".join(f"{k} {v}" for k, v in sorted(mix.items(), key=lambda kv: -kv[1])) + " |")
         if t.get("status") in ("interrupted", "stopped"):  # cut off by a restart; the output is the raw stream
             flags.append({"kind": "interrupted", "weight": 0, "turn": t["turn_id"],
@@ -249,15 +281,20 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
                           "excerpt": ("orch's largest parts: " + " | ".join(f"[{len(x)}] {x[:140]}" for x in own))
                           if own else ""})
         for p in paras:
-            if p["origin"] != "orch" and (p["origin"], who) not in EXPECTED and p["origin"] != who:
+            sender = p["origin"]
+            if sender.startswith("note from "):  # an agent's note passed on from its chat: judged by that agent
+                sender = roles.get(sender[len("note from "):], sender)
+            if p["origin"] != "orch" and (sender, who) not in EXPECTED and sender != who:
                 flags.append({"kind": "unexpected origin", "weight": 3, "turn": t["turn_id"],
                               "line": f"{t['turn_id']}: {who} received text from the {p['origin']} "
                                       f"({p['source']})", "excerpt": clip(p["text"])})
                 break
         rel = [rc for rc in relay_coverage(x, by_id) if by_id[rc["source"]]["agent"] != t["agent"]]
         if rel:
-            relays.append(f"- {t['turn_id']} ⇐ " + ", ".join(f"{rc['source']} {rc['share']:.0%} of "
-                                                              f"{rc['source_chars']}" for rc in rel))
+            relays.append(f"- {t['turn_id']} ⇐ " + ", ".join(
+                f"{rc['source']} {rc['share']:.0%} of {rc['source_chars']}"
+                + (" (withheld by design: " + ", ".join(f"{k} {v}" for k, v in rc["withheld"].items()) + ")"
+                   if rc["withheld"] else "") for rc in rel))
         # bursts: 3+ turns of one agent in a row within 10 minutes, mostly short
         if prev is not None and prev["agent"] == t["agent"] and \
                 (_ts(t.get("started_at")) or 0) - (_ts(prev.get("ended_at")) or 0) < 600:
@@ -314,9 +351,14 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           f"{len(win)} turns, {win[0]['turn'].get('started_at', '')[:16]} to "
           f"{max(x['turn'].get('ended_at') or '' for x in win)[:16]}. Sizes are characters. *repeat*: already in that "
           f"agent's previous message. Origins: the turn output, chat reply (*manager-chat*) or *human* note a "
-          f"paragraph was copied from; *orch* is orch's own text (templates, handovers, reminders).",
-          "", "## Turns", "", "| turn | purpose | status | in | repeat | out | s | $ | origin of the message |",
-          "|---|---|---|---|---|---|---|---|---|", *rows,
+          f"paragraph was copied from; *note from X* is a note agent X passed on from its chat; *orch* is orch's own "
+          f"text (templates, handovers, reminders). *session*: *resumed #n* continues the agent's session at its n-th "
+          f"turn, so the agent still has everything said before in it: a short message there is not a lost task. "
+          f"*$*: the backend's figure; *~* marks Claude Code's own estimate for a model on another provider, priced "
+          f"at Claude rates, which is not what the provider charged — don't judge spend on it.",
+          "", "## Turns", "",
+          "| turn | purpose | status | session | model | in | repeat | out | s | $ | origin of the message |",
+          "|---|---|---|---|---|---|---|---|---|---|---|", *rows,
           "", "## Who received text from whom (chars)", "",
           "| recipient | " + " | ".join(sorted({o for v in origin.values() for o in v})) + " |",
           "|---|" + "---|" * len({o for v in origin.values() for o in v})]
@@ -324,7 +366,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     for who, v in sorted(origin.items()):
         md.append(f"| {who} | " + " | ".join(str(v.get(c, 0)) for c in cols) + " |")
     md += ["", "## Questions raised", "", *(f"- {q}" for q in qs or ["none"])]
-    md += ["", "## Relays (share of each source output that reached the recipient, in chars)", "",
+    md += ["", "## Relays (share of what orch passes on that reached the recipient, in chars; tags such as the "
+               "checklist, and messages for someone else, are withheld by design and listed apart)", "",
            *(relays or ["none"])]
     md += ["", "## Flags (orch's checks; hints, not verdicts)", ""]
     if not flags:
@@ -430,7 +473,7 @@ def run_audit(mon: Any, agent: Any, run_dir: Path, lo: int, hi: int, prompts_see
               should_stop: Any = None, log: Any = None) -> Dict[str, Any]:
     """One audit of rounds lo..hi: build the digest, ask the auditor (a fresh session every time), write its findings
     file and keep a record in <run>/audits/. Never raises for a failed audit; the run goes on regardless."""
-    from .backends import TurnRequest, TurnResult, get_backend
+    from .backends import TurnRequest, TurnResult, run_variants
     from .templates import render
     run_dir = Path(run_dir)
     path = findings_path(agent, run_dir)
@@ -452,7 +495,7 @@ def run_audit(mon: Any, agent: Any, run_dir: Path, lo: int, hi: int, prompts_see
                       cwd=agent.working_dir or mon.working_dir, timeout=agent.timeout, options=agent.backend_options,
                       env=agent.env, context={"purpose": "audit", "monitor": mon.name, "rounds": [lo, hi]})
     try:
-        res = get_backend(agent.backend).run(req, should_stop or (lambda: False))
+        res = run_variants(agent, req, should_stop or (lambda: False))
     except Exception as e:  # an audit never stops the run
         res = TurnResult("error", "", None, stderr=f"{type(e).__name__}: {e}")
     cost = float((res.meta or {}).get("total_cost_usd") or 0)

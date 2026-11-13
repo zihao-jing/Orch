@@ -248,6 +248,9 @@ orch report .orch/runs                         # regenerate HTML
 Pressing Ctrl-C in `orch run` stops cleanly: running agent processes are terminated and the run is marked
 `stopped`, so `--resume` can pick it up later.
 
+Only one `orch run` drives a run at a time: a second `--resume` on a run another process is driving says which
+process holds it and does nothing else (with `--serve` it still shows the board). Stop the first one to take over.
+
 ## The auditor: how the agents talk, not what they do
 
 An agent with `role: auditor` (scaffolded by `orch init --project` in `agents/auditor/`) sits outside the team. Every
@@ -294,7 +297,8 @@ orch audit .                           # audit the last audit_every rounds now (
 - **Two round limits.** `milestone_rounds` (critic) is per milestone: at the limit the manager reviews anyway.
   `max_rounds` (manager) counts every round of the whole run; keep it well above `milestone_rounds`, or the run
   stops in the middle of a milestone (orch warns about this, and the stop message says which limit was hit).
-  Raising either takes effect on `orch run --resume`.
+  Raising either takes effect on `orch run --resume`. A run keeps its own `max_rounds` (in `state.json`): a limit
+  raised with `--max-rounds` stays when you resume without the flag; pass `--max-rounds` again to lower it.
 - **Changing models or backends mid-run** (for cost, or Codex ↔ Claude): edit the agent's `agent.yaml` and resume.
   A changed backend can't resume the old session, so the agent starts a new one with a handover note.
 - **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` sends it again in the same session,
@@ -316,6 +320,10 @@ orch audit .                           # audit the last audit_every rounds now (
   recapped, a preamble, praise. Each default prompt now says to say each point once, skip the recap and keep
   "nothing changed" to a few lines. Long messages cost twice: tokens for the reader, and attention for the next
   agent, who has to find what is new.
+
+More, from auditing a 110-round run and checking every finding against the records (cost meters behind other
+providers' endpoints, messages dropped at gates, what an auditor's digest must say): see
+[`docs/insights-from-audits.md`](docs/insights-from-audits.md).
 
 ## Other setups: one config file, `pipeline` and `llm` modes
 
@@ -367,7 +375,7 @@ monitors:
         task: ...                   # pipeline: the worker's round-1 task
         reviews: [..]               # verifier only
         feedback_to: [..]           # verifier only
-        backend: claude | codex | command | mock
+        backend: claude | codex | agy | command | mock
         backend_options: {...}
         working_dir: ...
         timeout: 1800
@@ -422,17 +430,47 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
   `extra_args`. Exec-only flags such as `--ignore-user-config` and `--full-auto` are not supported by app-server.
   App-server reads normal Codex configuration plus these overrides, uses `approval_policy="never"`, and defaults
   to `workspace-write` if `sandbox` is omitted. It does not automatically approve tool requests.
+* **agy**: the Antigravity CLI, for Gemini models. Runs `agy --output-format json -p <prompt>` and continues sessions with `--conversation <id>` (the id is read from the JSON output). There is no system-prompt flag, so the system prompt goes in front of a session's first message. Options: `model`, `effort`, `mode` (`accept-edits|auto|plan`), `dangerously_skip_permissions`, `sandbox`, `add_dirs`, `agent`, `project`, `settings`, `print_timeout`, `prompt_via` (`arg`, the default, or `stdin`), `extra_args`, `executable`. Sign in once by running `agy` interactively; `agy models` lists the model names. Experimental: the JSON field names are read leniently (`result`/`response`/`text`, `conversation_id`/`session_id`).
 * **command**: wraps any CLI. Options:
   * `command` and an optional `resume_command`, with the placeholders `{session_id} {cwd} {agent} {prompt} {prompt_file} {system_prompt} {system_prompt_file}`
   * `prompt_via: stdin|arg|file`
   * `output_format: text|json` together with `output_field` and `session_field`, or `session_regex`
 * **mock**: a deterministic fake for dry runs and tests. Options: `delay`, `script`, `pass_after`, `done_after`, `fail_turns`, `write_file`.
 
+### Backup models (`fallback`)
+
+Each agent can list backup models, tried in order when a turn still fails after its `retries` (an API error,
+a refusal from the provider, a crash; not a timeout, a stop or a question):
+
+```yaml
+backend: claude
+backend_options: {model: opus, effort: medium, permission_mode: auto}
+retries: 1
+fallback:
+  - sonnet                                   # same backend and settings, another model
+  - {label: deepseek, backend_options: {model: deepseek/deepseek-v4.1-flash},
+     env: {ANTHROPIC_BASE_URL: https://zenmux.ai/api/anthropic, ANTHROPIC_AUTH_TOKEN: ...}}
+  - {backend: agy, backend_options: {model: gemini-3.6-pro, mode: auto}}
+fallback_cooldown: 900                       # seconds to stay on a backup that worked (0 = back to the primary next turn)
+```
+
+* A model name is shorthand for "same backend, same settings, this model".
+* With the same backend, a backup's `backend_options` are merged over the primary's (`null` removes one) and it
+  keeps the primary's `env` unless it gives its own (a given `env` replaces the whole of it). With another
+  backend, both start empty. Each backup may set its own `retries`.
+* A backup on the same backend and endpoint (the same `*_BASE_URL` env values) continues the agent's session.
+  One on another backend or endpoint starts a new session, with the handover notes in front of the message
+  (managed mode) or a note to pick up from the workspace.
+* After a backup works, the agent stays on it for `fallback_cooldown` seconds, then tries its primary again.
+* The turn record lists the model of every attempt (`attempts[].model`, `model`) and each switch (`fallbacks`);
+  the progress log marks a switch with ↪. The auditor and board chats also try the backups (a chat only the
+  ones that can continue its session).
+
 ## Layout
 
 ```
 orch/config.py      schema, defaults merging, *_file includes, validation
-orch/backends.py    claude / codex / command / mock + process runner (timeouts, stop, kill process group)
+orch/backends.py    claude / codex / agy / command / mock + process runner (timeouts, stop, kill process group)
 orch/controller.py  MonitorRunner: pipeline + llm modes, sessions, routing, retries, parallel stages
 orch/recorder.py    run directory, state, events, turn and round records, inbox / STOP control files
 orch/report.py      static HTML viewers

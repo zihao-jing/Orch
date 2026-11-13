@@ -29,6 +29,24 @@ class ConfigError(Exception):
 
 
 @dataclass
+class Variant:
+    """One way to run an agent: its primary model (index 0) or one of its backups, in order."""
+    index: int
+    label: str
+    backend: str
+    options: Dict[str, Any]
+    env: Dict[str, str]
+    retries: int
+
+    @property
+    def session_key(self) -> str:
+        """Variants with the same key can continue each other's sessions (same backend and provider endpoint);
+        a switch to a different key starts a new session."""
+        urls = sorted(f"{k}={v}" for k, v in self.env.items() if k.endswith("_BASE_URL") and v)
+        return "|".join([self.backend] + urls)
+
+
+@dataclass
 class AgentConfig:
     name: str
     role: str
@@ -51,6 +69,21 @@ class AgentConfig:
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
     fresh_session: str = ""  # "milestone": start a new session when each milestone starts (managed mode)
     state_file: str = ""  # managed mode: the agent's working state (agents/<name>/state.md in a project folder)
+    # backup models, tried in order when a turn still fails after its retries: each is a dict with any of
+    # label, backend, backend_options, env, retries (already merged with the primary's settings when loaded)
+    fallback: List[Dict[str, Any]] = field(default_factory=list)
+    fallback_cooldown: float = 900.0  # seconds an agent stays on the backup that worked before trying its primary again
+
+    def variants(self) -> List[Variant]:
+        """The primary model first, then each backup."""
+        out = [Variant(0, _variant_label(self.backend, self.backend_options), self.backend,
+                       dict(self.backend_options), dict(self.env), self.retries)]
+        for i, f in enumerate(self.fallback, 1):
+            b = str(f.get("backend") or self.backend)
+            opts = dict(f.get("backend_options") or {})
+            out.append(Variant(i, str(f.get("label") or _variant_label(b, opts)), b, opts,
+                               dict(f.get("env") or {}), int(f.get("retries", self.retries))))
+        return out
 
     @property
     def called(self) -> str:
@@ -97,7 +130,46 @@ class AgentConfig:
     def public(self) -> Dict[str, Any]:
         d = dict(self.__dict__)
         d["env"] = sorted(self.env)  # don't leak env values into logs
+        d["fallback"] = [{**f, "env": sorted(f.get("env") or {})} for f in self.fallback]
         return d
+
+
+def _variant_label(backend: str, options: Dict[str, Any]) -> str:
+    return f"{backend}:{options['model']}" if options.get("model") else backend
+
+
+def _build_fallback(raw: Any, primary: Dict[str, Any], where: str) -> List[Dict[str, Any]]:
+    """`fallback:` in an agent config: a list of backups, each a model name (same backend and settings, other
+    model) or a mapping with any of label, backend, backend_options, env, retries. With the same backend as the
+    primary, backend_options are merged over the primary's (null removes one) and env is kept unless given;
+    with another backend, both start empty. A given env replaces the primary's whole env."""
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    out = []
+    for j, item in enumerate(items):
+        w = f"{where}: fallback[{j}]"
+        if isinstance(item, str):
+            item = {"backend_options": {"model": item}}
+        if not isinstance(item, dict):
+            raise ConfigError(f"{w} must be a model name or a mapping")
+        unknown = set(item) - {"label", "backend", "backend_options", "env", "retries"}
+        if unknown:
+            raise ConfigError(f"{w}: unknown keys: {', '.join(sorted(unknown))}")
+        backend = str(item.get("backend") or primary["backend"])
+        same = backend == primary["backend"]
+        opts = _deep_merge(primary["backend_options"] if same else {}, dict(item.get("backend_options") or {}))
+        opts = {k: v for k, v in opts.items() if v is not None}
+        if "env" in item:
+            env = {str(k): str(v) for k, v in (item.get("env") or {}).items() if v is not None}
+        else:
+            env = dict(primary["env"]) if same else {}
+        f: Dict[str, Any] = {"backend": backend, "backend_options": opts, "env": env,
+                             "retries": int(item.get("retries", primary["retries"]))}
+        if item.get("label"):
+            f["label"] = str(item["label"])
+        out.append(f)
+    return out
 
 
 @dataclass
@@ -280,14 +352,21 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
     working_dir = _expand(wd, Path(mon_wd)) if wd else mon_wd
     known = {"name", "role", "description", "system_prompt", "task", "backend", "backend_options",
              "working_dir", "timeout", "retries", "env", "reviews", "feedback_to", "display_name",
-             "memory_files", "memory_heading", "fresh_session", "state_file"}
+             "memory_files", "memory_heading", "fresh_session", "state_file", "fallback", "fallback_cooldown"}
     unknown = set(merged) - known
     if unknown:
         raise ConfigError(f"{where} ({name}): unknown keys: {', '.join(sorted(unknown))}")
     fresh = str(merged.get("fresh_session", "") or "").strip().lower()
     if fresh not in ("", "never", "milestone"):
         raise ConfigError(f"{where} ({name}): fresh_session must be 'milestone' or 'never'")
+    primary = {"backend": str(merged.get("backend", "claude")),
+               "backend_options": dict(merged.get("backend_options") or {}),
+               "env": {str(k): str(v) for k, v in (merged.get("env") or {}).items()},
+               "retries": int(merged.get("retries", 0))}
+    fallback = _build_fallback(merged.get("fallback"), primary, f"{where} ({name})")
     return AgentConfig(
+        fallback=fallback,
+        fallback_cooldown=float(merged.get("fallback_cooldown", AgentConfig.fallback_cooldown) or 0),
         name=name,
         role=role,
         description=str(merged.get("description", "") or "").strip(),
@@ -500,7 +579,7 @@ def load_config(path: str) -> Config:
             workspace=workspace,
             working_dir=working_dir,
             goal=str(mraw.get("goal", "") or "").strip(),
-            max_rounds=int(mraw.get("max_rounds", 200)),
+            max_rounds=int(mraw.get("max_rounds", 50)),
             controller=controller,
             agents=agents,
             output_dir=_expand(mraw["output_dir"], base) if mraw.get("output_dir") else output_dir,
@@ -554,6 +633,10 @@ def validate(cfg: Config, check_paths: bool = False) -> List[str]:
             if a.backend not in BACKENDS:
                 raise ConfigError(f"{where}: agent {a.name!r} uses unknown backend {a.backend!r}; "
                                   f"available: {', '.join(BACKENDS)}")
+            for j, f in enumerate(a.fallback):
+                if f["backend"] not in BACKENDS:
+                    raise ConfigError(f"{where}: agent {a.name!r} fallback[{j}] uses unknown backend "
+                                      f"{f['backend']!r}; available: {', '.join(BACKENDS)}")
             if check_paths and not Path(a.working_dir).is_dir():
                 raise ConfigError(f"{where}: agent {a.name!r} working_dir does not exist: {a.working_dir}")
         if c.mode == "pipeline":

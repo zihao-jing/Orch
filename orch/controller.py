@@ -33,7 +33,7 @@ from .backends import StopRequested, TurnRequest, TurnResult, get_backend
 from .config import AgentConfig, MonitorConfig
 from .recorder import Recorder, now_iso, read_json
 from . import tags as T
-from .report import CHECKBOX
+from .report import CHECKBOX, cost_basis, endpoint_host
 from .templates import render
 
 TERMINAL = ("completed", "failed", "max_rounds_reached", "needs_human")
@@ -166,8 +166,10 @@ class MonitorRunner:
         return super().__new__(cls)
 
     def __init__(self, mon: MonitorConfig, global_stop: Optional[threading.Event] = None,
-                 resume: bool = False, log: Optional[Callable[[str], None]] = None):
+                 resume: bool = False, log: Optional[Callable[[str], None]] = None,
+                 max_rounds_given: bool = False):
         self.mon = mon
+        self.max_rounds_given = max_rounds_given  # --max-rounds on the command line: it wins over the run's own
         self.global_stop = global_stop or threading.Event()
         self.resume = resume
         self._log = log or (lambda s: print(s, flush=True))
@@ -203,9 +205,18 @@ class MonitorRunner:
         if rec is None:
             rec = Recorder.create(m.output_dir, m.name, snap)
             self.rec = rec
+            rec.claim()
             self.log(f"new run → {rec.run_dir}")
         else:
             self.rec = rec
+            holder = rec.claim()
+            if holder:
+                # Another controller drives this run. Touching its state or answering its gates would duplicate
+                # turns and overwrite its status; the board (if served) still works through the run folder.
+                self.log(f"{rec.run_dir.name} is already being run by {holder}; not starting a second controller "
+                         f"(stop that one first to resume here)")
+                return "busy"
+            self.keep_max_rounds()
             (rec.run_dir / "STOP").unlink(missing_ok=True)
             rec.event("run_resumed", from_round=rec.state.get("completed_round", 0) + 1)
             rec.progress(f"---\n\n**Resumed** {now_iso()} after round {rec.state.get('completed_round', 0)}")
@@ -238,10 +249,26 @@ class MonitorRunner:
         rec.progress(f"**Run finished: {status}** at {now_iso()}")
         rec.refresh_reports()
         self.log(f"finished: {status}  ({rec.run_dir})")
+        rec.release()
         if status == "needs_human" and answered:
             self.resume = True
             return self.run()
         return status
+
+    def keep_max_rounds(self) -> None:
+        """On resume: the round limit is the run's own (recorded in state.json), so a resume without --max-rounds
+        does not fall back to a lower config value. A higher config value still raises it; --max-rounds sets it
+        either way. The limit in force is written back to state.json."""
+        m, rec = self.mon, self.rec
+        stored = rec.state.get("max_rounds")
+        limit = m.max_rounds
+        if not self.max_rounds_given and isinstance(stored, int) and stored > limit:
+            self.log(f"round limit {stored} kept from this run (config says {limit}; use --max-rounds to change it)")
+            limit = stored
+        if limit != m.max_rounds:
+            self.mon = dataclasses.replace(m, max_rounds=limit)
+        if stored != limit:
+            rec.set(max_rounds=limit)
 
     def switch_backends(self) -> None:
         """On resume: an agent whose backend changed in its config can't resume its old session (a Claude
@@ -249,8 +276,8 @@ class MonitorRunner:
         for a in self.mon.agents:
             sess = self.st["sessions"].get(a.name) or {}
             was = sess.get("backend")
-            if not sess.get("session_id") or not was or was == a.backend:
-                continue
+            if not sess.get("session_id") or not was or was in {v.backend for v in a.variants()}:
+                continue  # still one of its models (a backup may be in use); a turn on another provider starts afresh
             prev = {k: v for k, v in sess.items() if k != "previous"}
             self.rec.update_session(a.name, session_id=None, turns=0, backend=a.backend,
                                     previous=(sess.get("previous") or []) + [prev])
@@ -626,10 +653,10 @@ class MonitorRunner:
                 # save the session the moment the backend names it, so a restart resumes it without guessing
                 record["session_id"] = str(ev["s"])
                 rec.write_turn(record)
-                rec.update_session(agent.name, session_id=record["session_id"], backend=agent.backend, role=agent.role)
+                rec.update_session(agent.name, session_id=record["session_id"], backend=v.backend, role=agent.role,
+                                   session_key=v.session_key, model=v.label)
             rec.live(record["turn_id"], ev)
         self.log(f"r{rnd} ▶ {agent.name} ({purpose}{', resume ' + sid[:8] if sid else ', new session'})")
-        backend = get_backend(agent.backend)
         t0 = time.monotonic()
         res: TurnResult = TurnResult("error", "", sid)
         attempts: List[Dict[str, Any]] = []
@@ -638,9 +665,30 @@ class MonitorRunner:
         lock.__enter__()
         hit: List[str] = []
         cancel = self.turn_cancel(agent, hit)
-        attempt, urgent_send = 0, ""
+        chain = agent.variants()
+        vi = self.start_variant(agent, len(chain))
+        sess_key = sess.get("session_key") or (chain[0].session_key if sess.get("backend", agent.backend) == agent.backend
+                                               else str(sess.get("backend")))
+        v = chain[vi]
+        backend = get_backend(v.backend)
+        attempt, urgent_send, entering = 0, "", True
         last_pe = ""  # the provider's message from the last attempt, if it refused the request
-        while attempt <= agent.retries:
+        while True:
+            if entering:  # the primary model, or a backup taking over this turn
+                entering = False
+                v = chain[vi]
+                backend = get_backend(v.backend)
+                host = endpoint_host(v.env)
+                record.update(backend=v.backend, model=v.label, endpoint=host or None,
+                              cost_basis=cost_basis(v.backend, [str(v.options.get("model") or "")], host))
+                if sid and v.session_key != sess_key:  # another provider can't continue this session: a new one
+                    sid = None
+                    note = self.fresh_session_note(agent)
+                    if note:
+                        prompt = f"{note}\n\n{prompt}"
+                    record.update(session_id=None, resumed_session=False, input=prompt)
+                    rec.write_turn(record)
+                sess_key = v.session_key
             send = prompt
             if urgent_send:  # an urgent message cut in: the same session carries on with it
                 send, urgent_send = urgent_send, ""
@@ -651,7 +699,7 @@ class MonitorRunner:
             req = TurnRequest(
                 agent=agent.name, role=agent.role, prompt=send, system_prompt=record["system_prompt"],
                 session_id=sid, cwd=agent.working_dir, timeout=agent.timeout,
-                options=agent.backend_options, env=agent.env,
+                options=v.options, env=v.env,
                 context={"round": rnd, "purpose": purpose, "monitor": self.mon.name,
                          "roster": [a.name for a in self.mon.agents], **(extra or {})},
                 on_event=live_event,
@@ -694,17 +742,30 @@ class MonitorRunner:
             reason = pe or reason
             if st_ != res.status:
                 res = dataclasses.replace(res, status=st_)
-            attempts.append({"attempt": attempt + 1, "status": res.status, "exit_code": res.exit_code,
+            attempts.append({"attempt": attempt + 1, "model": v.label, "status": res.status, "exit_code": res.exit_code,
                              "reason": reason})
             if res.status == "needs_human" and not self.questions_pause:
                 res = dataclasses.replace(res, status="ok")  # handled by the caller (goes one level up)
                 record["asked"] = reason
             if res.status in ("ok", "stopped", "needs_human", "timeout") or self.should_stop():
                 break  # a timed-out turn is not re-run from scratch (it may have been running a long job)
-            self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} → {res.status}" + (f" ({pe})" if pe else ""))
-            if pe and attempt < agent.retries and not self.should_stop():
-                self.wait_provider(agent, pe)
-            attempt += 1
+            self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} ({v.label}) → {res.status}" + (f" ({pe})" if pe else ""))
+            if attempt < v.retries:
+                if pe:
+                    self.wait_provider(agent, pe)
+                attempt += 1
+                continue
+            if vi + 1 >= len(chain):
+                break
+            nxt = chain[vi + 1]
+            record.setdefault("fallbacks", []).append({"at": now_iso(), "from": v.label, "to": nxt.label,
+                                                       "reason": reason or res.status})
+            rec.event("fallback", turn=record["turn_id"], agent=agent.name, old=v.label, new=nxt.label,
+                      reason=reason or res.status)
+            rec.progress(f"↪ `{record['turn_id']}` **{agent.name}**: `{v.label}` failed ({reason or res.status}); "
+                         f"switching to backup `{nxt.label}`")
+            self.log(f"r{rnd} ↪ {agent.name}: {v.label} failed, switching to backup {nxt.label}")
+            vi, attempt, entering = vi + 1, 0, True
         lock.__exit__(None, None, None)
         if res.status == "ok":
             for m in updates:
@@ -725,8 +786,12 @@ class MonitorRunner:
         )
         if last_pe:
             record["provider_error"] = last_pe
+        record["cost_basis"] = cost_basis(v.backend, [str(v.options.get("model") or "")] + list(res.meta.get("models") or []),
+                                          record.get("endpoint") or "", res.stderr or "")
+        self.note_variant(agent, v, res.status)
         if res.session_id:
-            rec.update_session(agent.name, session_id=res.session_id, backend=agent.backend, role=agent.role,
+            rec.update_session(agent.name, session_id=res.session_id, backend=v.backend, role=agent.role,
+                               session_key=v.session_key, model=v.label,
                                turns=int(sess.get("turns", 0)) + 1, last_turn=record["turn_id"],
                                last_status=res.status)
         rec.write_turn(record)
@@ -774,6 +839,34 @@ class MonitorRunner:
         return results
 
     # ------------------------------------------------------------------ helpers
+
+    def start_variant(self, agent: AgentConfig, n: int) -> int:
+        """Which of the agent's models a turn starts on: the backup that last worked while its cooldown lasts,
+        otherwise the primary."""
+        fb = (self.st.get("fallback") or {}).get(agent.name) or {}
+        i = int(fb.get("index", 0) or 0)
+        if 0 < i < n and time.time() < float(fb.get("until", 0) or 0):
+            return i
+        return 0
+
+    def note_variant(self, agent: AgentConfig, v: Any, status: str) -> None:
+        """Remember a backup that worked, so the next turns use it for `fallback_cooldown` seconds; a turn that
+        worked on the primary clears that."""
+        if status != "ok":
+            return
+        st = self.st.setdefault("fallback", {})
+        if v.index and agent.fallback_cooldown > 0:
+            if (st.get(agent.name) or {}).get("index") != v.index:
+                self.rec.progress(f"↪ **{agent.name}** stays on backup `{v.label}` for the next "
+                                  f"{agent.fallback_cooldown:g}s before trying its primary model again")
+            st[agent.name] = {"index": v.index, "label": v.label, "until": time.time() + agent.fallback_cooldown}
+        else:
+            st.pop(agent.name, None)
+        self.rec.save()
+
+    def fresh_session_note(self, agent: AgentConfig) -> str:
+        """Put in front of the prompt when a backup on another provider has to start a new session."""
+        return self.tpl("backend_switched", agent=agent.called, cwd=agent.working_dir).strip()
 
     def wait_provider(self, agent: AgentConfig, reason: str) -> None:
         """Pause before re-running a turn the provider refused; a stop request ends the wait."""

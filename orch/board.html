@@ -125,6 +125,10 @@ details.round>summary::-webkit-details-marker{display:none}
 details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]>summary:before{content:"▾"}
 .rb{padding:0 12px 10px}
 .tools{font:11.5px/1.5 ui-monospace,Menlo,monospace;color:var(--mute);margin:4px 0}
+/* messages: everything passed between people and agents (conversation, transfer, check-in, warning) */
+.mfilter{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.mrow{padding:8px 0;border-bottom:1px solid #8883}
+.mh{font-size:12px;opacity:.75;margin-bottom:4px}
 /* chat */
 .qthread{max-height:340px;overflow-y:auto;margin:8px 0;padding:6px 4px 0;border-top:1px solid var(--grid)}
 .chat{display:flex;flex-direction:column;height:min(70vh,720px)}
@@ -133,6 +137,23 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
 .cm .b{border-radius:12px;padding:8px 11px;background:var(--surface);border:1px solid var(--ring)}
 .cm.me .b{background:var(--you-bg);border-color:transparent}
 .cm .w{font-size:11px;color:var(--mute);margin:0 4px 2px}
+.cm.route .b{border-style:dashed;border-color:var(--you)}
+/* a <message> an agent passed on, folded where it was written, with what became of it */
+details.route{border:1px dashed var(--you);border-radius:8px;margin:8px 0;padding:0 10px;background:var(--surface)}
+details.route>summary{cursor:pointer;list-style:none;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;padding:6px 0;font-size:12.5px}
+details.route>summary::-webkit-details-marker{display:none}
+details.route>summary:before{content:"▸";color:var(--mute)}details.route[open]>summary:before{content:"▾"}
+details.route .rto{color:var(--you);font-weight:600}
+details.route .rs{color:var(--ink2)}details.route .rs.ok{color:var(--good-ink)}details.route .rs.bad{color:var(--crit-ink)}details.route .rs.wait{color:var(--warn-ink)}
+details.route .pv{color:var(--mute);flex:1 1 200px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+details.route[open] .pv{display:none}
+details.route>.md{padding:0 0 8px}
+.recv{font-size:12px;color:var(--mute);margin:2px 0 6px}
+.rchip{font-size:11.5px;padding:0 6px;border-radius:999px;border:1px solid var(--ring);color:var(--ink2);white-space:nowrap}
+.rchip.ok{color:var(--good-ink)}.rchip.wait{color:var(--warn-ink)}.rchip.bad{color:var(--crit-ink);border-color:var(--crit)}
+a[data-goto]{color:inherit;text-decoration:underline dotted}
+details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
+.cm.route .w{color:var(--you)}
 .empty{color:var(--mute);font-size:13px;padding:6px 0}
 .tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}.tabs button.on{background:var(--ink);color:var(--page);border-color:var(--ink)}
 @media (max-width:600px){.wrap{padding:12px 16px 40px}.tile .v{font-size:18px}}
@@ -162,6 +183,7 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
    </div></div>
    <div class="card" id="report"></div>
    <div class="card"><h2>Manager ↔ critic</h2><div id="thread"></div></div>
+  <div class="card" id="messages-card"><h2>Messages</h2><div class="mfilter" id="mfilter"></div><div id="messages"></div></div>
    <div class="card" id="worker-updates-card" hidden><h2>Updates to running workers</h2><div id="worker-updates"></div></div>
    <div class="card"><h2>Critic ↔ worker, round by round</h2><div id="rounds"></div></div>
    <div class="card"><h2>Questions</h2><div id="qs"></div></div>
@@ -296,6 +318,7 @@ function render(){
   document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderTiles(mg); renderSteps(mg); renderCharts(mg); renderReport(mg);
   renderThread(mg); renderWorkerUpdates(); renderRounds(mg); renderQs(); renderDecisions(); renderAudit(); renderChat();
+  renderMessages();
   Object.keys(live).forEach(paintLive);
 }
 
@@ -316,7 +339,8 @@ function renderTiles(mg){
     ['Milestones', `${done}<span class="mute" style="font-size:15px"> / ${mss.length||'–'}</span>`, mss[mg.ms] ? 'on: ' + esc(mss[mg.ms].title) : ''],
     ['Rounds', esc(D.round||0), 'worker ↔ critic'],
     ['Questions', `${openQ}<span class="mute" style="font-size:15px"> open</span>`, mine ? `<b style="color:var(--you)">${mine} for you</b>` : `${qs.length} asked in all`],
-    ['Cost', D.cost ? '$' + Number(D.cost).toFixed(2) : '—', ((D.turn_counts||{}).total||0) + ' turns']];
+    ['Cost', D.cost ? '$' + Number(D.cost).toFixed(2) : '—', ((D.turn_counts||{}).total||0) + ' turns'
+      + (D.cost_estimate ? `<br><span title="Claude Code prices every model at its own Claude rates. For turns on another provider's endpoint or a model it does not know, its dollars are a guess, not what the provider charged.">incl. ~$${Number(D.cost_estimate).toFixed(2)} estimated ⓘ</span>` : '')]];
   setHTML($('tiles'), tiles.map(([k,v,s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join(''));
 }
 
@@ -359,7 +383,7 @@ function renderNeeds(mg){
       (forMe(q.assumption) ? `<div class="rec"><div class="k">${esc(called(q.from))}'s recommendation</div><div class="md">${md(forMe(q.assumption))}</div></div>` : '');
     if (th.length) h += '<div class="qthread">' + th.map(c => c.role === 'human'
         ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}${c.settle ? ' · settle' : ''}</div><div class="b">${md(c.text)}</div></div>`
-        : `<div class="cm"><div class="w">${esc(called(q.from))} · ${tm(c.ts)}${c.settle ? ' · what we agreed' : ''}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}</div><div class="b">${c.status === 'running' ? `<div data-live="${esc(c.id)}"></div>` : md(c.text)}</div></div>`).join('') + '</div>';
+        : replyBubbles(c, called(q.from), c.settle ? ' · what we agreed' : '')).join('') + '</div>';
     if (done){
       h += `<div class="mute" style="font-size:12px;margin-top:6px"><span class="pill p-good">✓ settled</span> ${esc(called('critic'))} gets this when the current turn ends.</div>`;
     } else if (settling){
@@ -528,14 +552,17 @@ function fold(t, defOpen){
   const text = run ? '' : outputOf(t);
   if (!run && text === undefined && (open || full)) ensureFull(t.turn_id);
   const shown = text === undefined ? (t.output||'') : text;  // until the rest has arrived, the preview
+  const rows = (D.routes||{})[t.turn_id] || [];
   const body = run ? `<div data-live="${esc(t.turn_id)}"></div>`
-    : `<div class="md${long && !full ? ' clamp' : ''}">${md(shown || '(empty)')}</div>`
-      + (long ? `<button class="more" data-more="${id}">${full ? 'Show less' : 'Show all (' + Math.round((t.output_len||0)/1000) + 'k characters)'}</button>` : '');
+    : `<div class="md${long && !full ? ' clamp' : ''}">${md(routedBlocks(shown).plain || (rows.length ? '' : shown) || '(empty)')}</div>`
+      + (long ? `<button class="more" data-more="${id}">${full ? 'Show less' : 'Show all (' + Math.round((t.output_len||0)/1000) + 'k characters)'}</button>` : '')
+      + routeCards(shown, rows, t.turn_id, text !== undefined);
   return `<details class="fold${to==='human'?' to-human':''}" data-t="${esc(t.turn_id)}"${open?' open':''}><summary>
     <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
     <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
     ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
-    <span class="pv">${esc(run ? 'writing…' : preview(t.output))}</span></summary><div class="fb">${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;
+    ${t.model ? `<span class="mute mono" title="${t.cost_basis === 'estimate' ? 'cost is Claude Code\'s estimate, not the provider\'s price' : 'model'}">${esc(t.model)}${t.cost != null ? ' · ' + (t.cost_basis === 'estimate' ? '~' : '') + '$' + Number(t.cost).toFixed(2) : ''}</span>` : ''}
+    ${routeChips(rows)}<span class="pv">${esc(run ? 'writing…' : headline(t.output))}</span></summary><div class="fb">${receivedLine(t.turn_id)}${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;
 }
 const openMsgs = new Set(), shutMsgs = new Set();
 const LIMIT = {thread: 8, rounds: 5}, shown = {thread: 8, rounds: 5};  // newest first; older ones behind a link
@@ -604,11 +631,15 @@ function renderDecisions(){  // the register: everything settled, newest first; 
   const ds = (D.decisions||[]).slice().reverse();
   $('dec-h').textContent = 'Decisions' + (ds.length ? ` · ${ds.length} · binding, the later one holds` : '');
   if (!ds.length){ setHTML($('decs'), '<div class="empty">Nothing settled yet. Your answers and notes, gate messages and the manager\'s answers to the critic are listed here and given to the agents in full at the start of each milestone.</div>'); return; }
-  setHTML($('decs'), ds.map(d => `<details class="fold" data-d="${esc(d.id)}"${openDecs.has(d.id) ? ' open' : ''}><summary>
+  const shown = ds.slice(0, decPage), left = ds.length - shown.length;  // paged like the messages: 15 at a time
+  setHTML($('decs'), shown.map(d => `<details class="fold" data-d="${esc(d.id)}"${openDecs.has(d.id) ? ' open' : ''}><summary>
     <span class="mono">${esc(d.id)}</span><span class="mute">${tm(d.at)}</span><b>${esc(d.by === 'you' ? 'you' : called(d.by))}</b>
     <span class="pill">${esc(d.source)}</span><span class="pv">${esc(preview(d.text))}</span></summary>
-    <div class="fb"><div class="md">${md(d.text)}</div></div></details>`).join(''));
+    <div class="fb"><div class="md">${md(d.text)}</div></div></details>`).join('')
+    + (left > 0 ? `<div class="older"><button class="more" data-dpage="1">Show ${Math.min(15, left)} older (${left} more)</button></div>` : ''));
 }
+let decPage = 15;
+$('decs').addEventListener('click', e => { if (e.target.closest('[data-dpage]')) { decPage += 15; renderDecisions(); } });
 const openDecs = new Set();
 const openAudits = new Set();
 function renderAudit(){  // the auditor (outside the team): its findings file and every audit it has made, newest first
@@ -637,6 +668,32 @@ $('decs').addEventListener('toggle', e => { const d = e.target; if (!d.dataset |
 function mgrName(){ const m = (D.agents||[]).find(a => a.role === 'manager'); return m ? m.name : 'manager'; }
 let chatWith = null;  // the agent name being talked to; null = the manager
 function talkable(){ return (D.agents||[]).filter(a => ['manager','verifier','worker'].includes(a.role)); }
+let msgFilter = 'all', msgPage = 15;  // how many of the filtered messages are shown; grows with "Show older"
+const openFeed = new Set();  // folded messages the reader opened (kept across the page's refreshes)
+const MSG_KINDS = {all: 'All', conversation: 'Conversations', transfer: 'Transfers', 'check-in': 'Check-ins', warning: 'Warnings'};
+function renderMessages(){  // every message the run passed on, newest first, folded and paged like the decisions
+  const all = D.messages || [];
+  setHTML($('mfilter'), Object.keys(MSG_KINDS).map(k => {
+    const n = k === 'all' ? all.length : all.filter(m => m.kind === k).length;
+    return `<button class="sm${msgFilter === k ? ' on' : ''}" data-mf="${k}">${esc(MSG_KINDS[k])} (${n})</button>`; }).join(''));
+  const rows = all.filter(m => msgFilter === 'all' || m.kind === msgFilter).slice().reverse();
+  if (!rows.length){ setHTML($('messages'), '<div class="empty">No messages of this kind yet.</div>'); return; }
+  const shown = rows.slice(0, msgPage), left = rows.length - shown.length;
+  setHTML($('messages'), shown.map(m => {
+    const id = m.id || `${m.ts}|${m.from}|${m.to}`;
+    const tags = [m.kind, m.label, m.urgent ? '⚡ urgent' : '', m.status || ''].filter(Boolean).map(esc).join(' · ');
+    const probs = (m.problems || []).map(p => `<div class="w" style="color:#b45309">⚠ ${esc(p)}</div>`).join('');
+    return `<details class="fold" data-m="${esc(id)}"${openFeed.has(id) ? ' open' : ''}><summary>
+      <span class="pill">${tags}</span><b>${esc(m.from)}</b><span class="mute">→ ${esc(m.to)}</span><span class="mute">${tm(m.ts)}</span>
+      <span class="pv">${esc(preview(m.text))}</span></summary>${probs}<div class="fb"><div class="md">${routedHTML(m.text, m.turn ? (D.routes||{})[m.turn] : chatRoutes(m.id), m.turn || m.id)}</div></div></details>`;
+  }).join('') + (left > 0 ? `<div class="older"><button class="more" data-mpage="1">Show ${Math.min(msgPage, left)} older (${left} more)</button></div>` : ''));
+}
+$('mfilter').addEventListener('click', e => { const b = e.target.closest('[data-mf]'); if (!b) return;
+  msgFilter = b.dataset.mf; msgPage = 15; renderMessages(); });
+$('messages').addEventListener('click', e => { const b = e.target.closest('[data-mpage]'); if (!b) return;
+  msgPage += 15; renderMessages(); });
+$('messages').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.m) return;
+  d.open ? openFeed.add(d.dataset.m) : openFeed.delete(d.dataset.m); }, true);
 function renderChat(){
   const cl = $('chatlog'), atBottom = cl.scrollHeight - cl.scrollTop - cl.clientHeight < 40;
   const mg = mgrName(), sel = $('chatwho'), opts = talkable();
@@ -658,12 +715,108 @@ function renderChat(){
   const olderBtn = moreFlag ? '<div class="older"><button class="more" data-chatmore="1">Show older messages</button></div>' : '';
   const h = list.length ? list.map(c => c.role === 'human'
       ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}</div><div class="b">${md(c.text)}</div></div>`
-      : `<div class="cm"><div class="w">${esc(called(c.who || c.with || mg))} · ${tm(c.ts)}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}</div><div class="b">${c.status === 'running' ? `<div data-live="${esc(c.id)}"></div>` : md(c.text)}</div>${relayLine(c.id)}</div>`).join('')
+      : replyBubbles(c, called(c.who || c.with || mg), '', problemLine(c) + relayLine(c.id))).join('')
     : (chatWith === mg
       ? `<div class="empty">Ask ${esc(who2)} how things stand, why a milestone was sent back, or tell them what to prioritise. If they want ${esc(who('critic'))} to change course, they will say so and it is passed on.</div>`
       : `<div class="empty">Talk to ${esc(who2)} directly: a question, a clarification, or a change of approach. Its reply appears here.</div>`);
   seenReplies(list.filter(c => c.role !== 'human' && c.status !== 'running').length);
   setHTML(cl, olderBtn + h); cl._stick = atBottom || cl._first === undefined; cl._first = 1; if (cl._stick) cl.scrollTop = cl.scrollHeight;
+}
+function routedBlocks(text){  // a reply split into what it says to you and each <message to="…"> block it passes on
+  const blocks = [], re = /<message\b([^>]*)>([\s\S]*?)(?:<\/message\s*>|$)/gi;
+  const plain = String(text||'').replace(re, (_, attrs, body) => {
+    const t = attrs.match(/\bto\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i) || [];
+    const to = (t[1] ?? t[2] ?? t[3] ?? '').trim();
+    blocks.push({to: to.replace(/^the\s+/i, ''), urgent: /urgent\s*=\s*["']?(yes|true|1|now)/i.test(attrs), body: body.trim()});
+    return '\n';
+  });
+  return {plain: plain.trim(), blocks};
+}
+const openRoutes = new Set();  // cards opened by hand, kept open across refreshes
+function routeStatus(r){  // what became of one passed-on message, as a line of HTML ('' when orch has no record)
+  if (!r || !r.status) return ['', ''];
+  const to = esc(called(r.to)), link = id => `<a href="#" data-goto="${esc(id)}">${esc(id)}</a>`;
+  switch (r.status){
+    case 'you': return ['ok', 'for you'];
+    case 'read': return ['ok', `✓ read in ${link(r.turn)}${r.purpose ? ' (' + esc(r.purpose) + ')' : ''}`
+      + (r.how === 'cut in' ? ', cut into the running turn' : r.how === 'live' ? ', sent into the running turn' : '')
+      + (r.turn_status === 'running' ? ', running now' : '') + (r.at ? ' · ' + tm(r.at) : '')];
+    case 'waiting': return ['wait', r.urgent ? `⚡ waiting: urgent, cuts into ${to}'s running turn` : `⏳ waiting for ${to}'s next turn`];
+    case 'unseen': return ['bad', `? not found in the prompts of ${to}'s ${r.later} later turn${r.later === 1 ? '' : 's'}`];
+    case 'superseded': return ['wait', `↷ not sent: ${esc(r.reason || 'a later message replaced it')}${r.turn ? ' (' + link(r.turn) + ')' : ''}`];
+    case 'unknown': return ['bad', `⚠ sent into ${to}'s running turn${r.turn ? ' ' + link(r.turn) : ''}, not confirmed`];
+    case 'failed': return ['bad', `⚠ not delivered: ${esc(r.problem || '')}`];
+  }
+  return ['', esc(r.status)];
+}
+function chatRoutes(id){  // a chat reply's passed-on messages, from the inbox notes they became
+  return ((D.relays||{})[id] || []).map(r => r.status === 'delivered'
+    ? Object.assign({}, r, {status: r.turn ? 'read' : 'waiting'}) : r);
+}
+function routeCards(text, rows, src, complete){  // each <message> a reply passed on, as a folded card with its status
+  const blocks = complete ? routedBlocks(text).blocks : [];
+  const byI = new Map((rows||[]).map((r, k) => [r.i ?? k, r]));
+  const n = complete ? blocks.length : (rows||[]).length;
+  let h = '';
+  for (let i = 0; i < n; i++){
+    const b = complete ? blocks[i] : null, r = complete ? byI.get(i) : rows[i];
+    const rawTo = b ? b.to : (r.to || ''), you = /^you$/i.test(rawTo) || (r && r.status === 'you');
+    const key = src + ':' + i, [cls, st] = you ? ['ok', 'for you'] : routeStatus(r);
+    const name = you ? 'you' : (r && r.to ? called(r.to) : who(rawTo));
+    const urgent = b ? b.urgent : !!(r && r.urgent);
+    const body = b ? md(b.body) : `<div class="mute" data-loadturn="${esc(src)}">Loading the message…</div>`;
+    h += `<details class="route" data-route="${esc(key)}" data-src="${esc(src)}"${(you && b) || openRoutes.has(key) ? ' open' : ''}><summary>`
+      + `<span class="rto">→ to ${esc(name)}${urgent ? ' (urgent)' : ''}</span>`
+      + (st ? `<span class="rs ${cls}">${st}</span>` : '')
+      + `<span class="pv">${esc(b ? preview(b.body) : (r.preview || ''))}</span></summary><div class="md">${body}</div></details>`;
+  }
+  return h;
+}
+function routedHTML(text, rows, src){  // a whole reply: its own text, then the cards
+  const {plain, blocks} = routedBlocks(text);
+  return blocks.length ? md(plain) + routeCards(text, rows, src, true) : md(text || '(empty)');
+}
+function headline(text){  // a folded reply's one-line preview: its own words, else the first message it passed on
+  const {plain, blocks} = routedBlocks(text);
+  return preview(plain || (blocks[0] ? blocks[0].body : '') || text);
+}
+const RCHIP = {read: ['ok', '✓'], you: ['ok', ''], waiting: ['wait', '⏳'], superseded: ['wait', '↷'], unseen: ['bad', '?'], unknown: ['bad', '⚠'], failed: ['bad', '⚠']};
+function routeChips(rows){  // the folded turn's header: one chip per message it passed on
+  return (rows||[]).filter(r => r.status !== 'you').map(r => { const [cls, icon] = RCHIP[r.status] || ['', ''];
+    const tip = routeStatus(r)[1].replace(/<[^>]+>/g, '');
+    return `<span class="rchip ${cls}" title="${esc(tip)}">✉ ${esc(called(r.to))} ${icon}</span>`; }).join('');
+}
+function receivedLine(id){  // on the recipient's side: which earlier messages this turn's prompt carries
+  const rs = (D.received||{})[id]; if (!rs || !rs.length) return '';
+  return `<div class="recv">↳ Its prompt carried ${rs.map(x => `the message from ${esc(called(x.from))} in <a href="#" data-goto="${esc(x.turn)}">${esc(x.turn)}</a>`).join(', ')}</div>`;
+}
+document.addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.route) return;
+  d.open ? openRoutes.add(d.dataset.route) : openRoutes.delete(d.dataset.route);
+  if (d.open && d.querySelector('[data-loadturn]')) ensureFull(d.dataset.src); }, true);
+document.addEventListener('click', e => {  // jump to a turn: open its round and its fold, show it, flash it
+  const a = e.target.closest('a[data-goto]'); if (!a) return; e.preventDefault();
+  const id = a.dataset.goto, t = (D.turns||[]).find(x => x.turn_id === id); if (!t) return;
+  openMsgs.add(id); shutMsgs.delete(id);
+  if (t.round != null){ openRounds.add(t.round); openRounds.delete(-t.round - 1); }
+  const q = `details.fold[data-t="${CSS.escape(id)}"]`;
+  if (!document.querySelector(q)){ shown.rounds = shown.thread = 1e9; tab = 'all'; }
+  render();
+  const el = document.querySelector(q); if (!el) return;
+  for (let p = el; p; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true;
+  el.scrollIntoView({block: 'start', behavior: 'smooth'}); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600);
+});
+function replyBubbles(c, name, note, tail){  // one agent reply: its own text, then each message it sent on, as separate bubbles
+  const head = `${esc(name)} · ${tm(c.ts)}${note || ''}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}`;
+  if (c.status === 'running') return `<div class="cm"><div class="w">${head}</div><div class="b"><div data-live="${esc(c.id)}"></div></div></div>`;
+  const {plain, blocks} = routedBlocks(c.text);
+  let h = '';
+  if (plain || !blocks.length) h += `<div class="cm"><div class="w">${head}</div><div class="b">${md(plain || c.text || '')}</div></div>`;
+  for (const b of blocks)
+    h += `<div class="cm route"><div class="w">${plain || blocks.indexOf(b) ? '' : head + ' · '}→ to ${esc(who(b.to))}${b.urgent ? ' (urgent)' : ''}</div><div class="b">${md(b.body)}</div></div>`;
+  return h + (tail ? `<div class="cm">${tail}</div>` : '');
+}
+function problemLine(c){  // <message> blocks in this reply that orch could not send
+  return (c.problems||[]).map(p => `<div class="w" style="color:#b45309">⚠ ${esc(p)}</div>`).join('');
 }
 function relayLine(id){  // what became of the messages this reply passed on
   const rs = (D.relays||{})[id]; if (!rs || !rs.length) return '';

@@ -1,5 +1,6 @@
 """End-to-end tests using the mock and command backends. Run: python -m unittest discover tests"""
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -15,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 from orch.config import ConfigError, load_config  # noqa: E402
 from orch.backends import TurnResult  # noqa: E402
 from orch.controller import MonitorRunner, provider_error, relayed  # noqa: E402
-from orch.recorder import read_json  # noqa: E402
+from orch.recorder import Recorder, read_json  # noqa: E402
 from orch import cli  # noqa: E402
 
 
@@ -680,7 +681,7 @@ class TestManaged(unittest.TestCase):
                 seen.append(req.prompt)
                 return TurnResult("ok", "Count them as real labels.", req.session_id or "s1")
         b = B.Board("m", lambda: rec.run_dir, cfg.monitor("m"))
-        with mock.patch.object(B, "get_backend", lambda name: Fake()):
+        with mock.patch("orch.backends.get_backend", lambda name: Fake()):
             b.chat("These are the real labels.", qid="Q1", settle=True)
             for _ in range(100):
                 if seen:
@@ -739,6 +740,55 @@ class TestManaged(unittest.TestCase):
         finally:
             os.chdir(here)
         self.assertEqual([j["pid"] for j in found], [901])
+
+    def test_a_terminal_shell_started_in_the_workspace_is_not_a_job(self):
+        # the round-80 case: an interactive zsh in the project folder, reparented under an editor's terminal host
+        import os
+        from unittest import mock
+        from orch import jobs
+        ws, here = os.path.realpath(self.tmp), os.getcwd()
+        before = {1: (0, "launchd"), 50: (1, "node ptyHost")}
+        after = {**before, 60: (50, "/bin/zsh -il"), 61: (60, "-zsh"), 62: (50, "bash"),
+                 63: (1, "bash train.sh"), 64: (1, "python run.py")}
+        os.chdir(ws)
+        try:
+            with mock.patch.object(jobs, "cwds", lambda pids: {p: ws for p in pids}):
+                found = jobs.detect(before, [ws], after=after)
+        finally:
+            os.chdir(here)
+        self.assertEqual(sorted(j["pid"] for j in found), [63, 64])
+        self.assertTrue(jobs.is_shell("/bin/zsh -il"))
+        self.assertFalse(jobs.is_shell("bash train.sh"))
+
+    def test_a_waiter_loop_under_a_turn_is_found(self):
+        from orch import jobs
+        procs = {100: (1, "claude -p --resume x"),            # the worker's turn
+                 101: (100, "/bin/zsh -c eval 'cd ws; while kill -0 72926 2>/dev/null; do sleep 10; done'"),
+                 102: (101, "sleep 10"),
+                 103: (100, "python -m scripts.run_stage --match"),   # real work under the turn: not a waiter
+                 104: (1, "bash scripts/job.sh")}                  # not under the turn at all
+        self.assertEqual(jobs.waiters(100, procs), [101])
+        self.assertEqual(jobs.waiters(104, procs), [])
+
+    def test_an_editor_helper_orphaned_into_the_workspace_is_not_a_job(self):
+        from orch import jobs
+        from unittest import mock
+        import os
+        here = os.getcwd()
+        ws = str(Path(tempfile.mkdtemp()).resolve())
+        vscode = ("/Users/x/.vscode-server/cli/servers/Stable-abc/server/node "
+                  "/Users/x/.vscode-server/extensions/markdown-language-features/dist/serverWorkerMain --node-ipc")
+        before = {10: (1, "launchd")}
+        after = {**before, 70: (1, vscode), 71: (1, "python build_report.py")}
+        os.chdir(ws)
+        try:
+            with mock.patch.object(jobs, "cwds", lambda pids: {p: ws for p in pids}):
+                found = jobs.detect(before, [ws], after=after)
+        finally:
+            os.chdir(here)
+        self.assertEqual([j["pid"] for j in found], [71])
+        self.assertTrue(jobs.is_tool(vscode))
+        self.assertFalse(jobs.is_tool("python build_report.py"))
 
     AUDIT_REPLY = ("<points>\n1. The critic resends its whole checklist. Evidence: r001. Fix: send the change only.\n"
                    "2. Second point.\n3. Third point.\n</points>\n<findings>\n"
@@ -1868,6 +1918,499 @@ class TestRelayAndHandoverSizes(unittest.TestCase):
         fake.write_decisions = lambda: None
         ManagedRunner.decide(fake, "Q1 ask: " + long_text, "manager", "Q1")
         self.assertEqual(fake.st["decisions"][0]["text"], "Q1 ask: " + long_text)
+
+
+class TestWaiterStop(unittest.TestCase):
+    """A silent agent whose turn sits in a waiter loop has the loop stopped, and the turn ends."""
+
+    def test_a_silent_waiter_loop_is_stopped_and_the_turn_ends(self):
+        import os
+        from unittest import mock
+        from orch import backends
+        script = f"while kill -0 {os.getpid()} 2>/dev/null; do sleep 0.2; done & wait"
+        with mock.patch.object(backends, "WAITER_GRACE", 0.5), mock.patch.object(backends, "WAITER_CHECK", 0.2):
+            start = time.monotonic()
+            rc, out, err, status = backends.run_process(["sh", "-c", script], None, ".", 0, {}, lambda: False,
+                                                        on_line=lambda line: None)
+        self.assertLess(time.monotonic() - start, 30)
+        self.assertIn("stopped a waiter loop", err)
+
+
+class TestRunCost(unittest.TestCase):
+    """The board's run cost must not fall when it is recomputed from cached turn rows."""
+
+    def test_repeated_polls_give_the_same_total(self):
+        from orch.board import _turn_costs
+        turns = [{"session_id": "s", "cost": 1.0, "ended_at": "1", "status": "ok"},
+                 {"session_id": "s", "cost": 3.0, "ended_at": "2", "status": "ok"}]  # session total 3.0 so far
+        cached = list(turns)
+        totals = [_turn_costs([dict(t) for t in cached], []) for _ in range(3)]
+        self.assertEqual(totals, [3.0, 3.0, 3.0])
+
+
+class TestMessageLog(unittest.TestCase):
+    """board._message_log: conversations, transfers, check-ins and warnings in one time-ordered list."""
+
+    def test_every_kind_of_message_is_listed_in_time_order(self):
+        import tempfile
+        from orch.board import _message_log
+        with tempfile.TemporaryDirectory() as d:
+            rd = Path(d)
+            (rd / "inbox" / "consumed").mkdir(parents=True)
+            (rd / "rounds" / "r001").mkdir(parents=True)
+            rows = [
+                {"id": "c1", "role": "human", "text": "Please check it.", "ts": "2026-11-12T10:00:00+08:00", "with": "critic"},
+                {"id": "c1", "role": "agent", "who": "critic", "with": "critic", "status": "ok", "text": "Done.",
+                 "ts": "2026-11-12T10:00:05+08:00", "problems": ['<message to="The critic"> is addressed to the sender itself; not sent']}]
+            (rd / "chat.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+            (rd / "inbox" / "consumed" / "20261112-100300-1-board-note.json").write_text(
+                json.dumps({"to": ["worker"], "message": "Use option A.", "urgent": True}), encoding="utf-8")
+            (rd / "inbox" / "20261112-100900-2-board-note.json").write_text(
+                json.dumps({"to": ["critic"], "from": "manager", "message": "Waiting note."}), encoding="utf-8")
+            (rd / "events.jsonl").write_text("\n".join([
+                json.dumps({"ts": "2026-11-12T10:03:10+08:00", "event": "human_messages", "count": 1,
+                            "files": ["20261112-100300-1-board-note.json"]}),
+                json.dumps({"ts": "2026-11-12T10:06:00+08:00", "event": "route_problem", "agent": "critic",
+                            "problem": "names no agent; not sent"})]), encoding="utf-8")
+            (rd / "rounds" / "r001" / "t01-critic.json").write_text(json.dumps(
+                {"turn_id": "r001-t01-critic", "output": "Full check-in reply."}), encoding="utf-8")
+            turns = [{"turn_id": "r001-t01-critic", "agent": "critic", "purpose": "checkin", "status": "ok",
+                      "started_at": "2026-11-12T10:02:00+08:00", "output": "short"}]
+            queued = [{"to": "worker", "from": "critic", "message": "Stop the job.", "status": "queued",
+                       "created_at": "2026-11-12T10:02:30+08:00", "source_turn": "r001-t01-critic"}]
+            out = _message_log(rd, rows, turns, {"critic": "The critic", "worker": "The worker"}, "manager", queued,
+                               {"critic": ["Pending decisions."]})
+        kinds = [(m["kind"], m["from"], m["to"]) for m in out]
+        self.assertEqual(kinds, [
+            ("conversation", "you", "The critic"),
+            ("conversation", "The critic", "you"),
+            ("check-in", "The critic", "manager"),
+            ("check-in", "The critic", "The worker"),
+            ("transfer", "you", "The worker"),
+            ("warning", "The critic", ""),
+            ("transfer", "manager", "The critic"),
+            ("transfer", "orch", "The critic"),  # held for the critic's next turn: listed last
+        ])
+        self.assertEqual((out[-1]["status"], out[-1]["text"]), ("waiting", "Pending decisions."))
+        self.assertEqual(out[1]["problems"][0][:12], '<message to=')
+        self.assertTrue(out[4]["urgent"])
+        self.assertEqual(out[4]["status"], "read")
+        self.assertEqual(out[6]["status"], "waiting")
+        self.assertEqual(out[2]["text"], "Full check-in reply.")
+
+
+class TestMessageRoutes(unittest.TestCase):
+    """tags.routes: where each <message to="…"> goes, and why a block can't go anywhere."""
+
+    def setUp(self):
+        from types import SimpleNamespace as NS
+        self.agents = [NS(name="critic", called="The critic", role="verifier"),
+                       NS(name="worker", called="The worker", role="worker"),
+                       NS(name="manager", called="The manager", role="manager"),
+                       NS(name="auditor", called="The auditor", role="auditor")]
+
+    def test_a_block_to_another_agent_is_routed_with_its_urgent_flag(self):
+        from orch import tags as T
+        text = '<message to="The worker" urgent="yes">Stop the job.</message> and <message to="manager">Ack.</message>'
+        sent, problems = T.routes(text, "critic", self.agents)
+        self.assertEqual([(t.name, b, u) for t, b, u in sent],
+                         [("worker", "Stop the job.", True), ("manager", "Ack.", False)])
+        self.assertEqual(problems, [])
+
+    def test_the_role_words_reach_the_only_agent_of_that_role(self):
+        from orch import tags as T
+        sent, problems = T.routes('<message to="worker">Do X.</message>', "critic", self.agents)
+        self.assertEqual([t.name for t, _b, _u in sent], ["worker"])
+        self.assertEqual(problems, [])
+
+    def test_a_block_addressed_to_the_sender_is_reported_not_sent(self):
+        # the round-79 case: the critic addressed its own instructions to "The critic"
+        from orch import tags as T
+        sent, problems = T.routes('<message to="The critic">Diagnosis accepted.</message>', "critic", self.agents)
+        self.assertEqual(sent, [])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("addressed to the sender itself", problems[0])
+
+    def test_unknown_empty_and_auditor_blocks_are_reported(self):
+        from orch import tags as T
+        text = ('<message to="the team">x</message><message to="worker">  </message>'
+                '<message to="auditor">y</message>')
+        sent, problems = T.routes(text, "critic", self.agents)
+        self.assertEqual(sent, [])
+        self.assertEqual(len(problems), 3)
+        self.assertIn("names no agent", problems[0])
+        self.assertIn("is empty", problems[1])
+        self.assertIn("auditor", problems[2])
+
+    def test_a_block_to_the_human_is_skipped_silently(self):
+        from orch import tags as T
+        sent, problems = T.routes('<message to="you">Answer.</message>', "critic", self.agents)
+        self.assertEqual((sent, problems), ([], []))
+
+
+class TestBoardMessageDelivery(unittest.TestCase):
+    """board._routes: for each <message> an agent passed on, what the recipient was actually given."""
+
+    AGENTS = [{"name": "critic", "display_name": "The critic", "role": "verifier"},
+              {"name": "worker", "display_name": "The worker", "role": "worker"},
+              {"name": "manager", "display_name": "The manager", "role": "manager"}]
+    LONG = "Rerun the E4 insertion arm with the corrected span.\nKeep the frozen matcher and report the ties."
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def seen(self, inp="", out="", cut=()):
+        from orch import tags as T
+        from orch.board import _flat
+        return {"input": _flat(inp), "cut_in": [(at, _flat(m)) for at, m in cut], "blocks": T.blocks(out, "message")}
+
+    def routes(self, turns, seen, wm=(), events=()):
+        from orch.board import _routes
+        (self.tmp / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+        return _routes(self.tmp, turns, seen, self.AGENTS, list(wm))
+
+    def turn(self, tid, agent, at, status="ok", purpose="work"):
+        return {"turn_id": tid, "agent": agent, "started_at": at, "ended_at": at, "status": status, "purpose": purpose}
+
+    def test_a_message_counts_as_read_in_the_first_later_prompt_that_carries_it(self):
+        turns = [self.turn("r1-t1-worker", "worker", "2026-01-01T10:00:00"),
+                 self.turn("r1-t2-critic", "critic", "2026-01-01T10:01:00", purpose="verify"),
+                 self.turn("r1-t3-critic", "critic", "2026-01-01T10:02:00", purpose="verify")]
+        # the critic gets it wrapped and with its heading dropped, as orch passes it on
+        seen = {"r1-t1-worker": self.seen(out=f'Done.\n<message to="The critic">## For you\n{self.LONG}</message>'),
+                "r1-t2-critic": self.seen(inp="The worker sent this update:\n\n- " + self.LONG.replace("\n", "\n- ")),
+                "r1-t3-critic": self.seen(inp=self.LONG)}
+        out, received = self.routes(turns, seen)
+        r = out["r1-t1-worker"][0]
+        self.assertEqual((r["status"], r["turn"], r["to"], r["how"]), ("read", "r1-t2-critic", "critic", "prompt"))
+        self.assertEqual(received, {"r1-t2-critic": [{"from": "worker", "turn": "r1-t1-worker", "i": 0}]})
+
+    def test_waiting_unseen_failed_and_for_you(self):
+        turns = [self.turn("r1-t1-manager", "manager", "2026-01-01T10:00:00", purpose="review"),
+                 self.turn("r1-t2-worker", "worker", "2026-01-01T10:01:00")]
+        out_text = ('<message to="you">Here is my answer.</message><message to="critic" urgent="yes">Stop now.</message>'
+                    '<message to="worker">Use the new prompt for every remaining call.</message>'
+                    '<message to="the team">x</message>')
+        seen = {"r1-t1-manager": self.seen(out=out_text), "r1-t2-worker": self.seen(inp="something else entirely")}
+        rows = self.routes(turns, seen)[0]["r1-t1-manager"]
+        self.assertEqual([r["status"] for r in rows], ["you", "waiting", "unseen", "failed"])
+        self.assertTrue(rows[1]["urgent"])
+        self.assertEqual(rows[2]["later"], 1)
+        self.assertIn("names no agent", rows[3]["problem"])
+
+    def test_a_problem_orch_logged_for_the_reply_is_shown_as_the_reason(self):
+        turns = [self.turn("r1-t1-critic", "critic", "2026-01-01T10:00:00", purpose="verify"),
+                 self.turn("r1-t2-manager", "manager", "2026-01-01T10:05:00", purpose="review")]
+        seen = {"r1-t1-critic": self.seen(out='<message to="manager">Please look at the scores again.</message>'),
+                "r1-t2-manager": self.seen(inp="Please look at the scores again.")}
+        why = '<message to="manager"> is not the worker; a review passes messages to the worker only; not sent'
+        rows = self.routes(turns, seen, events=[{"ts": "2026-01-01T10:00:00", "event": "route_problem",
+                                                  "agent": "critic", "problem": why}])[0]["r1-t1-critic"]
+        self.assertEqual((rows[0]["status"], rows[0]["problem"]), ("failed", why))
+
+    def test_a_note_cut_into_a_running_turn_and_a_live_update(self):
+        turns = [self.turn("r1-t1-worker", "worker", "2026-01-01T10:00:00", status="running"),
+                 self.turn("r1-t2-critic", "critic", "2026-01-01T10:01:00", purpose="checkin"),
+                 self.turn("r1-t3-manager", "manager", "2026-01-01T10:02:00", purpose="review"),
+                 self.turn("r1-t4-critic", "critic", "2026-01-01T10:03:00", status="running")]
+        seen = {"r1-t1-worker": self.seen(),
+                "r1-t2-critic": self.seen(out=f'<message to="worker">{self.LONG}</message>'),
+                "r1-t3-manager": self.seen(out='<message to="critic" urgent="yes">Stop the sweep now.</message>'),
+                "r1-t4-critic": self.seen(cut=[("2026-01-01T10:03:30", "Stop the sweep now.")])}
+        wm = [{"source_turn": "r1-t2-critic", "to": "worker", "message": self.LONG, "status": "accepted",
+               "delivery_turn": "r1-t1-worker", "updated_at": "2026-01-01T10:01:30"}]
+        out, _ = self.routes(turns, seen, wm=wm)
+        self.assertEqual((out["r1-t3-manager"][0]["status"], out["r1-t3-manager"][0]["how"],
+                          out["r1-t3-manager"][0]["at"]), ("read", "cut in", "2026-01-01T10:03:30"))
+        # the update went into the worker turn that was already running, which started before the check-in
+        r = out["r1-t2-critic"][0]
+        self.assertEqual((r["status"], r["turn"], r["how"]), ("read", "r1-t1-worker", "live"))
+
+
+class TestAuditFixes(unittest.TestCase):
+    """Cost basis, a gate-held manager message, and the audit digest's view of relays, sessions and notes."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_cost_is_an_estimate_behind_another_providers_endpoint_or_for_an_unknown_model(self):
+        from orch.report import cost_basis, endpoint_host, turn_cost_basis, turn_model
+        self.assertEqual(endpoint_host({"ANTHROPIC_BASE_URL": "https://zenmux.ai/api/anthropic", "X_TOKEN": "s"}), "zenmux.ai")
+        self.assertEqual(endpoint_host({}), "")
+        self.assertEqual(cost_basis("claude", ["opus"]), "reported")
+        self.assertEqual(cost_basis("claude", ["claude-sonnet-5-5"], "api.anthropic.com"), "reported")
+        self.assertEqual(cost_basis("claude", ["opus"], "zenmux.ai"), "estimate")  # "opus" mapped to another model
+        self.assertEqual(cost_basis("claude", ["deepseek/deepseek-v4.1-flash"]), "estimate")
+        self.assertEqual(cost_basis("codex", ["gpt-6-astra"]), "reported")
+        old = {"backend": "claude", "stderr": '[claude-code:unrecognized_model] {"model":"deepseek/deepseek-v4.1-flash"}'}
+        self.assertEqual((turn_cost_basis(old), turn_model(old)), ("estimate", "deepseek/deepseek-v4.1-flash"))
+        self.assertEqual(turn_model({"model": "opus", "meta": {"models": ["claude-opus-5-5"]}}), "claude-opus-5-5")
+
+    def test_the_claude_backend_keeps_token_counts_and_the_models_that_answered(self):
+        from orch.backends import ClaudeBackend, TurnRequest
+        fake = self.tmp / "claude"
+        fake.write_text("#!/bin/sh\ncat >/dev/null\necho '" + json.dumps(
+            {"type": "result", "result": "hi", "session_id": "s1", "total_cost_usd": 1.5,
+             "usage": {"input_tokens": 10, "output_tokens": 20, "service_tier": "standard"},
+             "modelUsage": {"deepseek/deepseek-v4.1-flash": {"inputTokens": 10}}}) + "'\n")
+        fake.chmod(0o755)
+        res = ClaudeBackend().run(TurnRequest("w", "worker", "go", "", None, str(self.tmp), 30,
+                                              {"executable": str(fake), "output_format": "json"}), lambda: False)
+        self.assertEqual(res.meta["usage"], {"input_tokens": 10, "output_tokens": 20})
+        self.assertEqual(res.meta["models"], ["deepseek/deepseek-v4.1-flash"])
+
+    def test_the_run_keeps_the_estimated_part_of_its_cost_apart(self):
+        from orch.recorder import Recorder
+        mon = load_config(make_cfg(self.tmp, [managed()])).monitor("m")
+        rec = Recorder.create(str(self.tmp / "out"), "m", mon.snapshot())
+        for i, (basis, cost) in enumerate([("estimate", 5.0), ("reported", 0.5)], 1):
+            rec.write_turn({"turn_id": f"r001-t0{i}-x", "round": 1, "seq": i, "agent": f"a{i}", "status": "ok",
+                            "session_id": f"s{i}", "cost_basis": basis, "meta": {"total_cost_usd": cost}})
+        self.assertEqual((rec.state["cost_usd"], rec.state["cost_estimate_usd"]), (5.5, 5.0))
+
+    def test_a_manager_message_held_at_a_gate_is_shown_to_the_manager_and_marked_superseded(self):
+        held = "Rerun the E4 insertion arm with the corrected span before anything else."
+        cfg = make_cfg(self.tmp, [managed(controller={"milestone_rounds": 1}, critic={"pass_after": 99},
+                                          mgr={"milestones": 1, "replies": {"review": [
+                                              f'Not done.\n\n<message to="Jordan">{held}</message>\n\n'
+                                              "<score>2</score>\n<decision>REVISE</decision>",
+                                              "Good.\n\n<score>5</score>\n<decision>ACCEPT</decision>"]}})])
+        out, stop, holder = self.tmp / "out" / "m", threading.Event(), {}
+        th = threading.Thread(target=lambda: holder.update(res=run(cfg, stop=stop)), daemon=True)
+        th.start()
+        t0, g = time.time(), None
+        while time.time() - t0 < 15 and not g:
+            runs = sorted(out.glob("*/state.json")) if out.exists() else []
+            g = (((read_json(runs[-1]) if runs else None) or {}).get("managed") or {}).get("gate")
+            time.sleep(0.05)
+        self.assertTrue(g, "no milestone gate")
+        run_dir = runs[-1].parent
+        (run_dir / "inbox" / "a-gate.json").write_text(json.dumps(
+            {"kind": "gate", "decision": "revise", "message": "Use the 20 returned instances.", "gate": g["key"]}))
+        th.join(20)
+        status, rec = holder["res"]
+        self.assertEqual(status, "completed")
+        fb = next(t for t in turns(rec) if t["purpose"] == "feedback")
+        self.assertIn("Use the 20 returned instances.", fb["input"])
+        self.assertIn(held, fb["input"])  # the held message is put before the manager to carry over
+        ev = [json.loads(l) for l in (rec.run_dir / "events.jsonl").read_text().splitlines() if "message_superseded" in l]
+        self.assertEqual([(e["to"], e["by"]) for e in ev], [("critic", fb["turn_id"])])
+        from orch.board import Board
+        rows = Board("m", lambda: rec.run_dir).data()["routes"][ev[0]["turn"]]
+        self.assertEqual((rows[0]["status"], rows[0]["turn"]), ("superseded", fb["turn_id"]))
+
+    def test_the_digest_measures_relays_against_what_orch_passes_on(self):
+        from orch.audit import passable
+        critic = {"agent": "critic", "role": "verifier",
+                  "output": "Fix the table.\n\n<checklist>\n- [ ] a\n- [ ] b\n</checklist>\n<verdict>FAIL</verdict>"
+                            '\n<message to="you">Long answer for the human.</message>'}
+        text, withheld = passable(critic, {"agent": "worker", "role": "worker"})
+        self.assertEqual(text, "Fix the table.")
+        self.assertEqual(set(withheld), {"checklist", "verdict", "message to you"})
+        mgr = {"agent": "boss", "role": "manager", "output": 'Report for you.\n<message to="critic">Do X.</message>'}
+        text, withheld = passable(mgr, {"agent": "critic", "role": "verifier"})
+        self.assertEqual((text, withheld), ("Do X.", {"reply to the human": len("Report for you.")}))
+
+    def test_the_digest_names_a_notes_sender_and_shows_the_session(self):
+        from orch.audit import build
+        rd = self.tmp / "run"
+        (rd / "rounds" / "r001").mkdir(parents=True)
+        (rd / "inbox" / "consumed").mkdir(parents=True)
+        note = "Approved: run the revised labeller prompt as a re-pilot on twenty disjoint traces, and freeze it first."
+        (rd / "inbox" / "consumed" / "20260101-095900-board-note.json").write_text(
+            json.dumps({"to": ["writer"], "message": note, "from": "critic"}))
+        (rd / "rounds" / "r001" / "t01-writer.json").write_text(json.dumps(
+            {"turn_id": "r001-t01-writer", "round": 1, "agent": "writer", "role": "worker", "purpose": "work",
+             "status": "ok", "started_at": "2026-01-01T10:00:00", "ended_at": "2026-01-01T10:01:00",
+             "resumed_session": True, "session_turn": 7, "input": note, "output": "Done." * 100}))
+        (rd / "rounds" / "r001" / "t02-critic.json").write_text(json.dumps(
+            {"turn_id": "r001-t02-critic", "round": 1, "agent": "critic", "role": "verifier", "purpose": "verify",
+             "status": "ok", "started_at": "2026-01-01T10:02:00", "ended_at": "2026-01-01T10:03:00",
+             "input": "x", "output": "ok"}))
+        md, stats = build(rd, 1, 1)
+        self.assertIn("| resumed #7 |", md)
+        self.assertIn("note from critic", md)
+        self.assertFalse([f for f in stats["flags"] if f["kind"] == "unexpected origin"])
+
+
+class TestFallback(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _w1(self, rec):
+        return [t for t in turns(rec) if t["agent"] == "w1"]
+
+    def test_config_merges_backups_over_the_primary(self):
+        m = pipeline()
+        m["agents"][0].update(backend="claude", backend_options={"model": "opus", "effort": "high"},
+                              env={"ANTHROPIC_BASE_URL": "https://a"}, retries=2,
+                              fallback=["sonnet", {"backend_options": {"effort": None}, "env": {}},
+                                        {"backend": "agy", "backend_options": {"model": "gemini-x"}, "retries": 0}])
+        a = load_config(make_cfg(self.tmp, [m])).monitor("m").agent("w1")
+        v = a.variants()
+        self.assertEqual([x.label for x in v], ["claude:opus", "claude:sonnet", "claude:opus", "agy:gemini-x"])
+        self.assertEqual(v[1].options, {"model": "sonnet", "effort": "high"})
+        self.assertEqual(v[1].env, {"ANTHROPIC_BASE_URL": "https://a"})
+        self.assertEqual(v[1].session_key, v[0].session_key)
+        self.assertEqual(v[2].options, {"model": "opus"})
+        self.assertNotEqual(v[2].session_key, v[0].session_key)  # another endpoint: a new session
+        self.assertEqual((v[3].options, v[3].env, v[3].retries, v[2].retries), ({"model": "gemini-x"}, {}, 0, 2))
+        self.assertEqual(a.public()["fallback"][0]["env"], ["ANTHROPIC_BASE_URL"])  # no env values in logs
+
+    def test_bad_backup_is_a_config_error(self):
+        m = pipeline()
+        m["agents"][0]["fallback"] = [{"backend": "nope"}]
+        with self.assertRaises(ConfigError):
+            load_config(make_cfg(self.tmp, [m]))
+        m["agents"][0]["fallback"] = [{"modle": "x"}]
+        with self.assertRaises(ConfigError):
+            load_config(make_cfg(self.tmp, [m]))
+
+    def test_backup_takes_over_in_the_same_session_and_stays_for_the_cooldown(self):
+        m = pipeline()
+        msg = "API Error: overloaded_error"
+        m["agents"][0].update(backend_options={"fail_turns": [2], "error_text": msg},
+                              fallback=[{"label": "backup", "backend_options": {"fail_turns": []}}])
+        m["agents"][1]["backend_options"] = {"pass_after": 3}
+        status, rec = run(make_cfg(self.tmp, [m]))
+        self.assertEqual(status, "completed")
+        w = self._w1(rec)
+        self.assertEqual(w[1]["status"], "ok")
+        self.assertEqual([a["model"] for a in w[1]["attempts"]], ["mock", "backup"])
+        self.assertEqual(w[1]["fallbacks"][0]["to"], "backup")
+        self.assertEqual(w[1]["session_id"], w[0]["session_id"])  # same provider: the session carries on
+        self.assertEqual(w[2]["model"], "backup")  # still within the cooldown
+        self.assertEqual(len(w[2]["attempts"]), 1)
+
+    def test_backup_on_another_provider_starts_a_new_session_with_a_handover(self):
+        m = pipeline()
+        m["agents"][0].update(backend_options={"fail_turns": [2]}, fallback_cooldown=0,
+                              fallback=[{"backend_options": {"fail_turns": []}, "env": {"ANTHROPIC_BASE_URL": "x"}}])
+        m["agents"][1]["backend_options"] = {"pass_after": 3}
+        status, rec = run(make_cfg(self.tmp, [m]))
+        self.assertEqual(status, "completed")
+        w = self._w1(rec)
+        self.assertNotEqual(w[1]["session_id"], w[0]["session_id"])
+        self.assertIn("taking over this work", w[1]["input"])
+        self.assertEqual(w[2]["model"], "mock")  # no cooldown: back on the primary
+        self.assertNotEqual(w[2]["session_id"], w[1]["session_id"])  # whose provider can't continue the backup's
+
+    def test_all_models_failing_still_fails_the_turn(self):
+        m = pipeline()
+        m["agents"][0].update(backend_options={"fail_turns": [2, 3]}, fallback=["other"])
+        status, rec = run(make_cfg(self.tmp, [m]))
+        self.assertEqual(status, "failed")
+        self.assertEqual([a["model"] for a in self._w1(rec)[1]["attempts"]], ["mock", "mock:other"])
+
+    def test_audit_helper_tries_backups(self):
+        from orch.backends import TurnRequest, run_variants
+        m = pipeline()
+        m["agents"][0].update(backend_options={"fail_turns": [1]}, fallback=[{"backend_options": {"fail_turns": []}}])
+        a = load_config(make_cfg(self.tmp, [m])).monitor("m").agent("w1")
+        res = run_variants(a, TurnRequest("w1", "worker", "hi", "", None, str(self.tmp), 10, {}), lambda: False)
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(len(res.meta["models_tried"]), 2)
+
+
+class TestAgy(unittest.TestCase):
+    def test_command(self):
+        from orch.backends import AgyBackend, TurnRequest
+        req = TurnRequest("a", "worker", "hi", "sys", "c-1", ".", 10,
+                          {"model": "gemini-3.6-pro", "effort": "high", "mode": "auto", "add_dirs": ["/x"],
+                           "dangerously_skip_permissions": True})
+        cmd = AgyBackend().build_command(req)
+        self.assertEqual(cmd[:5], ["agy", "--output-format", "json", "--conversation", "c-1"])
+        for part in (["--model", "gemini-3.6-pro"], ["--effort", "high"], ["--mode", "auto"], ["--add-dir", "/x"]):
+            self.assertIn(part[1], cmd[cmd.index(part[0]):])
+        self.assertIn("--dangerously-skip-permissions", cmd)
+
+    def test_run_with_a_fake_agy(self):
+        from orch.backends import AgyBackend, TurnRequest
+        d = Path(tempfile.mkdtemp())
+        exe = d / "agy"
+        exe.write_text("#!/bin/sh\necho '{\"type\":\"init\",\"conversation_id\":\"conv-9\"}'\n"
+                       "echo '{\"type\":\"result\",\"result\":\"done: '\"$#\"' args\"}'\n")
+        exe.chmod(0o755)
+        res = AgyBackend().run(TurnRequest("a", "worker", "hello", "be brief", None, str(d), 10,
+                                           {"executable": str(exe)}), lambda: False)
+        self.assertEqual((res.status, res.session_id), ("ok", "conv-9"))
+        self.assertTrue(res.output.startswith("done"))
+        self.assertIn("<prompt>", res.command)  # the prompt (with the system prompt in front) is not logged
+
+    def test_unparsable_output_is_an_error(self):
+        from orch.backends import AgyBackend, TurnRequest
+        res = AgyBackend().run(TurnRequest("a", "worker", "hi", "", None, ".", 10,
+                                           {"executable": "echo"}), lambda: False)
+        self.assertEqual(res.status, "error")
+
+
+class TestManagerChatSession(unittest.TestCase):
+    """A board chat with the critic must not move the manager into the critic's session."""
+
+    def test_only_the_managers_own_chat_replies_set_its_session(self):
+        from orch.board import manager_chat_session
+        st = {"sessions": {"manager": {"session_id": "M1"}, "critic": {"session_id": "C1"}}}
+        rows = [{"role": "manager", "session_id": "M2", "ts": "2026-01-01T10:00:00"},
+                {"role": "agent", "who": "critic", "session_id": "C1", "ts": "2026-01-01T11:00:00"}]
+        self.assertEqual(manager_chat_session(rows, "", st, "manager"), "M2")
+        self.assertIsNone(manager_chat_session(rows, "2026-01-01T10:30:00", st, "manager"))
+        # a manager row that names another agent's session (left by the old bug) is not followed either
+        rows.append({"role": "manager", "session_id": "C1", "ts": "2026-01-01T12:00:00"})
+        self.assertEqual(manager_chat_session(rows, "", st, "manager"), "M2")
+
+
+class TestOneControllerPerRun(unittest.TestCase):
+    """A second `orch run --resume` must not drive a run another process is driving, and a resume keeps the
+    run's own round limit unless --max-rounds says otherwise."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_a_second_controller_backs_off_without_touching_the_run(self):
+        m = pipeline(max_rounds=2)
+        m["agents"][1]["backend_options"] = {"pass_after": 99}
+        cfg = make_cfg(self.tmp, [m])
+        status, rec = run(cfg)
+        self.assertEqual(status, "max_rounds_reached")
+        holder = Recorder(rec.run_dir, rec.output_root)
+        self.assertIsNone(holder.claim())  # stands in for the other process
+        self.assertIsNone(holder.claim())  # idempotent
+        before = (rec.run_dir / "events.jsonl").read_text(), (rec.run_dir / "state.json").read_text()
+        status, _ = run(cfg, resume=True)
+        self.assertEqual(status, "busy")
+        self.assertEqual(before, ((rec.run_dir / "events.jsonl").read_text(), (rec.run_dir / "state.json").read_text()))
+        holder.release()
+        status, _ = run(cfg, resume=True)
+        self.assertEqual(status, "max_rounds_reached")
+        later = Recorder(rec.run_dir, rec.output_root)
+        self.assertIsNone(later.claim())  # released when the run ended
+        later.release()
+
+    def test_a_resume_keeps_the_runs_own_round_limit(self):
+        m = pipeline(max_rounds=2)
+        m["agents"][1]["backend_options"] = {"pass_after": 99}
+        cfg = make_cfg(self.tmp, [m])
+        mon = load_config(cfg).monitor("m")
+        r = MonitorRunner(dataclasses.replace(mon, max_rounds=3), threading.Event(), log=lambda s: None,
+                          max_rounds_given=True)
+        self.assertEqual(r.run(), "max_rounds_reached")
+        self.assertEqual(r.rec.state["round"], 3)
+        self.assertEqual(r.rec.state["max_rounds"], 3)
+        # raised to 5 for this run, then resumed without the flag: the config's 2 must not end it
+        r = MonitorRunner(dataclasses.replace(mon, max_rounds=5), threading.Event(), resume=True,
+                          log=lambda s: None, max_rounds_given=True)
+        self.assertEqual(r.run(), "max_rounds_reached")
+        self.assertEqual(r.rec.state["round"], 5)
+        rec = r.rec
+        rec.set(status="stopped", round=4, completed_round=4)
+        status, rec = run(cfg, resume=True)
+        self.assertEqual((status, rec.state["max_rounds"]), ("max_rounds_reached", 5))
+        self.assertEqual(rec.state["round"], 5)
+        # an explicit --max-rounds lowers it
+        r = MonitorRunner(dataclasses.replace(mon, max_rounds=1), threading.Event(), resume=True,
+                          log=lambda s: None, max_rounds_given=True)
+        r.run()
+        self.assertEqual(r.rec.state["max_rounds"], 1)
 
 
 if __name__ == "__main__":

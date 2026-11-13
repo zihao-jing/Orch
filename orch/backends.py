@@ -7,6 +7,7 @@ Built-in backends
 -----------------
 claude   Claude Code CLI (``claude -p``), sessions via --session-id / --resume.
 codex    OpenAI Codex CLI (``codex exec`` / ``codex exec resume``). Experimental.
+agy      Antigravity CLI (``agy -p``) for Gemini models, sessions via --conversation. Experimental.
 command  Any CLI, described with a command template. Use this to wrap other agents.
 mock     Deterministic fake agent for dry runs and tests.
 """
@@ -87,10 +88,13 @@ def run_process(cmd: List[str], stdin_text: Optional[str], cwd: str, timeout: fl
     out_chunks: List[str] = []
     err_chunks: List[str] = []
 
+    last_out = [time.monotonic()]  # when the agent last wrote anything
+
     def pump(stream, sink, cb=None):
         for line in iter(stream.readline, ""):
             sink.append(line)
             if cb:
+                last_out[0] = time.monotonic()
                 try:
                     cb(line)
                 except Exception:
@@ -110,6 +114,7 @@ def run_process(cmd: List[str], stdin_text: Optional[str], cwd: str, timeout: fl
 
     deadline = time.monotonic() + timeout if timeout and timeout > 0 else None
     status = "ok"
+    last_check = 0.0
     while True:
         try:
             proc.wait(timeout=0.5)
@@ -120,6 +125,10 @@ def run_process(cmd: List[str], stdin_text: Optional[str], cwd: str, timeout: fl
             elif deadline and time.monotonic() > deadline:
                 status = "timeout"
             else:
+                now = time.monotonic()
+                if on_line is not None and now - last_out[0] > WAITER_GRACE and now - last_check >= WAITER_CHECK:
+                    last_check = now
+                    _stop_waiters(proc.pid, err_chunks)  # silent for a long time while waiting on a process
                 continue
             _kill(proc)
             break
@@ -129,6 +138,27 @@ def run_process(cmd: List[str], stdin_text: Optional[str], cwd: str, timeout: fl
     if status == "ok" and rc != 0:
         status = "error"
     return rc, "".join(out_chunks), "".join(err_chunks), status
+
+
+WAITER_GRACE = 300.0  # seconds an agent may be silent, with a waiter loop open, before orch stops the loop
+WAITER_CHECK = 15.0   # how often that is checked
+
+
+def _stop_waiters(root: int, err_chunks: List[str]) -> None:
+    """Stop the loops a silent agent is waiting in (see jobs.waiters). The job they wait for is a separate, detached
+    process and keeps running; only the loop's own shell is stopped, so the agent's turn can end."""
+    from . import jobs
+    try:
+        found = jobs.waiters(root, jobs.snapshot())
+    except Exception:
+        return
+    for pid in found:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            err_chunks.append(f"orch: stopped a waiter loop (pid {pid}) that was silent for over "
+                              f"{WAITER_GRACE:.0f}s; the process it waited for keeps running\n")
+        except OSError:
+            pass
 
 
 def _kill(proc: subprocess.Popen) -> None:
@@ -234,6 +264,11 @@ class ClaudeBackend(Backend):
             for k in ("total_cost_usd", "num_turns", "duration_ms", "is_error", "subtype"):
                 if k in data:
                     meta[k] = data[k]
+            usage = data.get("usage")
+            if isinstance(usage, dict):  # tokens: the only usage figure that holds whatever the endpoint charges
+                meta["usage"] = {k: v for k, v in usage.items() if isinstance(v, (int, float))}
+            if isinstance(data.get("modelUsage"), dict) and data["modelUsage"]:
+                meta["models"] = sorted(data["modelUsage"])  # the models that actually answered
             if data.get("is_error") and status == "ok":
                 status = "error"
         elif status == "ok":
@@ -381,6 +416,110 @@ def _codex_stream_cb(emit: Callable[[Dict[str, Any]], None]) -> Callable[[str], 
             files = [c.get("path") for c in item.get("changes") or [] if isinstance(c, dict)]
             emit({"k": "tool", "s": "edit: " + ", ".join(str(f) for f in files)[:160]})
     return cb
+
+
+class AgyBackend(Backend):
+    """Antigravity CLI (``agy -p``), for Gemini models. Sign in once by running ``agy`` interactively.
+
+    options: executable, model, effort, mode (accept-edits|auto|plan), dangerously_skip_permissions (bool),
+             sandbox (bool), add_dirs, agent, project, settings (dict or path), print_timeout,
+             prompt_via (arg (default) | stdin), extra_args
+    No system-prompt flag: the system prompt goes in front of a session's first message. Sessions continue with
+    --conversation <id>; the id is read from the JSON output.
+    """
+
+    name = "agy"
+
+    def build_command(self, req: TurnRequest) -> List[str]:
+        o = req.options
+        cmd = [str(o.get("executable", "agy")), "--output-format", "json"]
+        if req.session_id:
+            cmd += ["--conversation", req.session_id]
+        for key, flag in (("model", "--model"), ("effort", "--effort"), ("mode", "--mode"), ("agent", "--agent"),
+                          ("project", "--project"), ("print_timeout", "--print-timeout")):
+            if o.get(key):
+                cmd += [flag, str(o[key])]
+        if o.get("dangerously_skip_permissions"):
+            cmd.append("--dangerously-skip-permissions")
+        if o.get("sandbox"):
+            cmd.append("--sandbox")
+        for d in _opt_list(o.get("add_dirs")):
+            cmd += ["--add-dir", os.path.expanduser(d)]
+        if o.get("settings"):
+            s = o["settings"]
+            cmd += ["--settings", json.dumps(s) if isinstance(s, dict) else os.path.expanduser(str(s))]
+        cmd += _opt_list(o.get("extra_args"))
+        return cmd
+
+    def run(self, req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
+        prompt = self.first_prompt_with_system(req)
+        cmd = self.build_command(req)
+        via_arg = req.options.get("prompt_via", "arg") != "stdin"
+        cmd += ["-p", prompt] if via_arg else ["-p"]
+        rc, out, err, status = run_process(cmd, None if via_arg else prompt, req.cwd, req.timeout, req.env, should_stop)
+        data = _parse_agy_json(out)
+        sid, meta, output = req.session_id, {}, out.strip()
+        if data is not None:
+            output = str(_first(data, AGY_TEXT_KEYS) or "")
+            sid = str(_first(data, AGY_SESSION_KEYS) or "") or sid
+            for k in ("total_cost_usd", "num_turns", "duration_ms", "is_error", "subtype", "usage"):
+                if k in data:
+                    meta[k] = data[k]
+            if data.get("is_error") and status == "ok":
+                status = "error"
+        elif status == "ok":
+            status = "error"
+            meta["parse_error"] = "could not parse agy JSON output"
+        if status == "ok" and not sid:
+            meta["warning"] = "agy did not report a conversation id; the next turn starts a new conversation"
+        shown = [("<prompt>" if c == prompt else c) for c in cmd] + ([] if via_arg else ["<prompt via stdin>"])
+        return TurnResult(status, output, sid, rc, err, shown, meta)
+
+
+AGY_TEXT_KEYS = ("result", "response", "text", "output", "content", "message")
+AGY_SESSION_KEYS = ("conversation_id", "conversationId", "session_id", "sessionId", "conversation")
+
+
+def _first(d: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, (str, int)) and str(v):
+            return v
+        if isinstance(v, dict) and k in ("conversation", "message"):  # {"conversation": {"id": ...}}
+            inner = v.get("id") if k == "conversation" else v.get("text") or v.get("content")
+            if isinstance(inner, str) and inner:
+                return inner
+    return None
+
+
+def _parse_agy_json(text: str) -> Optional[Dict[str, Any]]:
+    """The final result object of `agy --output-format json` (one object, or the last of several lines); the
+    conversation id is taken from any line that carries one when the final object does not."""
+    text = text.strip()
+    if not text:
+        return None
+    objs: List[Dict[str, Any]] = []
+    try:
+        v = json.loads(text)
+        objs = [x for x in (v if isinstance(v, list) else [v]) if isinstance(x, dict)]
+    except json.JSONDecodeError:
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    x = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(x, dict):
+                    objs.append(x)
+    if not objs:
+        return None
+    final = next((d for d in reversed(objs) if d.get("type") == "result" or _first(d, AGY_TEXT_KEYS)), objs[-1])
+    if not _first(final, AGY_SESSION_KEYS):
+        sid = next((_first(d, AGY_SESSION_KEYS) for d in objs if _first(d, AGY_SESSION_KEYS)), None)
+        if sid:
+            final = {**final, "conversation_id": sid}
+    return final
 
 
 class CommandBackend(Backend):
@@ -590,9 +729,33 @@ def _redact(cmd: List[str], req: TurnRequest) -> List[str]:
     return [("<system prompt>" if req.system_prompt and c == req.system_prompt else c) for c in cmd] + ["<prompt via stdin>"]
 
 
+def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
+                 session_key: Optional[str] = None) -> TurnResult:
+    """One turn outside the main loop (an audit, a chat from the board): the agent's primary model, then its
+    backups in order until one works. When the turn continues a session, only the models that can continue it
+    (same backend and provider: `session_key`) are tried."""
+    import dataclasses
+    res = TurnResult("error", "", req.session_id, stderr="no model to run")
+    tried: List[str] = []
+    for v in agent.variants():
+        if req.session_id and session_key and v.session_key != session_key:
+            continue
+        try:
+            res = get_backend(v.backend).run(dataclasses.replace(req, options=v.options, env=v.env), should_stop)
+        except Exception as e:
+            res = TurnResult("error", "", req.session_id, stderr=f"{type(e).__name__}: {e}")
+        tried.append(v.label)
+        if res.status in ("ok", "stopped", "timeout") or should_stop():
+            break
+    if len(tried) > 1:
+        res.meta = {**(res.meta or {}), "models_tried": tried}
+    return res
+
+
 BACKENDS: Dict[str, Backend] = {
     "claude": ClaudeBackend(),
     "codex": CodexBackend(),
+    "agy": AgyBackend(),
     "command": CommandBackend(),
     "mock": MockBackend(),
 }

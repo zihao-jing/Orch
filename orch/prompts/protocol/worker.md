@@ -10,12 +10,15 @@ before starting anything again; an additional message does not mean your work wa
 Tags
 - `<question>…</question>`: something you cannot reasonably decide yourself, understandable on its own, options as
   A), B), C). Keep working on your best assumption meanwhile.
-- `<no-wait pid="123"/>`: a process you started that my review should not wait for (a long-lived helper).
+- `<no-wait pid="123"/>`: ONLY for a long-lived helper the result does not depend on (a dev server, a monitor). Never for
+  a job whose output the work needs: that job is waited for, so the review sees its finished result.
 
 Background jobs
 - Start long jobs detached (`nohup … &`) in the repository and end your turn. A job that is still running is
   noticed automatically and my review waits until it ends (this does not count against your turn's time limit);
   then the turn comes back to you to finish. Do not keep your turn open to wait (no waiter scripts or sleep loops).
+  `<no-wait>` only tells my review not to wait for that process; it does not let you wait for it. If you are
+  waiting for a job, end your turn and do not tag it; the job is waited for, then the turn comes back to you.
 - If nothing useful can be done until someone else finishes a task, say so in one line; do not invent work.
 
 Boundaries

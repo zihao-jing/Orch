@@ -241,12 +241,21 @@ class ManagedRunner(MonitorRunner):
             for note in self.notes_up(r.get("output") or ""):
                 self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
             if purpose == "checkin" and r["status"] == "ok":
-                for attrs, body in T.blocks(r.get("output") or "", "message"):
-                    for worker in self.workers:
-                        if body and T.addressed(attrs, worker.called, worker.name, "worker"):
-                            self.rec.queue_worker_message(worker.name, self.for_worker(body),
-                                                          r["turn_id"], agent.name)
+                sent, problems = T.routes(r.get("output") or "", agent.name, self.mon.agents)
+                for target, body, _urgent in sent:
+                    if target.role == "worker":
+                        self.rec.queue_worker_message(target.name, self.for_worker(body), r["turn_id"], agent.name)
+                    else:
+                        problems.append(f'<message to="{target.called}"> is not the worker; a check-in passes updates '
+                                        "to the worker only; not sent")
+                self.warn_routes(agent, problems)
         return r
+
+    def warn_routes(self, agent: AgentConfig, problems: List[str]) -> None:
+        """Say in the progress log (and the event record) what a reply's <message> blocks could not send."""
+        for p in problems:
+            self.rec.progress(f"⚠ {agent.called}: {p}")
+            self.rec.event("route_problem", agent=agent.name, problem=p)
 
     # ------------------------------------------------------------------ working state (agents/<name>/state.md)
     # One owner and one moment per piece: the manager rewrites its state (standing instruction for the critic and the
@@ -394,9 +403,9 @@ class ManagedRunner(MonitorRunner):
             rows = [json.loads(x) for x in (self.rec.run_dir / "chat.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
         except OSError:
             return
+        from .board import manager_chat_session
         since = (self.st["sessions"].get(agent.name) or {}).get("reset_at") or ""
-        sid = next((r.get("session_id") for r in reversed(rows) if r.get("session_id") and (r.get("ts") or "") > since),
-                   None)
+        sid = manager_chat_session(rows, since, self.st, agent.name)
         if sid and sid != (self.st["sessions"].get(agent.name) or {}).get("session_id"):
             self.rec.update_session(agent.name, session_id=sid)
 
@@ -410,6 +419,10 @@ class ManagedRunner(MonitorRunner):
             if note and note in q:
                 q[q.index(note)] = HANDOVER
         self.rec.save()
+
+    def fresh_session_note(self, agent: AgentConfig) -> str:
+        """A backup model on another provider starts a new session: with the agent's handover notes."""
+        return self.handover(agent)
 
     def recover_interrupted(self) -> List[Dict[str, Any]]:
         self.backfill_decisions()
@@ -880,6 +893,10 @@ class ManagedRunner(MonitorRunner):
         """What the worker gets from a critic reply: the text outside the tags, plus any <message to="worker">."""
         names = [n for w in self.workers for n in (w.called, w.name)] + ["worker"]
         extra = [b for a, b in T.blocks(text, "message") if b and T.addressed(a, *names)]
+        sent, problems = T.routes(text, self.critic.name, self.mon.agents)
+        problems += [f'<message to="{t.called}"> is not the worker; a review passes messages to the worker only; not sent'
+                     for t, _b, _u in sent if t.role != "worker"]
+        self.warn_routes(self.critic, problems)
         return self.for_worker("\n\n".join([x for x in [T.outside(text)] + extra if x]))
 
     def for_worker(self, text: str) -> str:
@@ -1248,7 +1265,8 @@ class ManagedRunner(MonitorRunner):
         for name in list(agents):  # a wait saved by an older orch may hold processes that were never jobs
             j = agents[name]
             ws = [self.mon.agent(name).working_dir or self.mon.working_dir]
-            keep = set(_jobs.inside(j["pids"], ws))
+            keep = {x for x in _jobs.inside(j["pids"], ws)
+                    if not _jobs.is_tool((j.get("cmds") or {}).get(str(x), ""))}  # a shell or editor helper is never a job
             if keep != set(j["pids"]):
                 j["lines"] = [l for x, l in zip(j["pids"], j["lines"]) if x in keep]
                 j["cmds"] = {k: v for k, v in (j.get("cmds") or {}).items() if int(k) in keep}
@@ -1529,14 +1547,24 @@ class ManagedRunner(MonitorRunner):
                             f"{ms['title']}{why}", "text": ms.get("summary", ""), "turn": ms.get("summary_turn")})
         if d.get("message"):
             self.decide(f"Milestone {mg['ms'] + 1} ({ms['title']}): {d['decision']}. {d['message']}", "you", "gate")
+        held = (mg.get("guidance") or "").strip()  # the manager's message for the critic, held while I decide
         if d["decision"] == "approve":
             if d.get("message"):
                 self.forward(self.manager, d["message"])
-            mg["phase"] = "next"
+            if held:
+                self.rec.event("message_superseded", turn=ms.get("summary_turn"), to=self.critic.name,
+                               reason="milestone approved at the gate")
+            mg.update(phase="next", guidance="")
             return None
-        comment = d.get("message") or mg.get("guidance") or "Please keep going on this milestone."
-        r = self.say(self.manager, self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment),
-                     "feedback")
+        comment = d.get("message") or held or "Please keep going on this milestone."
+        # with my comment in its place, the held message would vanish unseen: show it to the manager to carry over
+        unsent = self.mtpl("unsent_message", message=held).strip() if held and d.get("message") else ""
+        r = self.say(self.manager, self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment,
+                                             unsent=unsent), "feedback")
+        if held:
+            self.rec.event("message_superseded", turn=ms.get("summary_turn"), to=self.critic.name, by=r["turn_id"],
+                           reason="replaced by the manager's message after the gate"
+                                  + ("" if unsent or comment == held else "; not shown to the manager"))
         ms.update(status="active")
         mg.update(guidance=self.for_critic(self.after_manager(r, relay=False)), guidance_at=now_iso(), ms_round=0, limit=False, phase="guidance")
         return None

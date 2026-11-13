@@ -16,6 +16,13 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 Proc = Tuple[int, str]  # (parent pid, command line)
 _INIT = re.compile(r"(^|/)(launchd|systemd|init)(\s|$)")
+# A bare shell (interactive or login: "-zsh", "/bin/zsh -il", "bash") is where commands are typed, not a job.
+# "bash train.sh" still counts: it runs something.
+_SHELL = re.compile(r"^-?(\S*/)?(zsh|bash|sh|dash|ksh|fish)(\s+-\S+)*\s*$")
+# Editor and IDE helpers (VS Code's language servers, JetBrains, Cursor) live in the project folder and can outlive
+# their launcher, so they are reparented to init and look detached. They are the editor's, never the worker's.
+_EDITOR = re.compile(r"\.vscode-server/|\.vscode/extensions/|\.cursor-server/|Visual Studio Code|Code Helper|"
+                     r"Cursor Helper|JetBrains|--clientProcessId=|language-features|language-server")
 
 
 def snapshot() -> Dict[int, Proc]:
@@ -68,6 +75,39 @@ def _inside(path: str, roots: List[str]) -> bool:
     return any(rp == r or rp.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
 
 
+def is_shell(command: str) -> bool:
+    """A bare shell, which is never a job (see _SHELL)."""
+    return bool(_SHELL.match((command or "").strip()))
+
+
+def is_tool(command: str) -> bool:
+    """Not a job: a bare shell, or an editor's helper process (see _EDITOR)."""
+    cmd = command or ""
+    return is_shell(cmd) or bool(_EDITOR.search(cmd))
+
+
+_WAITER = re.compile(r"\bkill\s+-0\s+\d+|\b(while|until)\b.*\bsleep\s+\d")
+
+
+def waiters(root: int, procs: Dict[int, Proc]) -> List[int]:
+    """Processes under `root` (a worker's turn) that wait on another process instead of doing work: a `kill -0`
+    check or a `while … sleep` loop. A turn that keeps one of these open is holding up its own review."""
+    kids: Dict[int, List[int]] = {}
+    for pid, (ppid, _cmd) in procs.items():
+        kids.setdefault(ppid, []).append(pid)
+    out, todo, seen = [], [root], set()
+    while todo:
+        p = todo.pop()
+        for c in kids.get(p, []):
+            if c in seen:
+                continue
+            seen.add(c)
+            todo.append(c)
+            if _WAITER.search(procs[c][1] or ""):
+                out.append(c)
+    return sorted(out)
+
+
 def inside(pids: Iterable[int], workspaces: Iterable[str]) -> List[int]:
     """The pids whose working directory is (still) readable and inside one of the workspaces."""
     roots = [os.path.realpath(w) for w in workspaces if w]
@@ -99,7 +139,7 @@ def detect(before: Dict[int, Proc], workspaces: Iterable[str], ignore: Iterable[
     for pid, (_pp, cmd) in sorted(new.items()):
         if not _inside(where.get(pid, ""), roots) or not detached(pid):
             continue
-        if any(p.search(cmd) for p in pats):
+        if any(p.search(cmd) for p in pats) or is_tool(cmd):
             continue
         if new[pid][0] in new and any(j["pid"] == new[pid][0] for j in jobs):
             continue  # a child of a job already listed: waiting for the parent covers it

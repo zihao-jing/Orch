@@ -223,8 +223,18 @@ I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
 
 {{comment}}
 
+{{unsent}}
+
 Please write what {{critic}} should do next, at a high level and in terms of the work (no milestones or scores),
 inside `<message to="{{critic}}">…</message>`, and update your `<state>` with it.
+""",
+    "unsent_message": """Your last message to {{critic}} was held when the milestone came to me, and it has not been sent:
+
+<<<
+{{message}}
+>>>
+
+Your new message replaces it, so carry over whatever in it still applies.
 """,
     "critic_brief": """\
 {{instructions}}
@@ -447,7 +457,8 @@ from the message you send to {{critic}}.
                            "<verdict>PASS</verdict> or <verdict>FAIL</verdict>.",
     "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for me goes in "
                            "<question>…</question>; jobs you start detached are noticed automatically, and "
-                           "<no-wait pid=\"…\"/> marks one my review should not wait for.",
+                           "<no-wait pid=\"…\"/> is only for a long-lived helper the result does not depend on; "
+                           "a job the work needs is waited for, not tagged.",
     "session_reset": """\
 This is a fresh conversation: your earlier one was cleared to keep turns quick, and the work carries on from where it
 is. Here is what you need from before.

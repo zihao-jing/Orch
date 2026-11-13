@@ -5,7 +5,7 @@
 output_dir: ./orch-runs            # every round, session and turn is recorded here (see index.html)
 
 defaults:                          # applied to every agent (monitor-level `defaults:` override these)
-  backend: claude                  # claude | codex | command | mock
+  backend: claude                  # claude | codex | agy | command | mock
   timeout: 1800                    # seconds per turn
   retries: 1                       # extra attempts when a turn errors or times out
   backend_options:

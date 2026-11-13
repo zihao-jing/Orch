@@ -20,7 +20,7 @@ not used. A tag left open runs to the next protocol tag or to the end of the rep
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 NAMES = ("message", "question", "pause", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
          "instruction")
@@ -118,6 +118,41 @@ def addressed(attrs: Dict[str, str], *names: str) -> bool:
     """Is a <message to="…"> for one of these names (display name or agent name, "the" ignored)?"""
     to = _norm(attrs.get("to", ""))
     return bool(to) and any(to == _norm(n) for n in names if n)
+
+
+def routes(text: str, sender: str, agents: List[Any]) -> Tuple[List[Tuple[Any, str, bool]], List[str]]:
+    """Where each <message to="…"> of a reply goes: ([(agent, body, urgent)], [reason for each block that can't go]).
+    `to="you"` is for the human and is skipped here. A block to the sender itself, to no agent, to the auditor
+    or with an empty body is reported, not sent."""
+    ok: List[Tuple[Any, str, bool]] = []
+    problems: List[str] = []
+    for attrs, body in blocks(text, "message"):
+        to = (attrs.get("to") or "").strip()
+        if _norm(to) == "you":
+            continue
+        target = recipient(to, agents)
+        if target is None:
+            problems.append(f'<message to="{to}"> names no agent; not sent')
+        elif target.name == sender:
+            problems.append(f'<message to="{to}"> is addressed to the sender itself; not sent')
+        elif getattr(target, "role", "") == "auditor":
+            problems.append(f'<message to="{to}"> goes to the auditor, which takes no messages; not sent')
+        elif not (body or "").strip():
+            problems.append(f'<message to="{to}"> is empty; not sent')
+        else:
+            ok.append((target, body, urgent(attrs)))
+    return ok, problems
+
+
+def recipient(to: str, agents: List[Any]) -> Any:
+    """The agent a <message to="…"> names (agent name or display name, "the" ignored); "worker" / "critic" /
+    "manager" stand for the one agent with that role. None if it names no agent (or a role several agents share)."""
+    target = next((a for a in agents if _norm(to) in (_norm(a.name), _norm(a.called))), None)
+    role = {"worker": "worker", "critic": "verifier", "manager": "manager"}.get(_norm(to))
+    if target is None and role:
+        same = [a for a in agents if getattr(a, "role", "") == role]
+        target = same[0] if len(same) == 1 else None
+    return target
 
 
 def urgent(attrs: Dict[str, str]) -> bool:

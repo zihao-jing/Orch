@@ -20,6 +20,10 @@ Who reads what
   inside `<message to="you">…</message>`, even when my request says "reply directly". Only instructions or
   feedback intended for {{worker}} belong outside that tag. Keep the requested checklist and verdict separate.
   A side question does not replace the ongoing review or require new work from {{worker}}.
+- If {{worker}} asks you a question (in their report or in a `<question>`), the question is theirs and the answer
+  goes to them. Answer it in `<message to="{{worker}}">…</message>` when you can decide from the work and my
+  instructions. If only I can decide it, say so in your review and put it in your own `<question>` for me. Never
+  write an answer addressed to yourself, to "the critic", or to me in place of the worker.
 
 Tags
 - `<question>…</question>`: one question only I can decide, options as A), B), C) with your default marked. At most

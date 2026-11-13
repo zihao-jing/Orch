@@ -153,6 +153,51 @@ def _turns_for_round(rdir: Path) -> List[Dict[str, Any]]:
     return out
 
 
+CLAUDE_MODEL = re.compile(r"^(opus|sonnet|haiku|default|best|opusplan)(\[1m\])?$|^(anthropic/)?claude[-.]", re.I)
+ANTHROPIC_HOST = re.compile(r"(^|\.)anthropic\.com$", re.I)
+
+
+def endpoint_host(env: Dict[str, str]) -> str:
+    """The host of a custom provider endpoint (``*_BASE_URL``), '' for the backend's default. Host only: no path,
+    no credentials."""
+    from urllib.parse import urlparse
+    for k in sorted(env or {}):
+        if k.endswith("_BASE_URL") and env[k]:
+            return urlparse(env[k] if "//" in env[k] else "//" + env[k]).hostname or ""
+    return ""
+
+
+def cost_basis(backend: str, models: List[str], endpoint: str = "", stderr: str = "") -> str:
+    """'estimate' when the backend prices tokens it did not buy: Claude Code bills every model at its own Claude
+    prices, so behind another provider's endpoint, or for a model it does not know, its dollars are a guess.
+    'reported' otherwise."""
+    if backend != "claude":
+        return "reported"
+    if "unrecognized_model" in (stderr or ""):
+        return "estimate"
+    if endpoint and not ANTHROPIC_HOST.search(endpoint):
+        return "estimate"
+    return "estimate" if any(m and not CLAUDE_MODEL.search(m) for m in models) else "reported"
+
+
+def turn_model(t: Dict[str, Any]) -> str:
+    """The model a turn ran on: what answered (Claude reports it), else the one asked for; for runs before orch
+    recorded it, the model Claude Code named when it did not recognise it."""
+    ms = (t.get("meta") or {}).get("models") or []
+    if ms:
+        return ", ".join(ms)
+    m = re.search(r'unrecognized_model\]\s*\{"model":\s*"([^"]+)"', t.get("stderr") or "")
+    return m.group(1) if m else str(t.get("model") or "")
+
+
+def turn_cost_basis(t: Dict[str, Any]) -> str:
+    """The turn's recorded cost basis, or (older runs) what its record still shows."""
+    if t.get("cost_basis"):
+        return str(t["cost_basis"])
+    ms = (t.get("meta") or {}).get("models") or []
+    return cost_basis(str(t.get("backend") or ""), list(ms), str(t.get("endpoint") or ""), str(t.get("stderr") or ""))
+
+
 def turn_costs(items: List[Dict[str, Any]], key: str = "cost") -> Optional[float]:
     """Each item's own cost, set in place under ``key``, and the total. Claude reports a resumed session's
     running total, so a turn costs the increase over that session's previous report."""
