@@ -83,6 +83,7 @@ textarea:focus,input:focus{outline:2px solid var(--s1);outline-offset:-1px}
 .ck .nt{color:var(--mute)}
 details.ckp>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px}
 details.ckp>summary::-webkit-details-marker{display:none}
+#audit-card[open]>summary .mute{display:none}
 details.ckp>summary h2{margin:0}details.ckp>summary:before{content:"▸";color:var(--mute);font-size:12px}details.ckp[open]>summary:before{content:"▾"}
 details.ckp .bar{margin-top:8px}
 /* charts */
@@ -190,7 +191,7 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
    <div class="card"><h2>Critic ↔ worker, round by round</h2><div id="rounds"></div></div>
    <div class="card"><h2>Questions</h2><div id="qs"></div></div>
    <div class="card"><h2 id="dec-h">Decisions</h2><div id="decs"></div></div>
-  <div class="card" id="audit-card" hidden><h2 id="audit-h">Auditor</h2><div id="audit"></div></div>
+  <details class="card ckp" id="audit-card" hidden><summary><h2 id="audit-h">Auditor</h2><span class="mute">click to load</span></summary><div id="audit"></div></details>
   </main>
   <aside class="side">
    <div class="card chat">
@@ -654,15 +655,21 @@ let decPage = 15;
 $('decs').addEventListener('click', e => { if (e.target.closest('[data-dpage]')) { decPage += 15; renderDecisions(); } });
 const openDecs = new Set();
 const openAudits = new Set();
+let AFULL = null, auditKey = '';  // the audit texts, fetched only while the Auditor card is open
 function renderAudit(){  // the auditor (outside the team): its findings file and every audit it has made, newest first
   const A = D.audit || {}, h = A.history || [];
   $('audit-card').hidden = !(A.configured || h.length);
   if ($('audit-card').hidden) return;
-  const f = (A.findings || '').trim(), n = h.length;
+  const n = h.length;
   $('audit-h').textContent = 'Auditor' + (n ? ` · ${n} audit${n > 1 ? 's' : ''}` : '');
+  if (!$('audit-card').open) return;
+  const key = h.map(a => a.file).join() + '|' + A.has_findings;
+  if (!AFULL || key !== auditKey) { auditKey = key; loadAudit(); if (!AFULL) return; }
+  const F = AFULL, fh = F.history || [];
+  const f = (F.findings || '').trim();
   const findings = f ? `<details class="fold" open><summary><b>Findings</b> <span class="mute">audit.md</span></summary><div class="fb"><div class="md">${md(f)}</div></div></details>`
     : '<div class="empty">No findings yet.</div>';
-  const hist = h.length ? h.map(a => {
+  const hist = fh.length ? fh.map(a => {
     const key = a.file, when = (a.file || '').slice(0, 15).replace(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5');
     const rounds = a.rounds ? `rounds ${a.rounds[0]}–${a.rounds[1]}` : 'rounds ?';
     const st = a.status === 'ok' ? pill('p-good', '✓ ok') : pill('p-warn', esc(a.status));
@@ -673,6 +680,13 @@ function renderAudit(){  // the auditor (outside the team): its findings file an
   }).join('') : '<div class="empty">No audits have run yet.</div>';
   setHTML($('audit'), `<h2 style="font-size:13px;margin:4px 0">Findings</h2>${findings}<h2 style="font-size:13px;margin:12px 0 4px">Audit history</h2>${hist}`);
 }
+async function loadAudit(){
+  if (!AFULL) setHTML($('audit'), '<div class="empty">Loading…</div>');
+  try { const r = await fetch('api/audit?m=' + encodeURIComponent(M), {cache:'no-store'}); AFULL = await r.json(); }
+  catch (e) { setHTML($('audit'), '<div class="empty">Could not load the audits.</div>'); return; }
+  renderAudit();
+}
+$('audit-card').addEventListener('toggle', e => { if (e.target === $('audit-card')) renderAudit(); });
 $('audit').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.a) return;
   d.open ? openAudits.add(d.dataset.a) : openAudits.delete(d.dataset.a); }, true);
 $('decs').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.d) return;

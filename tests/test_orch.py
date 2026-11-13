@@ -244,7 +244,12 @@ class TestPipeline(unittest.TestCase):
             "# Audit of rounds 11–20 (error, $0.00)\n\n## Sent\n\nprompt\n\n## Reply\n\n\n## stderr\n\nboom\n",
             encoding="utf-8")
         (run / "state.json").write_text(json.dumps({"monitor": "m", "status": "running"}))
-        d = Board("m", lambda: run, None).data()["audit"]
+        b = Board("m", lambda: run, None)
+        light = b.data()["audit"]  # the state poll sends the list only; the texts load when the card is opened
+        self.assertNotIn("findings", light)
+        self.assertNotIn("reply", light["history"][0])
+        self.assertEqual(light["history"][1]["rounds"], [1, 10])
+        d = b.audit()
         self.assertFalse(d["configured"])
         self.assertEqual(d["findings"], "")
         self.assertEqual([h["file"] for h in d["history"]],
