@@ -1,6 +1,9 @@
 """Background jobs a worker left running: found by orch itself, so the worker doesn't have to report them.
 
-A job is a process that started during the worker's turn, is still running after the turn ended, runs in the
+A job is a process that started during the worker's turn, carries that turn's tag (orch puts ``ORCH_JOB=<run>/<agent>``
+in the worker's environment and every process it starts inherits it, ``nohup`` and ``setsid`` included; a process
+started by someone else, such as a browser or a server of mine opened in the project folder, never has it), is still
+running after the turn ended, runs in the
 workspace (its working directory is inside it; a process whose directory can't be read is never counted) and was detached from the agent (``nohup … &``, ``setsid``): its
 parent is the system's init process (or another such job). Processes of mine, an editor or a terminal keep their
 own parents and are never counted.
@@ -65,6 +68,46 @@ def cwds(pids: Iterable[int]) -> Dict[int, str]:
     return out
 
 
+TAG_VAR = "ORCH_JOB"
+
+
+def tag_for(run: str, agent: str) -> str:
+    """The value of ORCH_JOB in an agent's turns: which run and agent a process was started by."""
+    return f"{run}/{agent}"
+
+
+def tag_check(pids: Iterable[int], tags: Iterable[str]) -> Dict[int, bool]:
+    """For each pid whose environment I can read: does it carry ORCH_JOB=<one of `tags`>? Pids whose environment
+    can't be read are left out (macOS hides it for its own system programs, e.g. /bin/sleep or /bin/bash, and for
+    other users' processes)."""
+    pids = [int(p) for p in pids]
+    want = {f"{TAG_VAR}={t}" for t in tags if t}
+    if not pids or not want:
+        return {}
+    out: Dict[int, bool] = {}
+    if sys.platform.startswith("linux"):
+        for p in pids:
+            try:
+                env = Path(f"/proc/{p}/environ").read_bytes().decode("utf-8", "replace").split("\0")
+            except OSError:
+                continue
+            if any(e.startswith("PATH=") for e in env):
+                out[p] = bool(want & set(env))
+        return out
+    try:  # macOS / BSD: -E appends the environment to the command line (only for my own processes)
+        res = subprocess.run(["ps", "-wwE", "-o", "pid=,command=", "-p", ",".join(map(str, pids))],
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    for line in res.stdout.splitlines():
+        head, _, rest = line.strip().partition(" ")
+        if not head.isdigit() or not re.search(r"(^|\s)PATH=", rest):
+            continue  # no environment shown: unreadable
+        words = set(rest.split())
+        out[int(head)] = bool(want & words)
+    return out
+
+
 def _inside(path: str, roots: List[str]) -> bool:
     if not path:  # unknown (e.g. lsof can't read another user's process): realpath("") would be *my* cwd
         return False
@@ -116,8 +159,9 @@ def inside(pids: Iterable[int], workspaces: Iterable[str]) -> List[int]:
 
 
 def detect(before: Dict[int, Proc], workspaces: Iterable[str], ignore: Iterable[str] = (),
-           after: Optional[Dict[int, Proc]] = None) -> List[Dict[str, object]]:
-    """Jobs started since `before` that are still running, detached, in one of the workspaces."""
+           after: Optional[Dict[int, Proc]] = None, tags: Iterable[str] = ()) -> List[Dict[str, object]]:
+    """Jobs started since `before` that are still running, detached, in one of the workspaces and, when `tags` are
+    given, started by one of those turns: the process or one under it carries ORCH_JOB=<tag>."""
     if not before:
         return []
     after = snapshot() if after is None else after
@@ -144,6 +188,26 @@ def detect(before: Dict[int, Proc], workspaces: Iterable[str], ignore: Iterable[
         if new[pid][0] in new and any(j["pid"] == new[pid][0] for j in jobs):
             continue  # a child of a job already listed: waiting for the parent covers it
         jobs.append({"pid": pid, "command": cmd})
+    tags = [t for t in tags if t]
+    if jobs and tags:  # keep a job only if it (or one under it) carries the turn's tag, when that can be read
+        kids: Dict[int, List[int]] = {}
+        for p, (pp, _c) in new.items():
+            kids.setdefault(pp, []).append(p)
+
+        def tree(root: int) -> List[int]:
+            out, todo = [], [root]
+            while todo:
+                p = todo.pop()
+                out.append(p)
+                todo.extend(k for k in kids.get(p, []) if k not in out)
+            return out
+
+        trees = {int(j["pid"]): tree(int(j["pid"])) for j in jobs}
+        seen = tag_check({p for t in trees.values() for p in t}, tags)
+        # No environment readable in the whole tree (a bare system program): judged the old way, by place and
+        # detachment. Otherwise the tag decides: a browser or server someone else opened in the folder lacks it.
+        jobs = [j for j in jobs if not any(p in seen for p in trees[int(j["pid"])])
+                or any(seen.get(p) for p in trees[int(j["pid"])])]
     return jobs
 
 

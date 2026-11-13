@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .backends import StopRequested, TurnRequest, TurnResult, get_backend
 from .config import AgentConfig, MonitorConfig
 from .recorder import Recorder, now_iso, read_json
+from . import jobs as _jobs
 from . import tags as T
 from .report import CHECKBOX, cost_basis, endpoint_host
 from .templates import render
@@ -699,7 +700,7 @@ class MonitorRunner:
             req = TurnRequest(
                 agent=agent.name, role=agent.role, prompt=send, system_prompt=record["system_prompt"],
                 session_id=sid, cwd=agent.working_dir, timeout=agent.timeout,
-                options=v.options, env=v.env,
+                options=v.options, env={**v.env, _jobs.TAG_VAR: _jobs.tag_for(rec.run_dir.name, agent.name)},
                 context={"round": rnd, "purpose": purpose, "monitor": self.mon.name,
                          "roster": [a.name for a in self.mon.agents], **(extra or {})},
                 on_event=live_event,
