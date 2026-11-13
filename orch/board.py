@@ -28,7 +28,7 @@ from .backends import TurnRequest, run_variants
 from .config import MonitorConfig
 from .recorder import agent_lock, live_event, now_iso, read_json
 from . import report as R
-from .report import checklist_items, turn_costs
+from .report import checklist_items, review_checklist, turn_costs
 from .templates import render
 
 _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
@@ -138,7 +138,7 @@ class Board:
             "mode": st.get("mode"), "goal": st.get("goal"), "round": st.get("round"), "max_rounds": st.get("max_rounds"),
             "cost": total_cost, "cost_estimate": cost_estimate, "turn_counts": st.get("turn_counts"), "updated_at": st.get("updated_at"),
             "started_at": st.get("started_at"), "error": st.get("error"),
-            "managed": st.get("managed") or {}, "questions": st.get("questions") or [],
+            "managed": st.get("managed") or {}, "night": bool(st.get("night")), "questions": st.get("questions") or [],
             "decisions": st.get("decisions") or [],
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
             "chat": chat, "chat_more": chat_more, "relays": relays, "routes": routes, "received": received, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
@@ -215,9 +215,13 @@ class Board:
             item = None
             if t.get("role") == "verifier":
                 from . import tags as T
-                ck = T.bodies(out, "checklist")
-                body = "\n".join(ck) if ck else out  # older runs: the list lines anywhere in the reply
+                body = review_checklist(out)  # older runs: the list lines anywhere in the reply, outside the plan
                 items = checklist_items(body)
+                plan = T.bodies(out, "plan")
+                steps = checklist_items(plan[-1]) if plan else []
+                if steps:  # the critic's steps: where the work stands
+                    row["plan"] = [sum(1 for d, _ in steps if d), len(steps)]
+                    row["plan_text"] = plan[-1]
                 if items and t.get("purpose") == "verify":  # briefs and amends list items still to do, not progress
                     row["checklist"] = [sum(1 for d, _ in items if d), len(items)]
                     row["checklist_text"] = body
@@ -792,6 +796,8 @@ def _handler(boards: Dict[str, Board]):
                 return self.js(b.chat(msg, qid=body.get("qid"), settle=settle, agent=body.get("agent") or None))
             if u.path == "/api/answer":
                 b.control({"kind": "answer", "qid": body.get("qid"), "message": msg})
+            elif u.path == "/api/night":
+                b.control({"kind": "night", "on": bool(body.get("on"))})
             elif u.path == "/api/job":
                 b.control({"kind": "job"})
             elif u.path == "/api/gate":

@@ -199,7 +199,7 @@ class ControllerConfig:
     templates: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TEMPLATES))
     agent: Optional[AgentConfig] = None  # llm mode: the controller agent itself
     # ---- managed mode (manager -> critic -> worker)
-    milestone_rounds: int = 40  # worker/critic rounds per milestone before the manager and I take a look
+    milestone_rounds: int = 40  # rounds without progress (no step of the critic's plan finished) before we take a look
     approve_plan: bool = True  # pause for my OK on the manager's milestone plan
     approve_milestones: bool = True  # pause for my OK after the manager accepts each milestone
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
@@ -207,7 +207,7 @@ class ControllerConfig:
     job_ignore: List[str] = field(default_factory=list)  # regexes: commands never waited on (e.g. a status loop)
     tag_reminder: float = 0.2  # managed mode: chance per turn of a short reminder of the tags (0 = never)
     job_wait: int = 21600  # seconds the critic waits for a job the worker says it is waiting on (0 = never wait)
-    checkin_every: int = 0  # every N worker/critic rounds the critic sends the manager a short update (0 = off)
+    checkin_every: int = 0  # every N rounds a short update for the manager: from the critic's plan when it has one (0 = off)
     # a reply holding a line like this sends questions one level up (worker -> critic -> manager -> me)
     question_pattern: str = r"^\W*QUESTIONS? FOR\b"
     # "NOTE FOR critic: ..." in a manager reply is passed on to that agent's next turn

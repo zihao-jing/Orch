@@ -335,7 +335,7 @@ class Recorder:
             out.append({"to": [to] if isinstance(to, str) else to})
         return out
 
-    def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause")) -> List[Dict[str, Any]]:
+    def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause", "night")) -> List[Dict[str, Any]]:
         """Consume answer / approval files from inbox/ (oldest first)."""
         inbox = self.run_dir / "inbox"
         out: List[Dict[str, Any]] = []

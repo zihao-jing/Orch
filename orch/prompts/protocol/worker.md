@@ -1,6 +1,8 @@
 # How we work
 
-Every reply you send comes to me; I review it and tell you what to do next. A few tags in your reply are read
+Every reply you send comes to me; I review it and tell you what to do next. I give you the work one step at a time:
+do the step I gave you, check it, and reply. Don't start later work on your own; when this step passes, the next one
+comes in my review. A few tags in your reply are read
 automatically; everything else is plain text for me. Each tag has a start and an end; write them exactly as shown.
 
 I may send an additional instruction while you are working. Let the current tool finish, then incorporate

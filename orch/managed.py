@@ -63,6 +63,7 @@ _STATE_HEAD_RE = re.compile(r"\A\s*<!--\s*orch: working state of .*?run (\S+?), 
 # placeholders a reset leaves in an agent's queue; the handover notes are written when its next turn starts
 HANDOVER = "(handover notes: written when this agent's next turn starts)"
 HANDOVER_TOP_DOWN = "(handover notes for the top-down restart: written when this agent's next turn starts)"
+PLAN_STATUS = "(orch, from the critic's plan)"  # a check-in written by orch; only the newest one waits for the manager
 
 
 def checklist_text(text: str) -> str:
@@ -71,12 +72,37 @@ def checklist_text(text: str) -> str:
     tagged = T.bodies(text or "", "checklist")
     if tagged:
         return "\n".join(tagged)
-    return "\n".join(ln for ln in (text or "").split("\n") if CHECKBOX.match(ln))
+    rest = T.without_markup(text or "", drop=("plan",))  # the plan's steps are not checklist items
+    return "\n".join(ln for ln in rest.split("\n") if CHECKBOX.match(ln))
 
 
 def checklist_of(text: str) -> Tuple[int, int]:
     """(done, open) items of the critic's checklist in a reply; (0, 0) without one."""
     return checklist_state(checklist_text(text))
+
+
+def plan_text(text: str) -> str:
+    """The critic's plan in a reply: its <plan> block (the last one), '' without one. Its steps are checkbox lines;
+    the first open one is the step the worker is on."""
+    blocks = T.bodies(text or "", "plan")
+    return blocks[-1] if blocks else ""
+
+
+def plan_steps(plan: str) -> List[Tuple[bool, str]]:
+    """[(done, step)] of a plan."""
+    out = []
+    for ln in (plan or "").split("\n"):
+        m = CHECKBOX.match(ln)
+        if m:
+            out.append((m.group(1) != " ", ln[m.end():].strip()))
+    return out
+
+
+def plan_status(plan: str) -> Tuple[int, int, str]:
+    """(steps done, steps in all, the current step's text); (0, 0, '') without a plan."""
+    steps = plan_steps(plan)
+    cur = next((s for d, s in steps if not d), "")
+    return sum(1 for d, _ in steps if d), len(steps), cur
 
 
 def pid_alive(pid: int) -> bool:
@@ -215,6 +241,8 @@ class ManagedRunner(MonitorRunner):
             note = self.mtpl(routing_template).strip()
             if note:
                 prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
+        if role == "manager" and self.st.get("night"):
+            prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{self.mtpl('night_manager').strip()}\n</system-reminder>\n"
         p = self.mon.controller.tag_reminder
         if role and not (role == "critic" and purpose == "checkin") and p > 0 and random.random() < p:
             note = self.mtpl(f"tag_reminder_{role}").strip()
@@ -330,12 +358,14 @@ class ManagedRunner(MonitorRunner):
 
     def write_critic_state(self) -> None:
         mine, _at = self.read_state(self.manager)
-        ck = self.latest_checklist()
+        ck, plan = self.latest_checklist(), self.latest_plan()
         parts = []
         if mine:
             parts.append(self.mtpl("critic_state_instruction", state=mine).strip())
+        if plan:
+            parts.append("## Your plan\n\n" + plan)
         if ck:
-            parts.append("## Your checklist\n\n" + ck)
+            parts.append("## Your checklist (current step)\n\n" + ck)
         if parts:
             self.write_state(self.critic, "\n\n".join(parts), "orch")
 
@@ -350,8 +380,10 @@ class ManagedRunner(MonitorRunner):
                 self.write_state(a, bodies[-1], a.called)
                 self.write_critic_state()
             self.apply_preferences(a, out)
-        elif a.role == "verifier" and checklist_text(out):
-            self.write_critic_state()
+        elif a.role == "verifier":
+            self.note_plan(r)
+            if checklist_text(out) or plan_text(out):
+                self.write_critic_state()
         elif a.role == "worker":
             self.write_state(a, T.outside(out), "orch, from the latest report")
 
@@ -643,6 +675,70 @@ class ManagedRunner(MonitorRunner):
                     return ck
         return ""
 
+    def latest_plan(self) -> str:
+        """The critic's newest plan for the current milestone ('' if it has none): a plan belongs to the work it was
+        made for, so a new milestone starts without one."""
+        ms = self.mg.get("ms", 0) if self.mg.get("milestones") else None
+        for p in sorted((self.rec.run_dir / "rounds").glob("r*/t*.json"), reverse=True):
+            try:
+                t = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if t.get("agent") != self.critic.name:
+                continue
+            if ms is not None and t.get("milestone") is not None and t.get("milestone") != ms:
+                return ""  # older turns belong to an earlier milestone
+            plan = plan_text(t.get("output") or "")
+            if plan:
+                return plan
+        return ""
+
+    def stalled(self) -> int:
+        """Rounds since the last step of the critic's plan finished (or since this work started); runs from before
+        plans count every round of the milestone."""
+        mg = self.mg
+        return int(mg["stall"] if mg.get("stall") is not None else mg.get("ms_round", 0) or 0)
+
+    def plan_line(self) -> str:
+        """One status line from the critic's plan ('' without a plan)."""
+        done, total, cur = plan_status(self.latest_plan())
+        if not total:
+            return ""
+        mg, n = self.mg, self.stalled()
+        if done >= total:
+            return f"all {total} steps of the plan are done; the final review comes next"
+        line = f"step {done + 1} of {total} ({_clip(cur, 200)}), {n} round{'s' if n != 1 else ''} on it"
+        if mg.get("step_round"):
+            line += f"; the last step finished in round {mg['step_round']}"
+        return line
+
+    def limit_note(self) -> str:
+        mg, n = self.mg, self.stalled()
+        if self.latest_plan():
+            return f", since {n} rounds have passed without a step of your plan finishing"
+        return f", since we have spent {mg.get('ms_round', 0)} rounds on it"
+
+    def limit_title(self) -> str:
+        mg, n = self.mg, self.stalled()
+        if self.latest_plan():
+            return f"no step finished in {n} rounds"
+        return f"round limit reached ({mg.get('ms_round')} rounds)"
+
+    def note_plan(self, r: Dict[str, Any]) -> None:
+        """After a critic turn: a step ticked in its plan is progress, so the stall count starts again."""
+        plan = plan_text(r.get("output") or "")
+        if not plan:
+            return
+        mg = self.mg
+        done, total, cur = plan_status(plan)
+        before = mg.get("plan_done")
+        mg["plan_done"], mg["plan_total"] = done, total
+        if before is not None and done > before:
+            mg["stall"] = 0
+            mg["step_round"] = int(self.st.get("round", 0))
+            self.rec.event("plan_step", turn=r.get("turn_id"), done=done, total=total, next=cur)
+            self.rec.progress(f"✓ step {done} of {total} done" + (f"; next: {_clip(cur, 160)}" if cur else ""))
+
     def last_turn(self, agent: str, purposes: Tuple[str, ...]) -> Optional[Dict[str, Any]]:
         """The newest finished turn of an agent in one of these kinds of turn (None if none)."""
         best = None
@@ -712,16 +808,22 @@ class ManagedRunner(MonitorRunner):
                 text = strip_checklist(self.clean_report(t.get("output") or ""))
                 ck = self.latest_checklist()
                 done, open_ = checklist_state(ck) if ck else (0, 0)
+                pd, pt, _cur = plan_status(self.latest_plan())
                 parts.append(_cap(f"{self.critic.called}'s latest message ({t.get('purpose')}, "
                                   f"{(t.get('started_at') or '')[5:16].replace('T', ' ')}"
+                                  + (f"; its plan: step {min(pd + 1, pt)} of {pt}" if pt else "")
                                   + (f"; its checklist: {done} of {done + open_} done" if ck else "") + "):\n\n")
                              + text)
         elif a.role == "verifier":
             body, _at = self.read_state(a)
-            ck = self.latest_checklist()
-            if top_down:
+            ck, plan = self.latest_checklist(), self.latest_plan()
+            if top_down:  # where the work stands carries over; the checklist is rebuilt from the new instruction
+                if plan:
+                    parts.append("Your plan so far (steps marked [x] are done; revise it to fit my new instruction):"
+                                 "\n\n" + plan)
                 if ck:
-                    parts.append("Your checklist (keep the items as they are):\n\n" + ck)
+                    parts.append("Your last checklist, for reference: write a new one for the step you hand out next, "
+                                 "carrying over only the standing rules that still hold:\n\n" + ck)
             elif body:
                 parts.append(f"Your working state (`{self.state_path(a)}`):\n\n"
                              + body)
@@ -732,11 +834,13 @@ class ManagedRunner(MonitorRunner):
                                  "below override it:\n\n" + mg["note"].strip())
                 if mg.get("guidance"):
                     parts.append(f"My latest guidance{when('guidance_at')}:\n\n" + mg["guidance"].strip())
+                if plan:
+                    parts.append("Your plan (keep it; tick steps as they finish):\n\n" + plan)
                 if ck:
-                    parts.append("Your checklist (keep the items as they are):\n\n" + ck)
+                    parts.append("Your checklist for the current step (keep the items as they are):\n\n" + ck)
             last = "" if top_down else self.last_output(a.name, ("verify", "guidance", "brief", "amend"))
             if last:  # the prose briefly; the checklist is above
-                prose = strip_checklist(T.without_markup(last, drop=("checklist", "verdict")))
+                prose = strip_checklist(T.without_markup(last, drop=("plan", "checklist", "verdict")))
                 parts.append("Your latest review:\n\n" + prose)
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
         if qs:
@@ -755,7 +859,7 @@ class ManagedRunner(MonitorRunner):
         return self.mtpl("session_reset", state="\n\n".join(parts)).strip()
 
     def clean_report(self, text: str) -> str:
-        return T.without_markup(text, drop=("checklist", "verdict"))
+        return T.without_markup(text, drop=("plan", "checklist", "verdict"))
 
     def reset_sessions(self, names: Optional[List[str]] = None) -> List[str]:
         """Clear these agents' conversations (all by default): the run keeps its place, records and decisions, and
@@ -840,7 +944,12 @@ class ManagedRunner(MonitorRunner):
         text = r.get("output") or ""
         mine = truncate(self.for_me(text), 1500)
         for q in T.bodies(text, "question"):
-            self.new_question(self.manager, "human", q, r["turn_id"], parent, assumption=mine)
+            nq = self.new_question(self.manager, "human", q, r["turn_id"], parent, assumption=mine)
+            if self.st.get("night"):  # nobody is watching: the manager's choice stands until I say otherwise
+                nq.update(status="night", answered_by=self.manager.name, answer=mine, answer_turn=r["turn_id"],
+                          answered_at=now_iso())
+                self.decide(f"{self.short_question(q)}: {mine or '(see the manager turn)'}", "manager (night mode)",
+                            nq["id"])
         if relay:
             for attrs, body in T.blocks(text, "message"):
                 a = self.find_agent(attrs.get("to", ""))
@@ -945,6 +1054,10 @@ class ManagedRunner(MonitorRunner):
                     msgs.append(m)
             elif d.get("kind") == "gate":
                 self.st.setdefault("gate_queue", []).append(d)
+            elif d.get("kind") == "night":
+                self.st["night"] = bool(d.get("on"))
+                self.rec.event("night", on=self.st["night"])
+                self.rec.progress("🌙 night mode on: the manager decides alone" if self.st["night"] else "☀ night mode off")
             elif d.get("kind") == "job":
                 self.mg["job_release"] = True
             elif d.get("kind") == "pause" and d.get("message"):  # from a chat with the manager on the board
@@ -987,6 +1100,11 @@ class ManagedRunner(MonitorRunner):
                     d = queue_.pop(0)
                     if not d.get("gate") or d["gate"] == gate["key"]:  # stale clicks for an older gate are dropped
                         decision = d
+                if decision is None and self.st.get("night") and gate["kind"] in ("plan", "milestone"):
+                    ok = gate["kind"] == "plan" or self.cur() is None or self.cur().get("accepted", True)
+                    decision = {"decision": "approve" if ok else "revise", "message": "", "night": True}
+                    self.decide(f"{gate['title']}: {'approved' if ok else 'kept going with the manager’s guidance'}"
+                                " (night mode, nobody at the gate)", "manager (night mode)", "gate")
                 if decision is not None:
                     break
                 if tty:
@@ -1126,7 +1244,8 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
                                              milestone=ms["text"], human_messages="",
                                              decisions=self.decisions_text()), "kickoff")
-        mg.update(note=self.for_critic(self.after_manager(r, relay=False)), note_at=now_iso(), ms_round=0, limit=False, phase="brief")
+        mg.update(note=self.for_critic(self.after_manager(r, relay=False)), note_at=now_iso(), ms_round=0, stall=0,
+                  limit=False, phase="brief", plan_done=None, plan_total=None, step_round=None)
         return None
 
     def ph_brief(self, mg: Dict[str, Any]) -> Optional[str]:
@@ -1144,7 +1263,9 @@ class ManagedRunner(MonitorRunner):
         if int(self.st.get("round", 0)) >= m.max_rounds:
             return "max_rounds_reached"
         redo = bool(mg.get("in_work"))  # a round cut off by a restart is redone before any limit or check-in
-        if not redo and mg.get("ms_round", 0) >= c.milestone_rounds:
+        # milestone_rounds counts rounds without progress: a step of the critic's plan finishing starts it again
+        # (without a plan, every round of the milestone counts, as before)
+        if not redo and self.stalled() >= c.milestone_rounds:
             mg.update(limit=True, phase="report")
             return None
         if not redo and mg.pop("checkin_due", False):
@@ -1154,6 +1275,7 @@ class ManagedRunner(MonitorRunner):
             rnd = int(mg["in_work"])
         else:
             rnd = int(self.st.get("round", 0)) + 1
+            mg["stall"] = self.stalled() + 1
             mg["ms_round"] = mg.get("ms_round", 0) + 1
         mg["in_work"] = rnd
         summary = self.begin_round(rnd)
@@ -1385,6 +1507,13 @@ class ManagedRunner(MonitorRunner):
                 self.rec.set(nudge=None)
         elif c.checklist:
             self.rec.set(nudge=None)
+        if vd == "PASS":
+            pd, pt, cur = plan_status(plan_text(r.get("output") or "") or self.latest_plan())
+            if pt and pd < pt:  # a finished step is not the finished work: the next step goes to the worker
+                vd = "FAIL"
+                summary["plan_open"] = pt - pd
+                self.rec.progress(f"{v.name} said PASS with {pt - pd} plan step(s) still open → the work goes on")
+                self.rec.set(nudge={v.name: self.mtpl("plan_nudge", step=cur or "the next step").strip()})
         summary["verdicts"] = {v.name: vd}
         passed = vd == "PASS"
         if not passed:
@@ -1447,7 +1576,18 @@ class ManagedRunner(MonitorRunner):
         return None
 
     def ph_checkin(self, mg: Dict[str, Any]) -> Optional[str]:
-        """A short update from the critic; the manager acknowledges or steers (no full report, no scoring)."""
+        """A short update for the manager. With a plan, orch writes it from the plan (no model turn: the manager
+        hears it at its next turn, and the stall limit or a question brings it in when it matters); without one,
+        the critic writes it and the manager acknowledges or steers (no full report, no scoring)."""
+        line = self.plan_line()
+        if line:
+            fwd = self.st.setdefault("fwd", {}).setdefault(self.manager.name, [])
+            fwd[:] = [x for x in fwd if not x.startswith(PLAN_STATUS)]  # only the newest status waits for it
+            fwd.append(f"{PLAN_STATUS} {line}")
+            self.rec.event("checkin", how="plan", text=line)
+            self.rec.progress(f"ⓘ check-in from the plan: {line}")
+            mg["phase"] = "work"
+            return None
         r = self.say(self.critic, self.mtpl("critic_checkin", human_messages=""), "checkin")
         update = self.clean_critic(r["output"])
         a = self.say(self.manager, self.mtpl("manager_checkin", update=update, human_messages=""), "ack")
@@ -1478,7 +1618,8 @@ class ManagedRunner(MonitorRunner):
             after = "work"
         elif after == "work" and vd == "PASS":
             done, open_ = checklist_of(r.get("output") or "")
-            if not self.mon.controller.checklist or (done and not open_):
+            pd, pt, _cur = plan_status(plan_text(r.get("output") or "") or self.latest_plan())
+            if (not self.mon.controller.checklist or (done and not open_)) and not (pt and pd < pt):
                 after = "report"
         if after == "work":
             self.worker_feedback(self.clean_critic(r["output"]), append=True)
@@ -1490,9 +1631,13 @@ class ManagedRunner(MonitorRunner):
 
     def ph_report(self, mg: Dict[str, Any]) -> Optional[str]:
         ms = self.cur()
-        note = f", since we have spent {mg.get('ms_round', 0)} rounds on it" if mg.get("limit") else ""
+        note = self.limit_note() if mg.get("limit") else ""
         r = self.say(self.critic, self.mtpl("critic_report", limit_note=note, human_messages=""), "report")
-        report = strip_checklist(T.without_markup(r["output"] or "", drop=("checklist", "verdict")))
+        report = strip_checklist(T.without_markup(r["output"] or "", drop=("plan", "checklist", "verdict")))
+        plan = self.latest_plan()
+        if plan:  # where the work stands, step by step
+            pd, pt, _cur = plan_status(plan)
+            report += "\n\n" + self.mtpl("report_plan", done=pd, total=pt, plan=plan).strip()
         ck = self.latest_checklist()
         if ck:  # the manager judges the milestone with the critic's own list in view; the worker never gets it
             done, open_ = checklist_state(ck)
@@ -1541,8 +1686,7 @@ class ManagedRunner(MonitorRunner):
 
     def ph_gate(self, mg: Dict[str, Any]) -> Optional[str]:
         ms = self.cur()
-        why = "" if ms.get("accepted", True) else \
-            f" — round limit reached ({mg.get('ms_round')} rounds), the manager has not accepted it"
+        why = "" if ms.get("accepted", True) else f" — {self.limit_title()}, the manager has not accepted it"
         d = self.wait_gate({"kind": "milestone", "milestone": mg["ms"], "title": f"Milestone {mg['ms'] + 1}: "
                             f"{ms['title']}{why}", "text": ms.get("summary", ""), "turn": ms.get("summary_turn")})
         if d.get("message"):
@@ -1566,7 +1710,8 @@ class ManagedRunner(MonitorRunner):
                            reason="replaced by the manager's message after the gate"
                                   + ("" if unsent or comment == held else "; not shown to the manager"))
         ms.update(status="active")
-        mg.update(guidance=self.for_critic(self.after_manager(r, relay=False)), guidance_at=now_iso(), ms_round=0, limit=False, phase="guidance")
+        mg.update(guidance=self.for_critic(self.after_manager(r, relay=False)), guidance_at=now_iso(), ms_round=0, stall=0,
+                  limit=False, phase="guidance")
         return None
 
     def ph_next(self, mg: Dict[str, Any]) -> Optional[str]:

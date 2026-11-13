@@ -104,9 +104,9 @@ backend: claude
 backend_options: {model: opus, effort: medium, permission_mode: auto}
 timeout: 2400
 retries: 1
-checklist: true             # a PASS only counts when every checklist item is [x]
-milestone_rounds: 25        # rounds per milestone before the manager and I look at it anyway
-checkin_every: 2            # every 2 rounds, a short update for the manager (0 = off)
+checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
+milestone_rounds: 25        # rounds without a step of the critic's plan finishing before the manager and I look
+checkin_every: 2            # every 2 rounds, a status line for the manager (from the plan: no model turn; 0 = off)
 # job_wait: 21600           # how long a review waits for a job the worker left running (seconds; 0 = never)
 # job_ignore: ["status_loop"]  # commands that are never waited on (regexes), e.g. a long-lived helper
 """,

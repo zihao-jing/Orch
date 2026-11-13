@@ -78,6 +78,7 @@ textarea:focus,input:focus{outline:2px solid var(--s1);outline-offset:-1px}
 .ck-hist .c{font-family:ui-monospace,Menlo,monospace;padding:1px 6px;border-radius:6px;background:var(--code);color:var(--ink2)}
 .ck-hist .c.last{background:var(--s1-wash);color:var(--s1);font-weight:600}
 .ck{list-style:none;margin:0;padding:0}.ck li{display:flex;gap:8px;padding:5px 0;border-top:1px solid var(--grid);font-size:13px;line-height:1.45}
+.ck.plan li.cur{font-weight:600}.ck.plan li.open:not(.cur){color:var(--ink2)}.ck.plan{margin-bottom:8px}
 .ck li:first-child{border-top:0}.ck .bx{flex:none;width:16px;text-align:center}.ck li.open .bx{color:var(--warn-ink)}.ck li.done .bx{color:var(--good-ink)}
 .ck .nt{color:var(--mute)}
 details.ckp>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px}
@@ -170,6 +171,7 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
   <a class="sm btn" id="loglink" href="log/run" target="_blank" title="Every turn's full input and output, folded by milestone and round">📜 Log</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
   <button class="sm" id="theme" title="Toggle light/dark">◐</button>
+  <button class="sm" id="night" title="Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review">🌙 Night</button>
   <button class="sm" id="stop" title="Stop after the current turn">Stop run</button>
  </header>
  <div class="grid" id="grid">
@@ -222,14 +224,14 @@ function tagsToMd(s){
     .replace(/<message\s+to\s*=\s*["']?([^"'>]+?)["']?((?:\s+[\w-]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))*)\s*>/gi,
       (_, w, rest) => lab('→ ' + who(w.trim().replace(/^the\s+/i,'')) + (/urgent\s*=\s*["']?(yes|true|1|now)/i.test(rest||'') ? ' (urgent)' : '')))
     .replace(/<question\s*>/gi, lab('❓ Question')).replace(/<pause\s*>/gi, lab('⏸ Pause'))
-    .replace(/<checklist\s*>/gi, lab('Checklist'))
+    .replace(/<plan\s*>/gi, lab('Plan')).replace(/<checklist\s*>/gi, lab('Checklist'))
     .replace(/<verdict\s*>\s*([^<]*)<\/verdict\s*>/gi, (_, v) => lab('Verdict: ' + v.trim()))
     .replace(/<score\s*>\s*([^<]*)<\/score\s*>/gi, (_, v) => lab('Score: ' + v.trim() + (/\//.test(v) ? '' : '/5')))
     .replace(/<decision\s*>\s*([^<]*)<\/decision\s*>/gi, (_, v) => lab('Decision: ' + v.trim()))
     .replace(/<no-wait\s+pid\s*=\s*["']?(\d+)["']?\s*\/?>/gi, (_, p) => `\n\n*(not waited on: pid ${p})*\n\n`)
-    .replace(/<\/(message|question|pause|checklist|verdict|score|decision|no-wait)\s*>/gi, '\n\n');
+    .replace(/<\/(message|question|pause|plan|checklist|verdict|score|decision|no-wait)\s*>/gi, '\n\n');
 }
-const TAGBLOCK = /<(message|question|pause|checklist|verdict|score|decision|no-wait|preference)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
+const TAGBLOCK = /<(message|question|pause|plan|checklist|verdict|score|decision|no-wait|preference)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
 function md(src){
   const L = tagsToMd(src).replace(/\r/g,'').split('\n'); let h = '', i = 0;
   while (i < L.length){
@@ -328,6 +330,7 @@ const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milesto
   review:'scoring the milestone', guidance:'passing on guidance', feedback:'reading your feedback',
   checkin:'sending a quick update', ack:'reading the quick update'};
 function renderTiles(mg){
+  const nb = $('night'); nb.textContent = D.night ? '🌙 Night: on' : '🌙 Night'; nb.classList.toggle('ok', !!D.night);
   const qs = D.questions||[], mss = mg.milestones||[], done = mss.filter(m=>m.status==='done').length;
   const run = running()[0];
   const nowTxt = run ? `<span class="dot live"></span> <b>${esc(called(run.agent))}</b>&nbsp;is ${esc(DOING[run.purpose]||run.purpose)}`
@@ -464,15 +467,24 @@ function checklistItems(text){  // "- [x] item — note" lines of a critic revie
   return String(text||'').split('\n').map(l => l.match(/^\s*[-*]\s*\[([ xX~\-])\]\s*(.+)$/)).filter(Boolean).map(m => {
     const done = /x/i.test(m[1]), parts = m[2].split(/\s+[—–]\s+/); return {done, item: parts[0], note: parts.slice(1).join(' — ')}; });
 }
+function planHTML(){  // the critic's steps for this milestone: done, current, still to come
+  const ps = (D.turns||[]).filter(t => t.role === 'verifier' && t.milestone === sel && t.status !== 'running' && t.plan);
+  const p = ps[ps.length-1];
+  if (!p) return '';
+  const steps = checklistItems(p.plan_text || ''), cur = steps.findIndex(s => !s.done);
+  const li = (s, i) => `<li class="${s.done ? 'done' : i === cur ? 'open cur' : 'open'}"><span class="bx">${s.done ? '✓' : i === cur ? '▶' : '☐'}</span><span>${inline(s.item)}</span></li>`;
+  const head = cur < 0 ? `all ${steps.length} steps done` : `step ${cur + 1} of ${steps.length}`;
+  return `<div class="ink2" style="font-size:12px;font-weight:600;margin:8px 0 2px">Plan · ${head}</div><ul class="ck plan">${steps.map(li).join('')}</ul>`;
+}
 function renderChecklist(){
   const vs = (D.turns||[]).filter(t => t.purpose === 'verify' && t.milestone === sel && t.status !== 'running' && t.checklist);
   const last = vs[vs.length-1];
   const title = 'Critic checklist · milestone ' + (sel+1) + (last ? ` · round ${last.round}: ${last.checklist[0]}/${last.checklist[1]}` : '');
-  if (!last){ setHTML($('ch-check'), `<h2>${esc(title)}</h2><div class="empty">The critic has not reviewed this milestone yet.</div>`); return; }
+  if (!last){ setHTML($('ch-check'), `<h2>${esc(title)}</h2>${planHTML()}<div class="empty">The critic has not reviewed this milestone yet.</div>`); return; }
   const items = checklistItems(last.checklist_text || ''), open = items.filter(i => !i.done), done = items.filter(i => i.done);
   const li = i => `<li class="${i.done ? 'done' : 'open'}"><span class="bx">${i.done ? '✓' : '☐'}</span><span>${inline(i.item)}${i.note ? ` <span class="nt">— ${inline(i.note)}</span>` : ''}</span></li>`;
   const bar = `<div class="bar" title="${last.checklist[0]} of ${last.checklist[1]} items done"><i style="width:${Math.round(100*last.checklist[0]/Math.max(1,last.checklist[1]))}%"></i></div>`;
-  let h = '';
+  let h = planHTML();
   if (vs.length > 1) h += '<div class="ck-hist">' + vs.map((v, i) => `<span class="c${i === vs.length-1 ? ' last' : ''}" title="round ${v.round}">R${v.round} ${v.checklist[0]}/${v.checklist[1]}</span>`).join('<span>→</span>') + '</div>';
   else h += '<div style="height:10px"></div>';
   h += open.length ? `<div class="ink2" style="font-size:12px;font-weight:600;margin-bottom:2px">Still open (${open.length})</div><ul class="ck">${open.map(li).join('')}</ul>`
@@ -612,7 +624,7 @@ $('rounds').addEventListener('toggle', e => { const d = e.target; if (d.dataset 
   if (d.open){ openRounds.add(k); openRounds.delete(-k-1); } else { openRounds.delete(k); openRounds.add(-k-1); } }, true);
 
 const qtext = t => String(t||'').split('\n').filter(x => !/^\W*QUESTIONS? FOR\b[^:]*:?\s*$/i.test(x)).join('\n');
-const QST = {open:['p-warn','open'], passed_up:['p-run','↑ passed up'], answered:['p-good','✓ answered']};
+const QST = {open:['p-warn','open'], passed_up:['p-run','↑ passed up'], answered:['p-good','✓ answered'], night:['p-run','🌙 manager decided']};
 function renderQs(){
   const qs = (D.questions||[]).slice().reverse();
   if (!qs.length){ setHTML($('qs'), '<div class="empty">No questions so far. Questions go up one level at a time (worker → critic → manager → you); the run keeps going while they are open.</div>'); return; }
@@ -849,6 +861,8 @@ document.querySelector('.side').addEventListener('mousedown', e => { if (e.targe
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen) setChat(false); });
 $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
+$('night').addEventListener('click', () => { const on = !D.night;
+  if (confirm(on ? 'Turn night mode on? The manager answers your questions and passes gates itself until you turn it off; its choices are recorded in Questions and Decisions.' : 'Turn night mode off?')) post('api/night', {on}); });
 $('stop').addEventListener('click', () => { if (confirm('Stop the run after the current turn? You can resume it later.')) post('api/stop', {}); });
 $('theme').addEventListener('click', () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('orch-theme', r.dataset.theme); } catch(e){} });

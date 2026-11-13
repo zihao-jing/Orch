@@ -19,6 +19,14 @@ from .recorder import read_json
 CHECKBOX = re.compile(r"^\s*(?:[-*+]|\d+[.)])?\s*\[( |x|X|✓|✔)\]", re.M)
 
 
+def review_checklist(text: str) -> str:
+    """A critic reply's checklist: its <checklist> block, or (older runs, no tag) its checkbox lines outside the
+    <plan>, whose lines are steps, not checklist items."""
+    from . import tags as T
+    tagged = T.bodies(text or "", "checklist")
+    return "\n".join(tagged) if tagged else T.without_markup(text or "", drop=("plan",))
+
+
 def checklist_items(text: str) -> List[Tuple[bool, str]]:
     """[(done, item text)] for every checkbox line in a reply."""
     out = []
@@ -295,7 +303,7 @@ def _checklist_html(rdirs: List[Path]) -> str:
     for rdir in rdirs:
         rs = read_json(rdir / "round.json", {}) or {}
         for t in _turns_for_round(rdir):
-            items = checklist_items(t.get("output") or "") if t.get("role") == "verifier" else []
+            items = checklist_items(review_checklist(t.get("output") or "")) if t.get("role") == "verifier" else []
             if not items:
                 continue
             ci = len(cols)

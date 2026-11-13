@@ -367,7 +367,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
         md.append(f"| {who} | " + " | ".join(str(v.get(c, 0)) for c in cols) + " |")
     md += ["", "## Questions raised", "", *(f"- {q}" for q in qs or ["none"])]
     md += ["", "## Relays (share of what orch passes on that reached the recipient, in chars; tags such as the "
-               "checklist, and messages for someone else, are withheld by design and listed apart)", "",
+               "critic's plan and checklist, and messages for someone else, are withheld by design and listed apart)", "",
            *(relays or ["none"])]
     md += ["", "## Flags (orch's checks; hints, not verdicts)", ""]
     if not flags:

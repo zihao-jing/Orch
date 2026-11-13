@@ -95,8 +95,8 @@ role: critic
 backend: claude
 backend_options: {model: opus, effort: medium, permission_mode: auto}
 checklist: true             # a PASS only counts when every checklist item is [x]
-milestone_rounds: 25        # rounds per milestone before the manager looks at it anyway
-checkin_every: 2            # a short update for the manager every 2 rounds (0 = off)
+milestone_rounds: 25        # rounds without a step of the critic's plan finishing before the manager looks
+checkin_every: 2            # a status line for the manager every 2 rounds (0 = off)
 ```
 
 ```yaml
@@ -141,8 +141,8 @@ Three layers of review, so each layer above reads less. Agents: exactly one `rol
 |---|---|---|
 | plan | manager | splits the goal into a numbered milestone list + a scored rubric → **I approve** (`approve_plan`) |
 | kickoff | manager → critic | a high-level note for the milestone |
-| brief | critic → worker | concrete instructions; the critic starts its own checklist |
-| rounds | worker ↔ critic | work, then review with `<checklist>` + `<verdict>`, up to `milestone_rounds` |
+| brief | critic → worker | the critic breaks the note into a `<plan>` of steps and gives the worker the first one, with a checklist for it |
+| rounds | worker ↔ critic | one step of the critic's `<plan>` at a time; each review ends with `<plan>` + `<checklist>` (current step) + `<verdict>`; up to `milestone_rounds` rounds without a step finishing |
 | report | critic → manager | milestone report (tables first) |
 | review | manager | scores per criterion + `<score>` + `<decision>ACCEPT/REVISE</decision>` (`min_score` optional); REVISE → guidance to the critic |
 | gate | me | the manager's summary → **I approve** or send it back (`approve_milestones`) |
@@ -173,7 +173,8 @@ board-chat response. Dedicated critic reports and check-ins still address the ma
 | `<question>…</question>` | worker → critic, critic → manager, manager → me | one decision per tag; recorded (Q1, Q2 …) and passed up one level; the run does not wait |
 | `<pause>…</pause>` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's stops the whole run until I continue it |
 | `<state>…</state>` | manager | saved as `manager/state.md` (and the critic's standing instruction); a fresh session starts from it |
-| `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | a PASS counts only when every item is `[x]`. The list is the critic's own: the worker never gets it (also when the critic forgets the tag), and the manager sees the latest one with each milestone report |
+| `<plan>…</plan>` | critic | its steps for the current work, `- [x]` done / `- [ ]` not yet. The worker gets one step at a time and never sees the plan. A step ticked is progress: the `milestone_rounds` count starts again, the board shows "step k of n", and a check-in is one status line from the plan (no model turn). Kept across fresh sessions; a new milestone starts without one |
+| `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | the checklist covers the current step and standing rules; a PASS counts only when every item and every step of the plan is `[x]` (a PASS with steps open goes back with "hand out the next step"). The list is the critic's own: the worker never gets it (also when the critic forgets the tag), and the manager sees the latest plan and list with each milestone report |
 | `<score>x</score>` + `<decision>ACCEPT\|REVISE</decision>` | manager, milestone review | accepts the milestone or sends it back |
 | `<decision>PAUSE\|CONTINUE</decision>` | manager, on a proposed pause | stops the run, or sends the critic what to do meanwhile |
 | `<no-wait pid="…"/>` | worker | the review does not wait for that process (orch finds the worker's detached jobs itself) |
@@ -231,6 +232,12 @@ together. `job_wait` (seconds, default 21600; 0 = off) caps the wait, after whic
 **The board** — `orch run --serve [--open]`, or `orch serve` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). The **📜 Log** button opens the full log at `/log/` on the same server: every run, and for each run every turn's input, output, system prompt and command, grouped by milestone and round with everything folded except the newest round, a one-line preview on each folded turn, filters by agent and a search box. Files under `.orch/runs/` are served read-only at their path below `/log/`; nothing outside that folder is. To look from another machine, start it with `--host 0.0.0.0` (it then prints your network address). There is no password, so anyone who can reach the port can also steer and stop the run: use it on a network you trust, or keep the default and tunnel in (`ssh -L 8765:127.0.0.1:8765 you@this-machine`). Without the board: `orch approve [--note … | --revise …]`, `orch answer . Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
 
 ## Steering and inspecting a live run
+
+**Night mode** (🌙 on the board): while it is on, the manager answers its own questions for you and plan and milestone
+gates pass without waiting (a milestone the manager did not accept goes back to the critic with the manager's guidance).
+Its choices are recorded in Questions (🌙 manager decided) and in the decisions register, by "manager (night mode)";
+answer any of them later to overrule it. A pause the manager calls for a task of yours still waits, and `max_rounds`
+still caps the run.
 
 ```bash
 orch status .orch/runs --latest                # one line per run
@@ -294,7 +301,9 @@ orch audit .                           # audit the last audit_every rounds now (
 
 ## Running a long project: lessons from real runs
 
-- **Two round limits.** `milestone_rounds` (critic) is per milestone: at the limit the manager reviews anyway.
+- **Two round limits.** `milestone_rounds` (critic) counts rounds without progress: a step of the critic's plan
+  finishing starts the count again, and at the limit the manager reviews anyway (a critic that writes no plan
+  counts every round of the milestone).
   `max_rounds` (manager) counts every round of the whole run; keep it well above `milestone_rounds`, or the run
   stops in the middle of a milestone (orch warns about this, and the stop message says which limit was hit).
   Raising either takes effect on `orch run --resume`. A run keeps its own `max_rounds` (in `state.json`): a limit

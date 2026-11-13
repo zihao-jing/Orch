@@ -5,7 +5,8 @@ Every signal is an XML-style tag with a start and an end, so orch never has to g
     <message to="critic">…</message>   delivered only to that agent (urgent="yes": cuts into its running turn)
     <question>…</question>             one decision for the level above (one tag per question)
     <pause>…</pause>                   a pause (proposed by the critic, called by the manager)
-    <checklist>…</checklist>           the critic's checklist (`- [x]` / `- [ ]` lines)
+    <plan>…</plan>                     the critic's steps for the current work (`- [x]` / `- [ ]` lines), one at a time
+    <checklist>…</checklist>           the critic's checklist for the current step (`- [x]` / `- [ ]` lines)
     <verdict>PASS</verdict>            the critic's verdict
     <score>4.5</score>                 the manager's overall score (out of 5)
     <decision>ACCEPT</decision>        the manager's decision: ACCEPT, REVISE, PAUSE or CONTINUE
@@ -22,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-NAMES = ("message", "question", "pause", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
+NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
          "instruction")
 _ALT = "|".join(re.escape(n) for n in NAMES)
 _OPEN = re.compile(rf"<({_ALT})((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)

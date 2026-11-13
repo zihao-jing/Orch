@@ -245,9 +245,9 @@ Your new message replaces it, so carry over whatever in it still applies.
 
 {{note}}
 
-Please turn this into concrete instructions for {{worker}}: what to change, in what order, and what you
-will check, with whatever settled matters the work must keep to ({{worker}} hears about them only from you). The
-repository is at `{{cwd}}`.
+Please break this into a short `<plan>` of steps, then give {{worker}} the first step only: what to do, how
+you will check it, and whatever settled matters the work must keep to ({{worker}} hears about them only from you).
+Your `<checklist>` covers that step and the standing rules. The repository is at `{{cwd}}`.
 """,
     "critic_review": """\
 {{human_messages}}
@@ -256,16 +256,19 @@ repository is at `{{cwd}}`.
 
 {{worker_report}}
 
-Please take a look at the changes. If everything that can be done here is done and the rest waits on a person,
-don't tell {{worker}} to hold: propose a pause in `<pause>…</pause>` instead. End with your `<checklist>` and
-`<verdict>PASS</verdict>` or `<verdict>FAIL</verdict>`.
+Please take a look at the changes. If the current step is done, tick it in your plan and give {{worker}} the next
+step in this same reply, with a new checklist for it. If everything that can be done here is done and the rest
+waits on a person, don't tell {{worker}} to hold: propose a pause in `<pause>…</pause>` instead. End with your
+`<plan>`, your `<checklist>` and `<verdict>PASS</verdict>` (only when every step is done) or
+`<verdict>FAIL</verdict>`.
 """,
     "critic_answer": """\
 About your question:
 
 {{answer}}
 
-If this changes what {{worker}} should do, say what. If it changes your verdict, end with a new `<verdict>`.
+If this changes what {{worker}} should do, say what (and update your `<plan>` if it changes the steps). If it
+changes your verdict, end with a new `<verdict>`.
 """,
     "critic_report": """\
 {{human_messages}}
@@ -297,7 +300,7 @@ right, write for me, in a few plain lines, what I need to do and what to send ba
 
 About your proposal to pause: not yet. {{guidance}}
 
-Please tell {{worker}} what to do next.
+Please tell {{worker}} what to do next: the current step of your plan, or a new one if this changes the plan.
 """,
     "critic_resume": """\
 {{human_messages}}
@@ -308,7 +311,7 @@ The work was paused while waiting for this:
 
 That is done now. My message: {{message}}
 
-Please check where things stand and tell {{worker}} what to do next.
+Please check where things stand, update your `<plan>` if needed, and give {{worker}} the next step.
 """,
     "critic_guidance": """\
 {{human_messages}}
@@ -317,7 +320,8 @@ I read your report, and more is needed:
 
 {{guidance}}
 
-Please add what is needed to your checklist and tell {{worker}} what to do next.
+Please add what is needed to your `<plan>` (new steps, or a step reopened) and give {{worker}} the next step,
+with your `<checklist>` for it.
 """,
     "critic_checkin": """\
 {{human_messages}}
@@ -390,9 +394,10 @@ no longer does.
 
 {{instruction}}
 
-Please tell {{worker}} what to do next: concrete steps, somewhat more detailed than this, and what you will check.
-{{worker}} also starts a fresh conversation and knows only what you tell it, so include whatever settled matters
-the work must keep to. The repository is at `{{cwd}}`.
+Please make your `<plan>` for this (keep the steps that are already done as done) and give {{worker}} the next
+step only: what to do, concretely, and what you will check. {{worker}} also starts a fresh conversation and knows
+only what you tell it, so include whatever settled matters the work must keep to. Your `<checklist>` covers that
+step and the standing rules. The repository is at `{{cwd}}`.
 """,
     "state_edited": "I edited your working notes; they now read:\n\n{{state}}\n\nGo by them from now on.",
     "critic_state_instruction": "## My standing instruction\n\n{{state}}",
@@ -445,6 +450,10 @@ from the message you send to {{critic}}.
                         "The work may be half done; anything it was running in the foreground was ended.)",
     "worker_after_cut": "I ended your last turn early to change course; anything it was running in the foreground was "
                         "ended. What to do now follows.",
+    "night_manager": "Night mode is on: nobody is watching the run. Decide everything yourself, from my preferences and "
+                     "the decisions register, and keep the work moving until every milestone is done. Still write each "
+                     "question for me in <question>, with the choice you made and why: it is recorded for me to review in "
+                     "the morning, and I can still overrule it. Pause only if nothing at all can be done without me.",
     "tag_reminder_manager": "A reminder, in case it helps (not a request to add anything): what is for {{critic}} goes in "
                             "<message to=\"{{critic}}\">…</message>; a decision only I can make in <question>…</question> "
                             "(one per question); stopping the whole run until I act in <pause>…</pause>; in reviews "
@@ -453,8 +462,9 @@ from the message you send to {{critic}}.
     "tag_reminder_critic": "A reminder, in case it helps (not a request to add anything): text outside tags reaches "
                            "{{worker}}; what is only for me goes in <message to=\"you\">…</message>; "
                            "questions for me in <question>…</question>; proposing to stop the whole run until "
-                           "a person acts in <pause>…</pause>; each review ends with <checklist>…</checklist> and "
-                           "<verdict>PASS</verdict> or <verdict>FAIL</verdict>.",
+                           "a person acts in <pause>…</pause>; {{worker}} gets one step of your <plan>…</plan> at a "
+                           "time; each review ends with <plan>…</plan>, <checklist>…</checklist> (the current step) and "
+                           "<verdict>PASS</verdict> (every step done) or <verdict>FAIL</verdict>.",
     "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for me goes in "
                            "<question>…</question>; jobs you start detached are noticed automatically, and "
                            "<no-wait pid=\"…\"/> is only for a long-lived helper the result does not depend on; "
@@ -467,5 +477,9 @@ is. Here is what you need from before.
 
 Read the files and logs you need before you act, and carry on from there.""",
     "report_checklist": "{{critic}}'s working checklist at its last review ({{done}} of {{total}} done):\n\n{{checklist}}",
+    "report_plan": "{{critic}}'s plan ({{done}} of {{total}} steps done):\n\n{{plan}}",
+    "plan_nudge": "You said PASS, but your plan still has open steps. A finished step is not the finished work: tick "
+                  "it, give me the next step (now: {{step}}), and say PASS only when every step is done. If a step "
+                  "is no longer needed, drop it from the plan.",
     "relay_note_up": "{{critic}} mentioned: {{note}}",
 }

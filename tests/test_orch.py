@@ -435,7 +435,7 @@ class TestManaged(unittest.TestCase):
                 self.assertNotIn("milestone", t["input"].lower(), t["turn_id"])
                 self.assertNotIn("score", t["input"].lower(), t["turn_id"])
         brief = next(t for t in ts if t["purpose"] == "brief")
-        self.assertIn("Please turn this into concrete instructions for Sam", brief["input"])
+        self.assertIn("Please break this into a short `<plan>` of steps, then give Sam the first step only", brief["input"])
         self.assertTrue(all(t.get("milestone") is not None for t in ts if t["purpose"] != "plan"))
 
     def test_revise_passes_only_the_part_for_the_critic(self):
@@ -588,6 +588,30 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(len(plans), 2)
         self.assertIn("Fewer milestones please.", plans[1]["input"])
         self.assertEqual([x["decision"] for x in rec.state["managed"]["gates"]], ["revise", "approve", "approve"])
+
+    def test_night_mode_passes_gates_without_me(self):
+        cfg = make_cfg(self.tmp, [managed(controller={"approve_plan": True, "approve_milestones": True},
+                                          mgr={"milestones": 2})])
+        out = self.tmp / "out" / "m"
+        holder = {}
+        th = threading.Thread(target=lambda: holder.update(res=run(cfg)), daemon=True)
+        th.start()
+        t0 = time.time()
+        while time.time() - t0 < 10:  # the plan gate opens; I switch night mode on and leave
+            runs = sorted(out.glob("*/state.json")) if out.exists() else []
+            g = ((read_json(runs[-1]) or {}).get("managed") or {}).get("gate") if runs else None
+            if g:
+                break
+            time.sleep(0.05)
+        (runs[-1].parent / "inbox" / "a-night.json").write_text(json.dumps({"kind": "night", "on": True}))
+        th.join(15)
+        status, rec = holder["res"]
+        self.assertEqual(status, "completed")
+        self.assertTrue(rec.state["night"])
+        self.assertEqual([x["decision"] for x in rec.state["managed"]["gates"]], ["approve"] * 3)
+        self.assertTrue(any(d["by"] == "manager (night mode)" for d in rec.state["decisions"]))
+        mgr = [t for t in turns(rec) if t["agent"] == "boss" and t["purpose"] != "plan"]
+        self.assertTrue(mgr and all("Night mode is on" in t["input"] for t in mgr))
 
     def test_board_data_and_server(self):
         status, rec = run(make_cfg(self.tmp, [managed()]))
@@ -2357,6 +2381,116 @@ class TestManagerChatSession(unittest.TestCase):
         # a manager row that names another agent's session (left by the old bug) is not followed either
         rows.append({"role": "manager", "session_id": "C1", "ts": "2026-01-01T12:00:00"})
         self.assertEqual(manager_chat_session(rows, "", st, "manager"), "M2")
+
+
+def _plan(*done):
+    steps = ["STEP-ALPHA validate the first label", "STEP-BETA validate the second label", "STEP-GAMMA redo the table"]
+    return "<plan>\n" + "\n".join(f"- [{'x' if d else ' '}] {t}" for d, t in zip(done, steps)) + "\n</plan>"
+
+
+def _review(prose, plan, ck_done, verdict):
+    return (f"{prose}\n\n{plan}\n<checklist>\n- [{'x' if ck_done else ' '}] the step's result is checked\n"
+            f"- [x] protected files unchanged\n</checklist>\n<verdict>{verdict}</verdict>")
+
+
+class TestCriticPlan(unittest.TestCase):
+    """The critic keeps a <plan> and hands the worker one step at a time: the worker never sees the plan, a PASS
+    needs every step done, a finished step resets the stall limit, and check-ins come from the plan."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def critic_replies(self):
+        return {"brief": ["Start with the first label: validate it on held-out cases.\n\n" + _plan(0, 0, 0)
+                          + "\n<checklist>\n- [ ] the step's result is checked\n</checklist>"],
+                "verify": [_review("The first label holds. Next: validate the second label.", _plan(1, 0, 0), False, "FAIL"),
+                           _review("Not there yet: the held-out cases are missing.", _plan(1, 0, 0), False, "FAIL"),
+                           _review("The second label holds. Next: redo the table.", _plan(1, 1, 0), False, "FAIL"),
+                           _review("Looks done to me.", _plan(1, 1, 0), True, "PASS"),
+                           _review("The table is redone and checked.", _plan(1, 1, 1), True, "PASS")]}
+
+    def test_steps_reset_the_stall_limit_and_pass_needs_every_step(self):
+        m = managed(controller={"milestone_rounds": 2}, critic={"replies": self.critic_replies()})
+        status, rec = run(make_cfg(self.tmp, [m]))
+        ts = turns(rec)
+        ev = [json.loads(x) for x in (rec.run_dir / "events.jsonl").read_text().splitlines()]
+        steps = [e for e in ev if e["event"] == "plan_step"]
+        self.assertEqual([(e["done"], e["total"]) for e in steps][:3], [(1, 3), (2, 3), (3, 3)])
+        verifies = [t for t in ts if t["agent"] == "critic" and t["purpose"] == "verify" and t.get("milestone") == 0]
+        self.assertEqual(len(verifies), 5)  # 5 rounds with milestone_rounds 2: progress kept resetting the limit
+        self.assertTrue(any(t["purpose"] == "report" for t in ts if t["agent"] == "critic"))
+        rounds = [read_json(p) for p in sorted((rec.run_dir / "rounds").glob("r*/round.json"))]
+        self.assertTrue(any(r.get("plan_open") == 1 for r in rounds))  # the PASS with a step open was overruled
+        self.assertFalse(any("limit" in str(r.get("decision")) for r in rounds))
+        for t in ts:  # the worker never sees the plan or the checklist
+            if t["agent"] == "writer":
+                self.assertNotIn("STEP-", t["input"])
+                self.assertNotIn("<plan>", t["input"])
+                self.assertNotIn("protected files unchanged", t["input"])
+        nudged = verifies[4]["input"]
+        self.assertIn("plan still has open steps", nudged)
+        self.assertIn("STEP-GAMMA", nudged)
+        review = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "review")
+        self.assertIn("3 of 3 steps done", review["input"])
+        self.assertNotIn("<plan>", review["input"])
+        self.assertEqual(status, "completed")
+
+    def test_without_progress_the_stall_limit_still_stops_the_milestone(self):
+        stuck = _review("Still missing the held-out cases.", _plan(0, 0, 0), False, "FAIL")
+        m = managed(controller={"milestone_rounds": 2},
+                    critic={"replies": {"brief": [self.critic_replies()["brief"][0]], "verify": [stuck]}})
+        status, rec = run(make_cfg(self.tmp, [m]))
+        ts = turns(rec)
+        report = next(t for t in ts if t["agent"] == "critic" and t["purpose"] == "report")
+        self.assertIn("2 rounds have passed without a step of your plan finishing", report["input"])
+        self.assertEqual(len([t for t in ts if t["agent"] == "critic" and t["purpose"] == "verify" and t.get("milestone") == 0]), 2)
+
+    def test_checkins_come_from_the_plan_without_model_turns(self):
+        m = managed(controller={"checkin_every": 1, "milestone_rounds": 9}, critic={"replies": self.critic_replies()})
+        status, rec = run(make_cfg(self.tmp, [m]))
+        ts = turns(rec)
+        self.assertFalse([t for t in ts if t["purpose"] in ("checkin", "ack")])
+        ev = [json.loads(x) for x in (rec.run_dir / "events.jsonl").read_text().splitlines()]
+        lines = [e["text"] for e in ev if e["event"] == "checkin"]
+        self.assertTrue(lines and all(e.get("how") == "plan" for e in ev if e["event"] == "checkin"))
+        self.assertIn("step 2 of 3", lines[0])
+        review = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "review")
+        self.assertEqual(review["input"].count("(orch, from the critic's plan)"), 1)  # only the newest one waits
+
+    def test_a_restart_keeps_the_plan_and_rebuilds_the_checklist(self):
+        m = managed(controller={"milestone_rounds": 9}, critic={"replies": self.critic_replies()})
+        cfg = make_cfg(self.tmp, [m])
+        _status, rec = run(cfg)
+        r = MonitorRunner(load_config(cfg).monitor("m"), threading.Event(), log=lambda s: None)
+        r.rec = Recorder(rec.run_dir, rec.output_root)
+        r.mg["ms"] = 1  # as if the last milestone were still running
+        plan = r.latest_plan()
+        self.assertIn("- [x] STEP-GAMMA", plan)
+        top = r.handover(r.critic, top_down=True)
+        self.assertIn("Your plan so far", top)
+        self.assertIn("write a new one for the step you hand out next", top)
+        self.assertNotIn("keep the items as they are", top)
+        same = r.handover(r.critic)
+        self.assertIn("STEP-ALPHA", same)  # from the critic's state file (plan section) or the records
+        r.write_critic_state()
+        self.assertIn("## Your plan", r.read_state(r.critic)[0])
+        r.mg["ms"] = 2  # a new milestone starts without the old plan
+        self.assertEqual(r.latest_plan(), "")
+        r.rec.release()
+
+    def test_plan_lines_are_not_checklist_items_and_never_reach_the_worker(self):
+        from orch.managed import checklist_of, plan_status, plan_text
+        from orch.report import checklist_items, review_checklist
+        out = _review("Next: the second label.", _plan(1, 0, 0), False, "FAIL")
+        self.assertEqual(checklist_of(out), (1, 1))
+        self.assertEqual(plan_status(plan_text(out)), (1, 3, "STEP-BETA validate the second label"))
+        self.assertEqual(len(checklist_items(review_checklist(out))), 2)
+        untagged = "Review.\n" + _plan(1, 0, 0) + "\n- [x] one item\n<verdict>FAIL</verdict>"
+        self.assertEqual(checklist_of(untagged), (1, 0))  # a forgotten <checklist> tag: still not the plan's lines
+        cfg = load_config(make_cfg(self.tmp, [managed()]))
+        r = MonitorRunner(cfg.monitor("m"), threading.Event(), log=lambda s: None)
+        self.assertNotIn("STEP-", r.clean_critic(out))
+        self.assertIn("Next: the second label.", r.clean_critic(out))
 
 
 class TestOneControllerPerRun(unittest.TestCase):
