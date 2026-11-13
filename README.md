@@ -84,7 +84,7 @@ backend: claude
 backend_options: {model: opus, effort: medium, permission_mode: auto}
 timeout: 2400
 goal_file: goal.md
-max_rounds: 100             # rounds in all milestones together; keep it well above milestone_rounds
+max_rounds: 400             # rounds in all milestones together; keep it well above milestone_rounds
 approve_plan: true          # wait for my OK on the milestone plan
 approve_milestones: true    # and after each milestone the manager accepts
 ```
@@ -95,7 +95,7 @@ role: critic
 backend: claude
 backend_options: {model: opus, effort: medium, permission_mode: auto}
 checklist: true             # a PASS only counts when every checklist item is [x]
-milestone_rounds: 25        # rounds without a step of the critic's plan finishing before the manager looks
+milestone_rounds: 50        # rounds without a step of the critic's plan finishing before the manager looks
 checkin_every: 2            # a status line for the manager every 2 rounds (0 = off)
 ```
 

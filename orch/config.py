@@ -199,7 +199,7 @@ class ControllerConfig:
     templates: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_TEMPLATES))
     agent: Optional[AgentConfig] = None  # llm mode: the controller agent itself
     # ---- managed mode (manager -> critic -> worker)
-    milestone_rounds: int = 40  # rounds without progress (no step of the critic's plan finished) before we take a look
+    milestone_rounds: int = 50  # rounds without progress (no step of the critic's plan finished) before we take a look
     approve_plan: bool = True  # pause for my OK on the manager's milestone plan
     approve_milestones: bool = True  # pause for my OK after the manager accepts each milestone
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
@@ -544,7 +544,7 @@ def load_config(path: str) -> Config:
             provider_retry_wait=float(craw.get("provider_retry_wait", 30.0)),
             templates=templates,
             agent=ctrl_agent,
-            milestone_rounds=int(craw.get("milestone_rounds", 40)),
+            milestone_rounds=int(craw.get("milestone_rounds", 50)),
             approve_plan=bool(craw.get("approve_plan", True)),
             approve_milestones=bool(craw.get("approve_milestones", True)),
             min_score=float(craw["min_score"]) if craw.get("min_score") is not None else None,
@@ -579,7 +579,7 @@ def load_config(path: str) -> Config:
             workspace=workspace,
             working_dir=working_dir,
             goal=str(mraw.get("goal", "") or "").strip(),
-            max_rounds=int(mraw.get("max_rounds", 50)),
+            max_rounds=int(mraw.get("max_rounds", 400)),
             controller=controller,
             agents=agents,
             output_dir=_expand(mraw["output_dir"], base) if mraw.get("output_dir") else output_dir,
