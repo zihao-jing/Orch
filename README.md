@@ -460,7 +460,7 @@ fallback:
   - {label: deepseek, backend_options: {model: deepseek/deepseek-v4.1-flash},
      env: {ANTHROPIC_BASE_URL: https://zenmux.ai/api/anthropic, ANTHROPIC_AUTH_TOKEN: ...}}
   - {backend: agy, backend_options: {model: gemini-3.6-pro, mode: auto}}
-fallback_cooldown: 900                       # seconds to stay on a backup that worked (0 = back to the primary next turn)
+fallback_cooldown: 18000                     # seconds to stay on a backup that worked: 5 h (0 = back to the primary next turn)
 ```
 
 * A model name is shorthand for "same backend, same settings, this model".

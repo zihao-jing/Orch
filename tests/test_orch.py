@@ -234,6 +234,19 @@ class TestPipeline(unittest.TestCase):
         self.assertNotIn("use tabs please", w1["input"])
         self.assertTrue(list((r.rec.run_dir / "inbox" / "consumed").iterdir()))
 
+    def test_board_shows_a_night_switch_waiting_for_the_turn_to_end(self):
+        from orch.board import Board
+        run = self.tmp / "run"
+        (run / "inbox").mkdir(parents=True)
+        (run / "state.json").write_text(json.dumps({"monitor": "m", "status": "running"}))
+        b = Board("m", lambda: run, None)
+        self.assertIsNone(b.data()["night_pending"])
+        (run / "inbox" / "20261113-233751-1-board-night.json").write_text(json.dumps({"kind": "night", "on": True}))
+        self.assertTrue(b.data()["night_pending"])
+        self.assertFalse(b.data()["night"])  # not on until the run reads it
+        (run / "inbox" / "20261113-233800-2-board-night.json").write_text(json.dumps({"kind": "night", "on": False}))
+        self.assertFalse(b.data()["night_pending"])  # the newest switch wins
+
     def test_board_lists_audit_history_newest_first(self):
         from orch.board import Board
         run = self.tmp / "run"
