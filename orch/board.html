@@ -331,7 +331,8 @@ const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milesto
   review:'scoring the milestone', guidance:'passing on guidance', feedback:'reading your feedback',
   checkin:'sending a quick update', ack:'reading the quick update'};
 function renderTiles(mg){
-  const nb = $('night'); nb.textContent = D.night ? '🌙 Night: on' : '🌙 Night'; nb.classList.toggle('ok', !!D.night);
+  const nb = $('night'), want = nightWanted();  // the switch as last set (the run applies it when the current turn ends)
+  nb.textContent = want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
   const qs = D.questions||[], mss = mg.milestones||[], done = mss.filter(m=>m.status==='done').length;
   const run = running()[0];
   const nowTxt = run ? `<span class="dot live"></span> <b>${esc(called(run.agent))}</b>&nbsp;is ${esc(DOING[run.purpose]||run.purpose)}`
@@ -875,7 +876,8 @@ document.querySelector('.side').addEventListener('mousedown', e => { if (e.targe
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen) setChat(false); });
 $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
-$('night').addEventListener('click', () => { const on = !D.night;
+function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_pending; }
+$('night').addEventListener('click', () => { const on = !nightWanted();
   if (confirm(on ? 'Turn night mode on? The manager answers your questions and passes gates itself until you turn it off; its choices are recorded in Questions and Decisions.' : 'Turn night mode off?')) post('api/night', {on}); });
 $('stop').addEventListener('click', () => { if (confirm('Stop the run after the current turn? You can resume it later.')) post('api/stop', {}); });
 $('theme').addEventListener('click', () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;

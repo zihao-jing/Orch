@@ -72,7 +72,7 @@ class AgentConfig:
     # backup models, tried in order when a turn still fails after its retries: each is a dict with any of
     # label, backend, backend_options, env, retries (already merged with the primary's settings when loaded)
     fallback: List[Dict[str, Any]] = field(default_factory=list)
-    fallback_cooldown: float = 900.0  # seconds an agent stays on the backup that worked before trying its primary again
+    fallback_cooldown: float = 18000.0  # 5 h: seconds an agent stays on the backup that worked before trying its primary again
 
     def variants(self) -> List[Variant]:
         """The primary model first, then each backup."""

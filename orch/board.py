@@ -125,9 +125,12 @@ class Board:
         total_cost = _turn_costs(turns, chat_all)
         cost_estimate = round(sum(t["cost"] for t in turns if t.get("cost_basis") == "estimate"
                                   and isinstance(t.get("cost"), (int, float))), 4)
+        night_pending: Optional[bool] = None
         queued: Dict[str, List[str]] = {}  # answers sent but not yet picked up (the run reads them between turns)
         for p in sorted((rd / "inbox").glob("*.json")):
             d = read_json(p) or {}
+            if isinstance(d, dict) and d.get("kind") == "night":
+                night_pending = bool(d.get("on"))  # the run reads it between turns; the newest one wins
             if isinstance(d, dict) and d.get("kind") == "answer" and d.get("qid"):
                 queued.setdefault(str(d["qid"]).upper(), []).append(str(d.get("message", "")))
         agents = [{"name": a["name"], "role": a["role"], "called": a.get("display_name") or a["name"],
@@ -138,7 +141,7 @@ class Board:
             "mode": st.get("mode"), "goal": st.get("goal"), "round": st.get("round"), "max_rounds": st.get("max_rounds"),
             "cost": total_cost, "cost_estimate": cost_estimate, "turn_counts": st.get("turn_counts"), "updated_at": st.get("updated_at"),
             "started_at": st.get("started_at"), "error": st.get("error"),
-            "managed": st.get("managed") or {}, "night": bool(st.get("night")), "questions": st.get("questions") or [],
+            "managed": st.get("managed") or {}, "night": bool(st.get("night")), "night_pending": night_pending, "questions": st.get("questions") or [],
             "decisions": st.get("decisions") or [],
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
             "chat": chat, "chat_more": chat_more, "relays": relays, "routes": routes, "received": received, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
