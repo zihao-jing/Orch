@@ -289,9 +289,32 @@ const called = n => n === 'human' ? 'you' : ((byName(n)||{}).called || n);
 const tm = s => s ? String(s).slice(11,16) : '';
 function setHTML(el, html){ if (el._h !== html){ el._h = html; el.innerHTML = html; } }
 
+// The poll asks only for what changed since the payload it holds (SNAP, version VER) and rebuilds the rest;
+// D is a fresh copy for render, so SNAP stays exactly what the server sent. One poll at a time.
+let SNAP = null, VER = '', loading = false, again = false;
+function applyState(j){
+  if (!j.ver || !j.keys){ SNAP = j; VER = ''; return true; }  // a server from before deltas: the reply is the full payload
+  if (j.base !== undefined && (j.base !== VER || !SNAP)) return false;  // not built on what we hold: start over
+  const next = {}, set = j.set || {}, patch = j.patch || {};
+  for (const k of j.keys){
+    if (k in set) next[k] = set[k];
+    else if (k in patch){ const old = SNAP[k] || [], out = [];
+      for (const op of patch[k]){ if (Array.isArray(op)){ for (let i = op[0]; i < op[0] + op[1]; i++) out.push(old[i]); } else out.push(op.v); }
+      next[k] = out; }
+    else next[k] = SNAP[k];
+  }
+  SNAP = next; VER = j.ver; return true;
+}
 async function load(){
-  try { const r = await fetch('api/state?m=' + encodeURIComponent(M), {cache:'no-store'}); D = await r.json(); }
-  catch(e){ return; }
+  if (loading){ again = true; return; }
+  loading = true;
+  try {
+    let j;
+    try { const r = await fetch('api/state?m=' + encodeURIComponent(M) + '&since=' + encodeURIComponent(VER), {cache:'no-store'}); j = await r.json(); }
+    catch(e){ return; }
+    if (!applyState(j)){ VER = ''; SNAP = null; again = true; return; }
+    D = structuredClone(SNAP);
+  } finally { loading = false; if (again){ again = false; soon(); } }
   for (const k in (D.live||{})){ const L = D.live[k]; if (!live[k] || (live[k].text||'').length < (L.text||'').length) live[k] = {text:L.text||'', tools:L.tools||[]}; }
   render();
   document.querySelectorAll('[data-live]').forEach(x => paintLive(x.dataset.live));
