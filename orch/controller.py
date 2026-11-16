@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .backends import StopRequested, TurnRequest, TurnResult, get_backend
-from .config import AgentConfig, MonitorConfig
+from .config import HOT_AGENT_FIELDS, AgentConfig, MonitorConfig, load_config
 from .recorder import Recorder, now_iso, read_json
 from . import jobs as _jobs
 from . import tags as T
@@ -607,12 +607,75 @@ class MonitorRunner:
         self.rec.event("human_answer", turn=r["turn_id"])
         return True
 
+    # ------------------------------------------------------------------ settings changed during a run
+
+    def refresh_agent(self, agent: AgentConfig) -> None:
+        """Before an agent's turn: re-read the config file and apply changed hot settings (backend, model options,
+        env, timeout, backups) to this agent. Runs between turns, so nothing running is interrupted. A config that
+        does not load (e.g. saved half-way) is reported and the current settings are kept."""
+        rec = getattr(self, "rec", None)
+        if rec is None or not self.mon.source:
+            return
+
+        def note(key: str, text: str) -> None:
+            if getattr(self, "_config_notes", {}).get(agent.name) != key:  # say each problem once, not every turn
+                self._config_notes = {**getattr(self, "_config_notes", {}), agent.name: key}
+                rec.progress(f"⚠ **{agent.name}**: {text}")
+                rec.event("config_problem", agent=agent.name, problem=text)
+                self.log(f"{agent.name}: {text}")
+
+        try:
+            cfg = load_config(self.mon.source)
+        except Exception as e:  # ConfigError, YAML syntax errors, unreadable files: keep what the run has
+            note(f"err {type(e).__name__}: {e}", f"config not re-read ({type(e).__name__}: {e}); "
+                                                 "keeping the settings it had")
+            return
+        try:
+            new = next(m for m in cfg.monitors if m.name == self.mon.name).agent(agent.name)
+        except (StopIteration, KeyError):
+            note("gone", f"{agent.name} is not in the config any more; keeping its settings")
+            return
+
+        changed = {f: (getattr(agent, f), getattr(new, f)) for f in HOT_AGENT_FIELDS
+                   if getattr(agent, f) != getattr(new, f)}
+        cold = [f.name for f in dataclasses.fields(AgentConfig)
+                if f.name not in HOT_AGENT_FIELDS and f.name != "name" and getattr(agent, f.name) != getattr(new, f.name)]
+        if cold:
+            note("cold " + ",".join(cold), f"changed in the config but applied only at the next start: {', '.join(cold)}")
+        if not changed:
+            return
+        try:
+            for v in new.variants():  # a backend this build does not know would fail the turn: refuse the whole change
+                get_backend(v.backend)
+        except KeyError as e:
+            note(f"unknown backend {e}", f"config names an unknown backend {e}; keeping the settings it had")
+            return
+
+        def shown(field: str, value: Any) -> str:
+            if field == "env":  # keys only: the values can be secrets
+                return "{" + ", ".join(sorted(value)) + "}"
+            if field == "fallback":
+                return "[" + ", ".join(str(f.get("label") or f.get("backend") or "?") for f in value) + "]"
+            return json.dumps(value, ensure_ascii=False, default=str)
+
+        for f, (old, value) in changed.items():
+            setattr(agent, f, value)
+        if "backend" in changed or "backend_options" in changed or "fallback" in changed:
+            self.switch_backends()  # an agent that left its backend starts a new session (as on resume)
+        parts = [f"{f} {shown(f, old)} → {shown(f, value)}" for f, (old, value) in changed.items()]
+        rec.progress(f"🔧 **{agent.name}** settings changed in the config; applied before its next turn: "
+                     + "; ".join(parts))
+        rec.event("agent_reloaded", agent=agent.name, changed=sorted(changed))
+        self.log(f"{agent.name}: settings reloaded from the config ({', '.join(sorted(changed))})")
+        self._config_notes = {**getattr(self, "_config_notes", {}), agent.name: ""}
+
     # ------------------------------------------------------------------ turns
 
     def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str,
              seq: Optional[int] = None, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if self.should_stop():
             raise StopRequested()
+        self.refresh_agent(agent)
         rec = self.rec
         updates = rec.pending_worker_messages(agent.name) if agent.role == "worker" else []
         if updates:

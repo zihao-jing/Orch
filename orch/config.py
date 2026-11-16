@@ -24,6 +24,11 @@ TEXT_KEYS = ("goal", "instructions", "system_prompt", "task", "description")
 MODES = ("pipeline", "llm", "managed")
 
 
+# Agent settings that take effect on the agent's next turn without restarting the run. Everything else
+# (prompts, memory, role, working folder, name) is read at start; a change there is reported, not applied.
+HOT_AGENT_FIELDS = ("backend", "backend_options", "env", "timeout", "retries", "fallback", "fallback_cooldown")
+
+
 class ConfigError(Exception):
     pass
 
@@ -230,6 +235,7 @@ class MonitorConfig:
     agents: List[AgentConfig]
     output_dir: str
     enabled: bool = True
+    source: str = ""  # the config file or .orch folder this monitor came from: re-read before each agent turn
 
     def agent(self, name: str) -> AgentConfig:
         for a in self.agents:
@@ -584,6 +590,7 @@ def load_config(path: str) -> Config:
             agents=agents,
             output_dir=_expand(mraw["output_dir"], base) if mraw.get("output_dir") else output_dir,
             enabled=bool(mraw.get("enabled", True)),
+            source=str(cfg_path),
         ))
 
     cfg = Config(path=str(cfg_path), output_dir=output_dir, monitors=monitors)
