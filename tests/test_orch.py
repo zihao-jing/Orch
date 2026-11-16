@@ -1913,7 +1913,7 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual(mon.name, self.tmp.name.strip("-.") or mon.name)
         self.assertEqual((mon.workspace, cfg.output_dir), (str(self.tmp.resolve()), str((d / "runs").resolve())))
         c = mon.controller
-        self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 25, 100))
+        self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 50, 400))
         self.assertTrue(mon.goal.startswith("Describe what you want done"))
         self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker"),
                                                                 ("auditor", "auditor")])

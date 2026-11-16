@@ -90,7 +90,7 @@ timeout: 2400
 retries: 1
 # the run as a whole
 goal_file: goal.md          # only the manager reads the goal
-max_rounds: 100             # worker/critic rounds in all milestones together (safety cap); keep it well above
+max_rounds: 400             # worker/critic rounds in all milestones together (safety cap); keep it well above
                             # milestone_rounds, or the run stops in the middle of a milestone
 approve_plan: true          # wait for my OK on the milestone plan
 approve_milestones: true    # and after each milestone the manager accepts
@@ -105,7 +105,7 @@ backend_options: {model: opus, effort: medium, permission_mode: auto}
 timeout: 2400
 retries: 1
 checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
-milestone_rounds: 25        # rounds without a step of the critic's plan finishing before the manager and I look
+milestone_rounds: 50        # rounds without a step of the critic's plan finishing before the manager and I look
 checkin_every: 2            # every 2 rounds, a status line for the manager (from the plan: no model turn; 0 = off)
 # job_wait: 21600           # how long a review waits for a job the worker left running (seconds; 0 = never)
 # job_ignore: ["status_loop"]  # commands that are never waited on (regexes), e.g. a long-lived helper
