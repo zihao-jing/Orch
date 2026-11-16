@@ -546,7 +546,7 @@ function preview(text){  // first line of prose, without markdown, for a folded 
   return ln.replace(/[*_`]/g, '').replace(/^\s*([-+]|\d+\.)\s+/, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').slice(0, 220);
 }
 const CLAMP_CHARS = 900;  // longer messages show their first ~240px; "Show all" opens the rest
-const prompts = new Map(), promptOpen = new Set(), promptShut = new Set();
+const prompts = new Map(), promptOpen = new Set();  // a prompt stays folded until the reader opens it
 const promptKey = t => `${D.run_id}:${t}`;
 function promptBody(t){
   return `<pre>${esc(t.input || '(empty prompt)')}</pre>`
@@ -554,15 +554,15 @@ function promptBody(t){
 }
 function promptPanel(t){
   const key = promptKey(t.turn_id), saved = prompts.get(key);
-  const open = promptOpen.has(key) || (t.status === 'running' && !promptShut.has(key));
+  const open = promptOpen.has(key);
   return `<details data-prompt="${esc(t.turn_id)}"${open ? ' open' : ''}><summary>Prompt</summary><div class="prompt-body">${saved ? promptBody(saved) : 'Loading prompt…'}</div></details>`;
 }
 document.addEventListener('toggle', async e => {
   const d = e.target, id = d.dataset && d.dataset.prompt;
   if (!id) return;
   const key = promptKey(id);
-  if (!d.open){ promptOpen.delete(key); promptShut.add(key); return; }
-  promptOpen.add(key); promptShut.delete(key);
+  if (!d.open){ promptOpen.delete(key); return; }
+  promptOpen.add(key);
   if (prompts.has(key)) return;
   const body = d.querySelector('.prompt-body');
   try {
@@ -880,6 +880,10 @@ function relayLine(id){  // what became of the messages this reply passed on
 async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true;
   const body = {message: m}; if (chatWith && chatWith !== mgrName()) body.agent = chatWith; await post('api/chat', body); }
 $('chatwho').addEventListener('change', e => { chatWith = e.target.value; const cl = $('chatlog'); cl._first = undefined; render(); });
+// keep the stick-to-bottom flag in step with where the reader actually is, so streamed replies
+// don't pull the list down while the reader is scrolled up (e.g. selecting text above)
+$('chatlog').addEventListener('scroll', e => { const cl = e.currentTarget;
+  cl._stick = cl.scrollHeight - cl.scrollTop - cl.clientHeight < 40; });
 $('chatlog').addEventListener('click', async e => { const b = e.target.closest('[data-chatmore]'); if (!b) return; b.disabled = true;
   try { const r = await fetch('api/chat?m=' + encodeURIComponent(M) + '&with=' + encodeURIComponent(chatWith) + '&before=' + encodeURIComponent(chatFirstId), {cache:'no-store'});
         const j = await r.json(); chatOlder.set(chatWith, [...(j.rows||[]), ...(chatOlder.get(chatWith)||[])]); chatMoreFlag.set(chatWith, !!j.more); }
