@@ -64,6 +64,7 @@ _STATE_HEAD_RE = re.compile(r"\A\s*<!--\s*orch: working state of .*?run (\S+?), 
 HANDOVER = "(handover notes: written when this agent's next turn starts)"
 HANDOVER_TOP_DOWN = "(handover notes for the top-down restart: written when this agent's next turn starts)"
 PLAN_STATUS = "(orch, from the critic's plan)"  # a check-in written by orch; only the newest one waits for the manager
+QUESTION_TAG = re.compile(r"<question>.*?</question>", re.S | re.I)  # a question block, removed from a forwarded note
 
 
 def checklist_text(text: str) -> str:
@@ -267,7 +268,9 @@ class ManagedRunner(MonitorRunner):
                 raise _Failed(f"{agent.name} {purpose} turn ended with status {r['status']}")
         if agent.role == "verifier":
             for note in self.notes_up(r.get("output") or ""):
-                self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
+                note = QUESTION_TAG.sub("", note).strip()  # a question in it goes to the manager at once (critic_asks)
+                if note:
+                    self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
             if purpose == "checkin" and r["status"] == "ok":
                 sent, problems = T.routes(r.get("output") or "", agent.name, self.mon.agents)
                 for target, body, _urgent in sent:
@@ -474,7 +477,10 @@ class ManagedRunner(MonitorRunner):
 
     def ask_block(self, text: str, role: str = "") -> str:
         """The <question> blocks of a reply as one text (empty if it asks nothing of the level above)."""
-        qs = T.bodies(text, "question")
+        return self.join_questions(T.bodies(text, "question"))
+
+    @staticmethod
+    def join_questions(qs: List[str]) -> str:
         if len(qs) == 1:
             return qs[0]
         return "\n\n".join(f"{n}. {q}" for n, q in enumerate(qs, 1))
@@ -968,8 +974,11 @@ class ManagedRunner(MonitorRunner):
         return None
 
     def critic_asks(self, r: Dict[str, Any], after: str) -> bool:
-        """If the critic asked the manager something, record it and answer it right away (next phase)."""
-        block = self.ask_block(r.get("output") or "", "verifier")
+        """If the critic asked the manager something, record it and answer it right away (next phase). A question
+        inside a <message to="you"> note counts too: the parser keeps nested tags in the note's body."""
+        text = r.get("output") or ""
+        qs = T.bodies(text, "question") + [q for n in self.notes_up(text) for q in T.bodies(n, "question")]
+        block = self.join_questions(qs)
         wq = [x["id"] for w in self.workers for x in self.open_qs(w.name)]
         if not block:
             for qid in wq:

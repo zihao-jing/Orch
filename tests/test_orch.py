@@ -556,6 +556,25 @@ class TestManaged(unittest.TestCase):
         self.assertIn("Assume yes for now.", amend["input"])
         self.assertNotIn("<question>", amend["input"])
 
+    def test_question_inside_a_note_to_the_manager_is_answered_at_once(self):
+        # the critic put its question inside <message to="you">: the manager answers at once, not at some later turn
+        status, rec = run(make_cfg(self.tmp, [managed(
+            mgr={"milestones": 1, "replies": {"answer": ["Cite the new run."]}},
+            critic={"replies": {"verify": [
+                '<message to="you"><question>Do we cite the new run?\nA) yes\nB) no</question></message>\n\n'
+                "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                "Good.\n\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})]))
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        seq = [(t["agent"], t["purpose"]) for t in ts]
+        i = seq.index(("critic", "verify"))
+        self.assertEqual(seq[i + 1], ("boss", "answer"))
+        amend = next(t for t in ts if t["purpose"] == "amend")
+        self.assertIn("Cite the new run.", amend["input"])
+        q = rec.state["questions"][0]
+        self.assertEqual((q["from"], q["to"]), ("critic", "boss"))
+        self.assertNotIn("<question>", " ".join(rec.state.get("fwd", {}).get("boss", [])))
+
     def test_human_answer_is_relayed_to_manager_and_critic(self):
         from orch.managed import ManagedRunner
         cfg = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
