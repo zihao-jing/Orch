@@ -10,10 +10,15 @@ the exchange kept in ``chat.jsonl``.
 
 Endpoints: GET / · GET /log/… (the run logs: index.html, each run's report.html and files) · GET /api/state · GET /api/turn?id= · GET /api/events (SSE) ·
 POST /api/chat · /api/answer · /api/gate · /api/note · /api/stop
+
+``GET /api/state?since=<ver>`` answers with only what changed since the payload ``<ver>`` (see ``StateDeltas``);
+without ``since`` it is the full payload as before. JSON and text replies are gzipped when the browser accepts it.
 """
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import mimetypes
 import re
@@ -40,6 +45,8 @@ _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
 }
 
 
+STATE_GAP = 1.0     # seconds between two `state` events: a busy run writes state.json several times a second
+GZIP_MIN = 1024     # replies shorter than this go out uncompressed
 PREVIEW_CHARS = 900  # a turn's output is sent in full up to this length; longer ones are fetched with /api/turn
 CHAT_TAIL = 60       # chat messages per conversation in the state payload; older ones come from /api/chat
 
@@ -81,11 +88,80 @@ def _chat_before(rows: List[Dict[str, Any]], with_: str, before: str, mgr: str) 
     return {"rows": older[-CHAT_TAIL:], "more": len(older) > CHAT_TAIL}
 
 
+def _dump(v: Any) -> str:
+    return json.dumps(v, ensure_ascii=False, default=str, separators=(",", ":"))
+
+
+class StateDeltas:
+    """The last few state payloads a browser was sent, so its next poll gets only what changed.
+
+    A payload is a dict of top-level keys. Against the version the browser holds, a reply carries
+    ``set`` (keys sent whole) and ``patch`` (list keys rebuilt from the old list: ``[start, count]`` copies
+    that run of old items, ``{"v": item}`` is a new one), plus ``keys`` (all keys, so dropped ones go).
+    Unchanged keys are left out. An unknown or missing base gets the full payload under ``set``."""
+
+    KEEP = 8  # versions remembered; several tabs each poll from their own
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._snaps: Dict[str, Dict[str, Tuple[str, Optional[List[str]]]]] = {}  # ver -> key -> (json, items' json)
+
+    def reply(self, data: Dict[str, Any], since: str) -> str:
+        enc: Dict[str, Tuple[str, Optional[List[str]]]] = {}
+        h = hashlib.sha1()
+        for k, v in data.items():
+            if isinstance(v, list):
+                items = [_dump(x) for x in v]
+                enc[k] = ("[" + ",".join(items) + "]", items)
+            else:
+                enc[k] = (_dump(v), None)
+            h.update(_dump(k).encode("utf-8") + b"\0" + enc[k][0].encode("utf-8") + b"\0")
+        ver = h.hexdigest()[:16]
+        with self._lock:
+            old = self._snaps.get(since) if since else None
+            self._snaps.pop(ver, None)
+            self._snaps[ver] = enc  # newest last
+            while len(self._snaps) > self.KEEP:
+                self._snaps.pop(next(iter(self._snaps)))
+        head = '{"ver":' + _dump(ver) + ',"keys":' + _dump(list(enc))
+        if old is None:
+            return head + ',"set":{' + ",".join(_dump(k) + ":" + j for k, (j, _) in enc.items()) + "}}"
+        sets, patches = [], []
+        for k, (j, items) in enc.items():
+            was = old.get(k)
+            if was is not None and was[0] == j:
+                continue
+            if items is not None and was is not None and was[1] is not None:
+                p = self._patch(was[1], items)
+                if len(p) < len(j):
+                    patches.append(_dump(k) + ":" + p)
+                    continue
+            sets.append(_dump(k) + ":" + j)
+        return head + ',"base":' + _dump(since) + ',"set":{' + ",".join(sets) + '},"patch":{' + ",".join(patches) + "}}"
+
+    @staticmethod
+    def _patch(old: List[str], new: List[str]) -> str:
+        at: Dict[str, int] = {}
+        for i, s in enumerate(old):
+            at.setdefault(s, i)
+        ops: List[Any] = []  # [start, count] runs of old items, or the json of a new item
+        for s in new:
+            i = at.get(s)
+            if i is None:
+                ops.append('{"v":' + s + "}")
+            elif ops and isinstance(ops[-1], list) and ops[-1][0] + ops[-1][1] == i:
+                ops[-1][1] += 1
+            else:
+                ops.append([i, 1])
+        return "[" + ",".join(o if isinstance(o, str) else f"[{o[0]},{o[1]}]" for o in ops) + "]"
+
+
 class Board:
     def __init__(self, name: str, run_dir: Callable[[], Optional[Path]], mon: Optional[MonitorConfig] = None):
         self.name, self._run_dir, self.mon = name, run_dir, mon
         self._chat_lock = threading.Lock()
         self._rows: Dict[Path, Any] = {}  # turn file -> ((mtime, size), (row, checklist item, what it got and sent) or None)
+        self.deltas = StateDeltas()
 
     @property
     def run_dir(self) -> Optional[Path]:
@@ -724,8 +800,15 @@ def _handler(boards: Dict[str, Board]):
             return boards.get(name) or next(iter(boards.values()))
 
         def send(self, code: int, body: bytes, ctype: str) -> None:
+            zipped = (len(body) >= GZIP_MIN and (ctype.startswith("application/json") or ctype.startswith("text/"))
+                      and "gzip" in (self.headers.get("Accept-Encoding") or ""))
+            if zipped:
+                body = gzip.compress(body, 5)
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            if zipped:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -741,7 +824,11 @@ def _handler(boards: Dict[str, Board]):
                 self.send(200, page().replace("__MONITORS__", json.dumps(list(boards))).encode("utf-8"),
                           "text/html; charset=utf-8")
             elif u.path == "/api/state":
-                self.js(self.board(q).data())
+                b = self.board(q)
+                if "since" in q or "since=" in u.query:  # parse_qs drops an empty since=, which asks for the full payload
+                    self.send(200, b.deltas.reply(b.data(), (q.get("since") or [""])[0]).encode("utf-8"), "application/json")
+                else:
+                    self.js(b.data())
             elif u.path == "/api/chat":
                 self.js(self.board(q).chat_before((q.get("with") or [""])[0], (q.get("before") or [""])[0]))
             elif u.path == "/api/turn":
@@ -838,14 +925,15 @@ def _handler(boards: Dict[str, Board]):
             sig: Tuple = ()
             first = True
             last_ping = time.time()
+            last_state = last_ping - STATE_GAP
             try:
                 while True:
                     rd = b.run_dir
                     if rd is not None:
                         files = [rd / "state.json", rd / "chat.jsonl"]
                         new_sig = tuple(f.stat().st_mtime_ns if f.exists() else 0 for f in files)
-                        if new_sig != sig:
-                            sig = new_sig
+                        if new_sig != sig and time.time() - last_state >= STATE_GAP:  # a change inside the gap waits for it
+                            sig, last_state = new_sig, time.time()
                             self.wfile.write(b"event: state\ndata: {}\n\n")
                         ld = rd / "live"
                         for f in (sorted(ld.glob("*.jsonl")) if ld.is_dir() else []):
