@@ -155,7 +155,7 @@ def _stop_waiters(root: int, err_chunks: List[str]) -> None:
     for pid in found:
         try:
             os.kill(pid, signal.SIGTERM)
-            err_chunks.append(f"orch: stopped a waiter loop (pid {pid}) that was silent for over "
+            err_chunks.append(f"stopped a waiter loop (pid {pid}) that was silent for over "
                               f"{WAITER_GRACE:.0f}s; the process it waited for keeps running\n")
         except OSError:
             pass
@@ -693,7 +693,7 @@ class MockBackend(Backend):
             return ("| criterion | score |\n|---|---|\n| correctness | 5 |\n| clarity | 4 |\n\n"
                     "This milestone is done.\n\n<score>4.5</score>\n<decision>ACCEPT</decision>")
         if purpose == "answer":
-            return "Go with the simpler option for now."
+            return '<message to="critic">Go with the simpler option for now.</message>'
         if purpose == "chat":
             return "Things are on track; nothing needs you right now."
         if purpose == "pause":
@@ -701,7 +701,7 @@ class MockBackend(Backend):
                     "<decision>PAUSE</decision>")
         if purpose == "ack":
             return "Thanks, carry on."
-        return "Please get the first part of the goal done and keep me posted."
+        return '<message to="critic">Please get the first part of the goal done and keep me posted.</message>'
 
 
 # --------------------------------------------------------------------------- helpers

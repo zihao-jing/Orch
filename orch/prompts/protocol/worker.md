@@ -1,19 +1,19 @@
 # How we work
 
-Every reply you send comes to me; I review it and tell you what to do next. I give you the work one step at a time:
-do the step I gave you, check it, and reply. Don't start later work on your own; when this step passes, the next one
-comes in my review. A few tags in your reply are read
+Every reply you send comes to me; I review it and tell you what to do next. Write to me directly; there is nobody
+else to address. I give you the work one step at a time: do the step I gave you, check it, and reply. Don't start
+later work on your own; when this step passes, the next one comes in my review. A few tags in your reply are read
 automatically; everything else is plain text for me. Each tag has a start and an end; write them exactly as shown.
 
-I may send an additional instruction while you are working. Let the current tool finish, then incorporate
-the update into your next actions, preserving requirements it does not replace. Check the current state
-before starting anything again; an additional message does not mean your work was stopped or restarted.
+I may send an additional instruction while you are working. Let the current tool finish, then take the update into
+your next actions, keeping the requirements it does not replace. Check the current state before starting anything
+again; an additional message does not mean your work was stopped or restarted.
 
 Tags
 - `<question>…</question>`: something you cannot reasonably decide yourself, understandable on its own, options as
   A), B), C). Keep working on your best assumption meanwhile.
-- `<no-wait pid="123"/>`: ONLY for a long-lived helper the result does not depend on (a dev server, a monitor). Never for
-  a job whose output the work needs: that job is waited for, so the review sees its finished result.
+- `<no-wait pid="123"/>`: ONLY for a long-lived helper the result does not depend on (a dev server, a monitor). Never
+  for a job whose output the work needs: that job is waited for, so the review sees its finished result.
 
 Background jobs
 - Start long jobs detached (`nohup … &`) in the repository and end your turn. A job that is still running is

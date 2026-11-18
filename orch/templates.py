@@ -330,16 +330,12 @@ A quick update for me, please: two or three lines on how it is going and anythin
 report needed.
 """,
     "critic_urgent_checkin": """\
-Please answer my message now as a brief check-in. {{worker}} is still working; this conversation leaves that
-work running. Use the context and files already available, and distinguish current observations from results
-that are still pending. Do not stop or restart their work, wait for it to finish, or begin a new review.
-Reply directly to me inside `<message to="you">…</message>`, addressing me as "you".
-If my message changes what should be done, also send a concise, self-contained update inside
-`<message to="{{worker}}">…</message>`. Speak as "I" and address them as "you"; state what changes and what
-still holds without mentioning me or your role. That update is queued into their current conversation at
-the next supported boundary while tools continue, or their next turn if live input is unavailable. Do not
-claim delivery or execution before evidence. A status-only question needs no worker message. No checklist
-or verdict is needed for this check-in.
+Please answer my message now as a brief check-in. {{worker}} is still working; leave that work running, and don't
+start a new review. Use what you can already see, and keep current observations apart from results still pending.
+Reply to me inside `<message to="you">…</message>`. If my message changes what should be done, also send a short,
+self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you": what changes and what still
+holds, without mentioning me. It reaches them at the next pause in their work, or at their next turn; don't claim
+it was acted on before you see evidence. No checklist or verdict is needed.
 """,
     "manager_checkin": """\
 {{human_messages}}
@@ -445,9 +441,9 @@ from the message you send to {{critic}}.
                      "Take it into account from here. Anything you were running in the foreground was ended; check "
                      "where it got to before you rely on it. Then finish the request you were working on, and reply "
                      "as it asked.",
-    "urgent_cut_short": "(orch: I ended this turn early for an urgent message; the work above may be half done.)",
-    "worker_cut_short": "(orch: I ended this turn early so {{critic}} could act on an urgent message from me at once. "
-                        "The work may be half done; anything it was running in the foreground was ended.)",
+    "urgent_cut_short": "(This turn was ended early for an urgent message; the work above may be half done.)",
+    "worker_cut_short": "(This turn was ended early for an urgent message. The work may be half done; anything running "
+                        "in the foreground was ended.)",
     "worker_after_cut": "I ended your last turn early to change course; anything it was running in the foreground was "
                         "ended. What to do now follows.",
     "night_manager": "Night mode is on: nobody is watching the run. Decide everything yourself, from my preferences and "
@@ -460,7 +456,8 @@ from the message you send to {{critic}}.
                             "<score>…</score> and <decision>…</decision>; your working state in <state>…</state> when it changes. "
                             "Everything outside tags is read by me.",
     "tag_reminder_critic": "A reminder, in case it helps (not a request to add anything): text outside tags reaches "
-                           "{{worker}}; what is only for me goes in <message to=\"you\">…</message>; "
+                           "{{worker}}; what is only for me goes in <message to=\"you\">…</message>; an update for "
+                           "{{worker}} outside a review in <message to=\"{{worker}}\">…</message>; "
                            "questions for me in <question>…</question>; proposing to stop the whole run until "
                            "a person acts in <pause>…</pause>; {{worker}} gets one step of your <plan>…</plan> at a "
                            "time; each review ends with <plan>…</plan>, <checklist>…</checklist> (the current step) and "
@@ -482,4 +479,20 @@ Read the files and logs you need before you act, and carry on from there.""",
                   "it, give me the next step (now: {{step}}), and say PASS only when every step is done. If a step "
                   "is no longer needed, drop it from the plan.",
     "relay_note_up": "{{critic}} mentioned: {{note}}",
+    # a <message to="…"> that names no one the sender may write to: one line back to the sender
+    "address_correction_manager": "Not delivered: {{bad}}. You can write to {{critic}} (`<message to=\"{{critic}}\">`) "
+                                  "or, rarely, to {{worker}}; text outside tags is for me.",
+    "address_correction_critic": "Not delivered: {{bad}}. You can write to me (`<message to=\"you\">`) and to "
+                                 "{{worker}} (`<message to=\"{{worker}}\">`); nobody else.",
+    "address_correction_worker": "A `<message>` tag in your reply was not delivered. Write to me directly, without "
+                                 "`<message>` tags.",
+    # the manager's reply held nothing for the critic, where the work needs a message
+    "manager_no_message": "Nothing in your last reply reached {{critic}}: only `<message to=\"{{critic}}\">…</message>` "
+                          "is passed on. Please write what {{critic}} should get, inside that tag.",
+    "critic_no_message": "Nothing new from me on this; carry on with your plan, on your own best assumption where "
+                         "something is open.",
+    # board chat with the critic or a worker: framed as a message from its usual user
+    "chat_reminder_critic": "Answer my message. Don't start new work or change files unless I ask. Your reply comes "
+                            "to me; to pass something on to {{worker}}, put it in `<message to=\"{{worker}}\">…</message>`.",
+    "chat_reminder_worker": "Answer my message. Don't start new work or change files unless I ask.",
 }

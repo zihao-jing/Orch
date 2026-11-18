@@ -250,7 +250,42 @@ class ManagedRunner(MonitorRunner):
             if note:
                 prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
                 extra = {**(extra or {}), "tag_reminder": True}
-        return super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
+        r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
+        if r.get("status") == "ok":
+            self.check_addresses(agent, r.get("output") or "")
+        return r
+
+    # whom each role may write to with <message to="…"> (besides to="you", its own user)
+    MAY_ADDRESS = {"manager": ("verifier", "worker"), "verifier": ("worker", "manager"), "worker": ()}
+
+    def bad_addresses(self, agent: AgentConfig, text: str) -> List[str]:
+        """The <message to="…"> blocks of a reply that can't be delivered: no such recipient, the sender itself,
+        a role this agent doesn't address, or an empty body. The critic's notes to its user (to="you", or the
+        manager's names) are valid: they go up."""
+        allowed = self.MAY_ADDRESS.get(agent.role, ())
+        bad = []
+        for attrs, body in T.blocks(text, "message"):
+            to = (attrs.get("to") or "").strip()
+            if T.addressed(attrs, "you"):
+                continue
+            target = T.recipient(to, self.mon.agents)
+            if target is None or target.name == agent.name or target.role not in allowed or not (body or "").strip():
+                bad.append(f'<message to="{to}">' + ("" if (body or "").strip() else " (empty)"))
+        return bad
+
+    def check_addresses(self, agent: AgentConfig, text: str) -> None:
+        """An invalid address is reported on the board and corrected in one line at the sender's next turn."""
+        bad = self.bad_addresses(agent, text)
+        if not bad:
+            return
+        role = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(agent.role)
+        for b in bad:
+            self.rec.progress(f"⚠ {agent.called}: {b} names no one it can write to; not sent")
+            self.rec.event("route_problem", agent=agent.name, problem=f"{b} names no one it can write to; not sent")
+        if role:
+            note = self.mtpl(f"address_correction_{role}", bad=", ".join(bad)).strip()
+            if note not in ((self.st.get("fwd") or {}).get(agent.name) or []):
+                self.forward(agent, note)
 
     def say(self, agent: AgentConfig, prompt: str, purpose: str) -> Dict[str, Any]:
         """One turn of one agent, tagged with the milestone it belongs to."""
@@ -272,21 +307,11 @@ class ManagedRunner(MonitorRunner):
                 if note:
                     self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
             if purpose == "checkin" and r["status"] == "ok":
-                sent, problems = T.routes(r.get("output") or "", agent.name, self.mon.agents)
-                for target, body, _urgent in sent:
+                sent, _problems = T.routes(r.get("output") or "", agent.name, self.mon.agents)
+                for target, body, _urgent in sent:  # invalid addresses: check_addresses after the turn
                     if target.role == "worker":
                         self.rec.queue_worker_message(target.name, self.for_worker(body), r["turn_id"], agent.name)
-                    else:
-                        problems.append(f'<message to="{target.called}"> is not the worker; a check-in passes updates '
-                                        "to the worker only; not sent")
-                self.warn_routes(agent, problems)
         return r
-
-    def warn_routes(self, agent: AgentConfig, problems: List[str]) -> None:
-        """Say in the progress log (and the event record) what a reply's <message> blocks could not send."""
-        for p in problems:
-            self.rec.progress(f"⚠ {agent.called}: {p}")
-            self.rec.event("route_problem", agent=agent.name, problem=p)
 
     # ------------------------------------------------------------------ working state (agents/<name>/state.md)
     # One owner and one moment per piece: the manager rewrites its state (standing instruction for the critic and the
@@ -413,7 +438,7 @@ class ManagedRunner(MonitorRunner):
         if line in old:
             return False  # already noted
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(old.rstrip() + ("\n" if old.strip() else "") + f"- {now_iso()[:10]} (from {by}): {line}\n",
+        p.write_text(old.rstrip() + ("\n" if old.strip() else "") + f"- {now_iso()[:10]}: {line}\n",
                      encoding="utf-8")
         self.rec.event("preference", agent=a.name, by=by)
         return True
@@ -534,12 +559,16 @@ class ManagedRunner(MonitorRunner):
         ans = resolve_choice(answer, [tuple(x) for x in q.get("options") or []])
         self.settle(q, "human", ans)
         short = truncate(self.question_line(q["text"]), 300)
+        # the critic hears about its own question, never the manager's wording for me
+        own = next((self.q(pid) for pid in q.get("parent") or [] if (self.q(pid) or {}).get("from") == self.critic.name), None)
+        short_c = truncate(self.question_line(own["text"]), 300) if own else short
         if via == "conversation":  # the manager was in the conversation; only the critic needs telling
             q["via"] = via
-            self.forward(self.critic, self.mtpl("relay_settled_critic", question=short, answer=ans).strip())
+            for_c = self.for_critic(ans, fallback=False) or T.outside(ans)  # only what it wrote for the critic
+            self.forward(self.critic, self.mtpl("relay_settled_critic", question=short_c, answer=for_c).strip())
         else:
             self.forward(self.manager, self.mtpl("relay_answer_manager", question=short, answer=ans).strip())
-            self.forward(self.critic, self.mtpl("relay_answer_critic", question=short, answer=ans).strip())
+            self.forward(self.critic, self.mtpl("relay_answer_critic", question=short_c, answer=ans).strip())
         self.decide(ans if via == "conversation" else f"{self.short_question(q['text'])}: {ans}", "you", q["id"])
         self.rec.event("human_answer", qid=q["id"])
         self.rec.progress(f"✅ **{q['id']}** answered by me: {truncate(ans, 300)}")
@@ -564,7 +593,8 @@ class ManagedRunner(MonitorRunner):
         regs = self.st.get("decisions") or []
         lines = ["# Decisions", "", "Binding for the whole run; where two say different things, the later one holds.", ""]
         for d in regs:
-            lines.append(f"## {d['id']} · {d['by']} · {d['at'][:16].replace('T', ' ')} · {d['source']}")
+            src = "note" if str(d["source"]).startswith("note to ") else d["source"]  # agents read it: no names
+            lines.append(f"## {d['id']} · {d['at'][:16].replace('T', ' ')} · {src}")
             lines += ["", d["text"], ""]
         (self.rec.run_dir / "decisions.md").write_text("\n".join(lines), encoding="utf-8")
         self.rec.save()
@@ -615,6 +645,10 @@ class ManagedRunner(MonitorRunner):
         skip = {"worker": ("gate", "wait"), "verifier": ("gate",)}.get(role, ())
         rows = []
         kept = [d for d in regs if str(d.get("source", "")) not in skip and (d.get("at") or "") >= after]  # same second: keep
+        if role in ("verifier", "worker"):  # below the manager: no night-mode choices (its text for me), no notes to others
+            kept = [d for d in kept if "night mode" not in str(d.get("by", ""))
+                    and not (str(d.get("source", "")).startswith("note to ")
+                             and a.name not in str(d["source"])[len("note to "):].split(", "))]
         recent = {d["id"] for d in kept[-12:]}  # older decisions in one short line; the file has them in full
         for d in kept:
             topic, body = self.decision_body(d)
@@ -849,7 +883,7 @@ class ManagedRunner(MonitorRunner):
                 prose = strip_checklist(T.without_markup(last, drop=("plan", "checklist", "verdict")))
                 parts.append("Your latest review:\n\n" + prose)
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
-        if qs:
+        if qs and a.role == "manager":  # the manager's questions to me: never shown below it
             parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
         if top_down and a.role == "verifier":  # the manager's new instruction carries what matters now
             parts.append(self.mtpl("decisions_pointer", path=str(self.rec.run_dir / "decisions.md")).strip())
@@ -910,8 +944,8 @@ class ManagedRunner(MonitorRunner):
             if q:
                 self.st["fwd"][a.name] = [x for x in q if not x.startswith("Your last turn was cut off")]
         r = self.say(self.manager, self.mtpl("manager_restart", human_messages=""), "restart")
-        text = self.after_manager(r, relay=False)
-        msg = self.for_critic(text)
+        self.after_manager(r, relay=False)
+        msg = self.critic_message(r, "restart")
         mg.update(guidance=msg, guidance_at=now_iso())
         self.decide(msg, self.manager.called, "restart")
         c = self.say(self.critic, self.mtpl("critic_restart", instruction=msg, human_messages="",
@@ -996,25 +1030,38 @@ class ManagedRunner(MonitorRunner):
             fb[w.name] = (fb.get(w.name, "") + "\n\n" + text).strip() if append and fb.get(w.name) else text
 
     def for_critic(self, text: str, fallback: bool = True) -> str:
-        """What a manager reply passes to the critic: its <message to="critic"> blocks; without one (and with
-        `fallback`), the reply outside the tags, minus score tables."""
+        """What a manager reply passes to the critic: its <message to="critic"> blocks. Text outside them is for me
+        and never reaches the critic; only without the protocol (no tags at all) does the reply outside the tags,
+        minus score tables, stand in."""
         c = self.critic
         msgs = [b for a, b in T.blocks(text, "message") if b and T.addressed(a, c.called, c.name, "critic")]
         if msgs:
             return "\n\n".join(msgs)
-        if not fallback:
+        if not fallback or self.mon.controller.protocol:
             return ""
         keep = [ln for ln in T.outside(text).split("\n") if not ln.strip().startswith("|")]
         return re.sub(r"\n{3,}", "\n\n", "\n".join(keep)).strip()
+
+    def critic_message(self, r: Dict[str, Any], purpose: str = "") -> str:
+        """The manager's message for the critic in a reply where the work needs one. Without a
+        <message to="critic">, the manager is asked once more; if that fails too, the critic is told to carry on
+        (never handed the manager's text for me)."""
+        msg = self.for_critic(r.get("output") or "")
+        if msg or not self.mon.controller.protocol or r.get("status") != "ok":
+            return msg
+        self.rec.progress(f"⚠ {self.manager.called}: no message for {self.critic.called} in its reply; asked again")
+        r2 = self.say(self.manager, self.mtpl("manager_no_message").strip(), "message")
+        self.after_manager(r2, relay=False)
+        msg = self.for_critic(r2.get("output") or "")
+        if not msg:
+            self.rec.progress(f"⚠ {self.manager.called}: still no message for {self.critic.called}; it carries on")
+            msg = self.mtpl("critic_no_message").strip()
+        return msg
 
     def clean_critic(self, text: str) -> str:
         """What the worker gets from a critic reply: the text outside the tags, plus any <message to="worker">."""
         names = [n for w in self.workers for n in (w.called, w.name)] + ["worker"]
         extra = [b for a, b in T.blocks(text, "message") if b and T.addressed(a, *names)]
-        sent, problems = T.routes(text, self.critic.name, self.mon.agents)
-        problems += [f'<message to="{t.called}"> is not the worker; a review passes messages to the worker only; not sent'
-                     for t, _b, _u in sent if t.role != "worker"]
-        self.warn_routes(self.critic, problems)
         return self.for_worker("\n\n".join([x for x in [T.outside(text)] + extra if x]))
 
     def for_worker(self, text: str) -> str:
@@ -1157,7 +1204,7 @@ class ManagedRunner(MonitorRunner):
                 self.audit_due()
             if ph == "work" and mg.get("pause_req") and not mg.get("in_work"):  # the manager called a pause
                 req = mg.pop("pause_req")
-                mg["wait"] = {"who": "the manager", "text": req.get("text", ""), "proposal": req.get("text", ""),
+                mg["wait"] = {"who": "the manager", "text": req.get("text", ""), "proposal": "",
                               "turn": req.get("turn", "")}
                 mg["phase"] = ph = "wait"
                 self.rec.progress("⏸ the manager paused the work until a task of mine is done")
@@ -1253,7 +1300,8 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
                                              milestone=ms["text"], human_messages="",
                                              decisions=self.decisions_text()), "kickoff")
-        mg.update(note=self.for_critic(self.after_manager(r, relay=False)), note_at=now_iso(), ms_round=0, stall=0,
+        self.after_manager(r, relay=False)
+        mg.update(note=self.critic_message(r, "kickoff"), note_at=now_iso(), ms_round=0, stall=0,
                   limit=False, phase="brief", plan_done=None, plan_total=None, step_round=None)
         return None
 
@@ -1557,7 +1605,7 @@ class ManagedRunner(MonitorRunner):
             return None
         self.after_manager(r, relay=False)
         mg.pop("pause_req", None)  # it decided to continue
-        guidance = self.for_critic(out)
+        guidance = self.critic_message(r, "pause")
         mg.pop("wait", None)
         c = self.say(self.critic, self.mtpl("critic_continue", guidance=guidance, human_messages=""), "guidance")
         self.worker_feedback(self.clean_critic(c["output"]))
@@ -1577,7 +1625,7 @@ class ManagedRunner(MonitorRunner):
             self.forward(self.manager, self.mtpl("manager_resumed", message=msg,
                                                  waited=truncate(w.get("proposal") or w.get("text", ""), 600)).strip())
         r = self.say(self.critic, self.mtpl("critic_resume", message=msg or "(no message)",
-                                            waited=w.get("proposal") or w.get("text", ""),
+                                            waited=w.get("proposal") or "a task outside this work",
                                             human_messages=""), "guidance")
         self.worker_feedback(self.clean_critic(r["output"]))
         mg.pop("wait", None)
@@ -1611,13 +1659,14 @@ class ManagedRunner(MonitorRunner):
             mg["phase"] = mg.get("after") or "work"
             return None
         r = self.say(self.manager, self.mtpl("manager_question", question=q["text"], human_messages=""), "answer")
-        text = self.after_manager(r, parent=[q["id"]], relay=False)
+        self.after_manager(r, parent=[q["id"]], relay=False)
+        answer = self.critic_message(r, "answer")
         if self.open_qs(self.manager.name, "human") and any(q["id"] in x["parent"] for x in self.open_qs(self.manager.name)):
-            self.settle(q, "", "", r["turn_id"], status="passed_up")  # gone up to me; the manager's guess is in `text`
+            self.settle(q, "", "", r["turn_id"], status="passed_up")  # gone up to me; the manager's guess is its message
         else:
-            self.settle(q, self.manager.name, self.for_critic(text), r["turn_id"])
-            self.decide(f"{self.short_question(q['text'])}: {self.for_critic(text)}", self.manager.called, q["id"])
-        mg.update(answer_text=self.for_critic(text), phase="amend")
+            self.settle(q, self.manager.name, answer, r["turn_id"])
+            self.decide(f"{self.short_question(q['text'])}: {answer}", self.manager.called, q["id"])
+        mg.update(answer_text=answer, phase="amend")
         return None
 
     def ph_amend(self, mg: Dict[str, Any]) -> Optional[str]:
@@ -1681,9 +1730,10 @@ class ManagedRunner(MonitorRunner):
         if accept or mg.get("limit"):
             ms.update(status="awaiting_ok", summary=self.for_me(text), summary_turn=r["turn_id"], accepted=accept)
             gate = c.approve_milestones or not accept
-            mg.update(phase="gate" if gate else "next", guidance="" if accept else self.for_critic(text), guidance_at=now_iso())
+            mg.update(phase="gate" if gate else "next", guidance="" if accept else self.critic_message(r, "review"),
+                      guidance_at=now_iso())
         else:
-            mg.update(guidance=self.for_critic(text), guidance_at=now_iso(), phase="guidance")
+            mg.update(guidance=self.critic_message(r, "review"), guidance_at=now_iso(), phase="guidance")
         return None
 
     def ph_guidance(self, mg: Dict[str, Any]) -> Optional[str]:
@@ -1720,7 +1770,8 @@ class ManagedRunner(MonitorRunner):
                            reason="replaced by the manager's message after the gate"
                                   + ("" if unsent or comment == held else "; not shown to the manager"))
         ms.update(status="active")
-        mg.update(guidance=self.for_critic(self.after_manager(r, relay=False)), guidance_at=now_iso(), ms_round=0, stall=0,
+        self.after_manager(r, relay=False)
+        mg.update(guidance=self.critic_message(r, "feedback"), guidance_at=now_iso(), ms_round=0, stall=0,
                   limit=False, phase="guidance")
         return None
 

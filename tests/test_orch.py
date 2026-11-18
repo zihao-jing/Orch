@@ -559,7 +559,7 @@ class TestManaged(unittest.TestCase):
     def test_question_inside_a_note_to_the_manager_is_answered_at_once(self):
         # the critic put its question inside <message to="you">: the manager answers at once, not at some later turn
         status, rec = run(make_cfg(self.tmp, [managed(
-            mgr={"milestones": 1, "replies": {"answer": ["Cite the new run."]}},
+            mgr={"milestones": 1, "replies": {"answer": ['<message to="Jordan">Cite the new run.</message>']}},
             critic={"replies": {"verify": [
                 '<message to="you"><question>Do we cite the new run?\nA) yes\nB) no</question></message>\n\n'
                 "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
@@ -1262,7 +1262,7 @@ class TestManaged(unittest.TestCase):
         lines = pref.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn("Keep tables under one page.", lines[0])
-        self.assertIn(f"(from {mgr.name})", lines[0])
+        self.assertNotIn(mgr.name, lines[0])  # the agent below doesn't learn who wrote it
         self.assertEqual(T.outside(text).strip(), "Noted.")  # the tag is not passed on as text
         r.after_state_turn(mgr, {"status": "ok", "output": '<preference to="nobody">x</preference>'})
         self.assertEqual(len(pref.read_text(encoding="utf-8").splitlines()), 1)
@@ -1736,7 +1736,7 @@ class TestManaged(unittest.TestCase):
         i_ack = [t["purpose"] for t in ts].index("ack")
         self.assertEqual(ts[i_ack + 1]["purpose"], "guidance")  # paused right after the check-in, then resumed
         self.assertIn("Notes are in notes.md.", ts[i_ack + 1]["input"])
-        self.assertIn("finish the dry run", ts[i_ack + 1]["input"])
+        self.assertNotIn("finish the dry run", ts[i_ack + 1]["input"])  # the manager's text for me stays with me
         self.assertEqual([x["kind"] for x in rec.state["managed"]["gates"]].count("wait"), 1)
 
     def test_protocol_is_added_to_every_role_and_can_be_turned_off(self):

@@ -382,12 +382,11 @@ class Board:
                     sid = sess.get("session_id")
                     if not sid:
                         raise RuntimeError(f"{a.called} has no conversation now")
-                    others = ", ".join(x.called for x in self.mon.agents if x.name != a.name and x.role != "auditor")
-                    prompt = (message + "\n\n<system-reminder>\nThe user is talking to you directly from the board. "
-                              "Answer them. Do not start new work or change files unless they ask for it. Your reply is "
-                              "shown to them. To pass something on to another agent, put it in "
-                              f"`<message to=\"NAME\">…</message>` (NAME one of: {others}); only those blocks are sent.\n"
-                              "</system-reminder>")
+                    # framed as a message from the agent's usual user: no board, no one above it
+                    workers = " and ".join(x.called for x in self.mon.agents if x.role == "worker") or "worker"
+                    key = "chat_reminder_critic" if a.role == "verifier" else "chat_reminder_worker"
+                    note = render(self.mon.controller.templates[key], worker=workers).strip()
+                    prompt = message + (f"\n\n<system-reminder>\n{note}\n</system-reminder>" if note else "")
                     res = run_variants(a, TurnRequest(
                         agent=a.name, role=a.role, prompt=prompt, system_prompt=a.current_system_prompt(),
                         session_id=sid, cwd=a.working_dir, timeout=a.timeout, options=a.backend_options,
@@ -403,6 +402,10 @@ class Board:
             problems: List[str] = []
             if status == "ok":
                 sent, problems = T.routes(text or "", a.name, self.mon.agents)
+                allowed = ("worker", "manager") if a.role == "verifier" else ()  # a worker addresses no one
+                problems += [f'<message to="{t.called}"> names no one {a.called} can write to; not sent'
+                             for t, _b, _u in sent if t.role not in allowed]
+                sent = [x for x in sent if x[0].role in allowed]
                 for target, body, urg in sent:
                     self.control({"to": [target.name], "message": body, "from": a.name,
                                   **({"urgent": True} if urg else {})})
