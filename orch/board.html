@@ -172,6 +172,8 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
   <a class="sm btn" id="loglink" href="log/run" target="_blank" title="Every turn's full input and output, folded by milestone and round">📜 Log</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
   <button class="sm" id="theme" title="Toggle light/dark">◐</button>
+  <button class="sm" id="reviewbtn" title="Ask the manager for a review file: a short Markdown review you can comment in and send back">📝 Review file</button>
+  <button class="sm" id="discuss" title="Discussion: while it is on, the manager sends nothing to the critic; when you turn it off, it sends one message with the new directions">💬 Discuss</button>
   <button class="sm" id="night" title="Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review">🌙 Night</button>
   <button class="sm" id="stop" title="Stop after the current turn">Stop run</button>
  </header>
@@ -190,6 +192,7 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
    <div class="card" id="worker-updates-card" hidden><h2>Updates to running workers</h2><div id="worker-updates"></div></div>
    <div class="card"><h2>Critic ↔ worker, round by round</h2><div id="rounds"></div></div>
    <div class="card"><h2>Questions</h2><div id="qs"></div></div>
+   <div class="card" id="reviews-card" hidden><h2>Review files</h2><div id="reviews"></div></div>
    <div class="card"><h2 id="gold-h">Golden board</h2><div id="golden"></div>
     <details class="fold" id="dec-fold"><summary><b id="dec-h">Decisions record</b></summary><div id="decs"></div></details></div>
   <details class="card ckp" id="audit-card" hidden><summary><h2 id="audit-h">Auditor</h2><span class="mute">click to load</span></summary><div id="audit"></div></details>
@@ -227,13 +230,15 @@ function tagsToMd(s){
       (_, w, rest) => lab('→ ' + who(w.trim().replace(/^the\s+/i,'')) + (/urgent\s*=\s*["']?(yes|true|1|now)/i.test(rest||'') ? ' (urgent)' : '')))
     .replace(/<question\s*>/gi, lab('❓ Question')).replace(/<pause\s*>/gi, lab('⏸ Pause'))
     .replace(/<plan\s*>/gi, lab('Plan')).replace(/<checklist\s*>/gi, lab('Checklist'))
+    .replace(/<rubric\s*>/gi, lab('Rubric')).replace(/<summary\s*>/gi, lab('Summary'))
     .replace(/<verdict\s*>\s*([^<]*)<\/verdict\s*>/gi, (_, v) => lab('Verdict: ' + v.trim()))
     .replace(/<score\s*>\s*([^<]*)<\/score\s*>/gi, (_, v) => lab('Score: ' + v.trim() + (/\//.test(v) ? '' : '/5')))
     .replace(/<decision\s*>\s*([^<]*)<\/decision\s*>/gi, (_, v) => lab('Decision: ' + v.trim()))
     .replace(/<no-wait\s+pid\s*=\s*["']?(\d+)["']?\s*\/?>/gi, (_, p) => `\n\n*(not waited on: pid ${p})*\n\n`)
-    .replace(/<\/(message|question|pause|plan|checklist|verdict|score|decision|no-wait)\s*>/gi, '\n\n');
+    .replace(/<question\s+blocking\s*=\s*["']?no["']?\s*>/gi, lab('❓ Question (the work goes on meanwhile)'))
+    .replace(/<\/(message|question|pause|plan|checklist|verdict|score|decision|no-wait|rubric|summary)\s*>/gi, '\n\n');
 }
-const TAGBLOCK = /<(message|question|pause|plan|checklist|verdict|score|decision|no-wait|preference)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
+const TAGBLOCK = /<(message|question|pause|plan|checklist|verdict|score|decision|no-wait|preference|rubric|summary)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
 function md(src){
   const L = tagsToMd(src).replace(/\r/g,'').split('\n'); let h = '', i = 0;
   while (i < L.length){
@@ -344,7 +349,7 @@ function render(){
   $('title').textContent = D.monitor; setHTML($('status'), stPill(D.status)); $('runid').textContent = D.run_id;
   document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderTiles(mg); renderSteps(mg); renderCharts(mg); renderReport(mg);
-  renderThread(mg); renderWorkerUpdates(); renderRounds(mg); renderQs(); renderDecisions(); renderAudit(); renderChat();
+  renderThread(mg); renderWorkerUpdates(); renderRounds(mg); renderQs(); renderReviews(mg); renderDecisions(); renderAudit(); renderChat();
   renderMessages();
   Object.keys(live).forEach(paintLive);
 }
@@ -357,9 +362,16 @@ const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milesto
 function renderTiles(mg){
   const nb = $('night'), want = nightWanted();  // the switch as last set (the run applies it when the current turn ends)
   nb.textContent = want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
+  const qOpen = (D.questions||[]).some(q => q.status === 'open' && q.to === 'human');  // B9: no switch mid-question
+  nb.disabled = qOpen && !(D.night_pending != null && D.night_pending !== !!D.night);
+  nb.title = qOpen ? 'A question for you is open: night mode can switch once it is answered' : 'Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review';
+  const db = $('discuss'), dw = discussWanted();  // B6: shown as last set, at once
+  db.textContent = dw ? '💬 Discuss: on' : '💬 Discuss: off'; db.classList.toggle('ok', dw);
+  const rb = $('reviewbtn'); rb.disabled = !!mg.review_req; rb.textContent = mg.review_req ? '📝 Review asked…' : '📝 Review file';
   const qs = D.questions||[], mss = mg.milestones||[], done = mss.filter(m=>m.status==='done').length;
   const run = running()[0];
   const nowTxt = run ? `<span class="dot live"></span> <b>${esc(called(run.agent))}</b>&nbsp;is ${esc(DOING[run.purpose]||run.purpose)}`
+                     : mg.held ? (String(mg.held.why).startsWith('question') ? '⏸ The work waits for your answer to ' + esc(String(mg.held.why).slice(9)) : '⏸ The manager\'s next step waits for the discussion to close')
                      : D.status === 'waiting_job' ? 'Waiting for the worker\'s job to finish' : (D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? 'Paused until your task is done' : 'Waiting for your OK') : esc(D.status||''));
   const checks = Object.values(D.status_lines||{}).map(x => {  // B5: the latest progress check of each working agent
     const mins = x.since_ts ? Math.max(0, Math.round((Date.now()/1000 - x.since_ts)/60)) : 0;
@@ -403,6 +415,7 @@ function renderNeeds(mg){
   }
   if (g){
     h += `<div style="font-weight:600;margin-bottom:4px">⏸ ${esc(g.title)}</div>`;
+    if (g.summary) h += `<div class="rec"><div class="k">What changed, what was checked, where to look</div><div class="md">${md(g.summary)}</div></div>`;
     if (g.kind === 'plan'){
       h += '<div class="tw"><table><tr><th>#</th><th>milestone</th><th>done when</th></tr>' + (mg.milestones||[]).map((m,i) =>
         `<tr><td class="num">${i+1}</td><td><b>${inline(m.title)}</b></td><td>${inline(m.done_when||'')}</td></tr>`).join('') + '</table></div>';
@@ -413,7 +426,7 @@ function renderNeeds(mg){
     h += g.kind === 'wait'
       ? `<div class="ink2" style="font-size:12px">The worker and the critic are paused; no rounds are spent while you work on this.</div>
       <div class="row"><textarea id="gate-msg" rows="2" placeholder="What you did, where the files are, anything the critic should know"></textarea></div>
-      <div class="row"><button class="ok" data-gate="approve">✓ Done, carry on</button></div>`
+      <div class="row"><button class="ok" data-gate="approve">✓ Done, carry on</button><button data-gate="revise">↺ Send back with my note</button></div>`
       : `<div class="row"><textarea id="gate-msg" rows="2" placeholder="Optional: what still needs work, or a note for the manager"></textarea></div>
       <div class="row"><button class="ok" data-gate="approve">✓ Approve</button><button data-gate="revise">↺ Send back with my note</button></div>`;
   }
@@ -454,6 +467,7 @@ document.addEventListener('click', async e => {
   if (b.dataset.job){ b.disabled = true; await post('api/job', {}); }
   if (b.dataset.gate){ const msg = ($('gate-msg')||{}).value || '';
     if (b.dataset.gate === 'revise' && !msg.trim() && !confirm('Send it back without a note?')) return;
+    if (b.dataset.gate === 'revise' && (D.managed.gate||{}).kind === 'wait' && !confirm('Send the pause back to the manager? It decides again with your note.')) return;
     b.disabled = true; await post('api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}); }
   else if (b.dataset.qo){ b.disabled = true; await qSend(b.dataset.qo, b.dataset.a); }
   else if (b.dataset.qs){ const v = (($('qa-'+b.dataset.qs)||{}).value || '').trim(); if (!v) return; b.disabled = true; await qSend(b.dataset.qs, v); }
@@ -465,10 +479,15 @@ document.addEventListener('click', async e => {
   else if (b.dataset.older){ shown[b.dataset.older] = b.dataset.n === 'all' ? 1e9 : shown[b.dataset.older] + (+b.dataset.n); render(); }
   else if (b.dataset.less){ shown[b.dataset.less] = LIMIT[b.dataset.less]; render(); }
   else if (b.dataset.tab){ tab = b.dataset.tab; render(); }
+  else if (b.dataset.reopen != null && b.dataset.reopen !== undefined){
+    if (!confirm('Move milestone ' + (+b.dataset.reopen + 1) + ' back to open? Its checklist gets an open item; the manager is not prompted.')) return;
+    b.disabled = true; await post('api/milestone', {ms: +b.dataset.reopen}); }
+  else if (b.dataset.rc){ if (!confirm('Send your comments in this file to the manager?')) return;
+    b.disabled = true; await post('api/review_comments', {path: b.dataset.rc}); }
 });
 async function post(url, body){ try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json(); if (j.error) alert(j.error); soon(); return j; } catch(e){ alert('Could not reach the board server.'); } }
 
-const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started']};
+const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started'], open:['p-warn','↺ open again']};
 function renderSteps(mg){
   const mss = mg.milestones || [];
   if (!mss.length){ setHTML($('steps'), `<div class="empty">${mg.phase === 'plan' || !mg.phase ? 'The manager is drafting the milestone plan…' : 'No milestones yet.'}</div>`); return; }
@@ -548,6 +567,10 @@ function renderReport(mg){
   const revs = (D.reviews||[]).filter(r => r.milestone === sel);
   let h = `<h2>Milestone ${sel+1} report · from ${esc(who('manager'))} to you</h2><div style="font-weight:600">${esc(m.title)}</div>
     <div class="ink2" style="margin-bottom:8px">Done when: ${inline(m.done_when||'—')}</div>`;
+  if (m.status === 'done') h += `<div class="row"><button class="sm" data-reopen="${sel}" title="Move this milestone back to open: shown as open, and its checklist gets an open item">↺ Move back to open</button></div>`;
+  if (m.status === 'open') h += `<div class="ink2" style="font-size:12px">↺ Moved back to open ${tm(m.reopened_at)}.</div>`;
+  if ((m.rubric||[]).length) h += `<details class="tbl"><summary>Rubric (${m.rubric.length} criteria)</summary><ol>${m.rubric.map(x => `<li>${inline(x)}</li>`).join('')}</ol></details>`;
+  if (m.gate_summary) h += `<div class="rec"><div class="k">What changed, what was checked, where to look</div><div class="md">${md(m.gate_summary)}</div></div>`;
   h += m.summary ? `<div class="md">${md(m.summary)}</div>` : '<div class="empty">The manager has not reported on this milestone yet.</div>';
   if (revs.length) h += '<details class="tbl"' + (revs.length>1?' open':'') + '><summary>Review history</summary><div class="tw"><table><tr><th>review</th><th>round</th><th class="num">score</th><th>decision</th></tr>' +
     revs.map((r,i) => `<tr><td>${i+1}</td><td>${r.round}</td><td class="num">${r.score ?? '—'}</td><td>${r.decision==='ACCEPT'?pill('p-good','✓ accept'):pill('p-warn','↺ revise')}</td></tr>`).join('') + '</table></div></details>';
@@ -678,6 +701,18 @@ function renderQs(){
     + (closed.length ? `<details class="tbl"><summary>Settled (${closed.length})</summary>${head + closed.map(row).join('')}</table></div></details>` : ''));
 }
 
+function renderReviews(mg){  // B9: the review files the manager wrote; comment in the file, then send the comments back
+  const rs = D.review_files || [], req = mg.review_req;
+  $('reviews-card').hidden = !rs.length && !req;
+  if ($('reviews-card').hidden) return;
+  const RS = {written:['p-run','to comment'], 'comments sent':['p-good','✓ comments sent'], missing:['p-warn','not written']};
+  setHTML($('reviews'), (req ? `<div class="mute" style="font-size:12px">📝 Asked ${tm(req.at)}; ${esc(who('manager'))} writes it when free.</div>` : '') +
+    rs.map(r => { const s = RS[r.status] || ['', r.status];
+      return `<div class="q"><div class="row" style="align-items:center;gap:8px">${r.href && r.exists ? `<a href="${esc(r.href)}" target="_blank">${esc(r.name)}</a>` : esc(r.name)} ${pill(s[0], s[1])}
+        <span class="mute" style="font-size:12px">${tm(r.written_at || r.requested_at)}</span><span style="flex:1"></span>
+        ${r.exists ? `<button class="sm" data-rc="${esc(r.path)}" title="Sends what you changed in the file (your comments) to the manager">↩ Send back comments</button>` : ''}</div>
+        <div class="mute mono" style="font-size:11px">${esc(r.path)} — comment in this file, then send it back</div></div>`; }).join(''));
+}
 function renderGolden(){  // the golden board (B3): the rules, preferences and key decisions every agent reads; the manager keeps it
   const G = D.golden || {}, warn = [];
   $('gold-h').textContent = 'Golden board' + (G.chars ? ` · ${G.chars.toLocaleString()} chars` : '');
@@ -940,6 +975,12 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen) 
 $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
 function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_pending; }
+function discussWanted(){ return D.discussion_pending == null ? !!D.discussion : !!D.discussion_pending; }
+$('discuss').addEventListener('click', async () => { const on = !discussWanted();
+  if (!confirm(on ? 'Start a discussion? The manager sends nothing to the critic until you turn it off; then it sends one message with the new directions.' : 'Close the discussion? The manager sends the critic one message with the new directions.')) return;
+  D.discussion_pending = on; render(); await post('api/discussion', {on}); });
+$('reviewbtn').addEventListener('click', async () => { if (!confirm('Ask the manager for a review file you can comment in?')) return;
+  $('reviewbtn').disabled = true; await post('api/review', {}); });
 $('night').addEventListener('click', () => { const on = !nightWanted();
   if (confirm(on ? 'Turn night mode on? The manager answers your questions and passes gates itself until you turn it off; its choices are recorded in Questions and Decisions.' : 'Turn night mode off?')) post('api/night', {on}); });
 $('stop').addEventListener('click', () => { if (confirm('Stop the run after the current turn? You can resume it later.')) post('api/stop', {}); });

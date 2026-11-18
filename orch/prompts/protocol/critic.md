@@ -26,6 +26,8 @@ Check-ins
   work running; a check-in is not a new review. If my message changes the work, send the change in
   `<message to="{{worker}}">`: it reaches them at the next pause in their work, or at their next turn. A queued
   message is not proof that it was acted on. A status-only check-in needs no message to {{worker}}.
+- If my message makes what {{worker}} is doing now wasted work, write `<message to="{{worker}}" urgent="yes">`: it
+  stops their current turn. Otherwise let them finish.
 
 Progress checks
 - While {{worker}} works or a job runs, you may get a short progress check: what was seen there, with evidence, not

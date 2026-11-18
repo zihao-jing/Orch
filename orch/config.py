@@ -31,7 +31,7 @@ HOT_AGENT_FIELDS = ("backend", "backend_options", "env", "timeout", "retries", "
                     "safety_timeout", "check_every", "check_session", "compact_between_steps", "model_id",
                     "retry_waits")
 # prompt_vars the run sets itself (not the config): kept when the config is re-read, so they never count as a change
-RUN_PROMPT_VARS = ("golden_board",)
+RUN_PROMPT_VARS = ("golden_board", "checklist_files")
 
 # B8: a failed turn (provider error, overload, rate limit, crash) is retried on the same model after each of these
 # waits (seconds), then the backups take over in order. `retry_waits` in the project settings or an agent's YAML.

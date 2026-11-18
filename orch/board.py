@@ -209,12 +209,15 @@ class Board:
         total_cost = _turn_costs(turns, chat_all)
         cost_estimate = round(sum(t["cost"] for t in turns if t.get("cost_basis") == "estimate"
                                   and isinstance(t.get("cost"), (int, float))), 4)
-        night_pending: Optional[bool] = None
+        night_pending: Optional[bool] = st.get("night_queued")  # B9: queued while a question for me is open
+        discussion_pending: Optional[bool] = None
         queued: Dict[str, List[str]] = {}  # answers sent but not yet picked up (the run reads them between turns)
         for p in sorted((rd / "inbox").glob("*.json")):
             d = read_json(p) or {}
             if isinstance(d, dict) and d.get("kind") == "night":
                 night_pending = bool(d.get("on"))  # the run reads it between turns; the newest one wins
+            if isinstance(d, dict) and d.get("kind") == "discussion":
+                discussion_pending = bool(d.get("on"))
             if isinstance(d, dict) and d.get("kind") == "answer" and d.get("qid"):
                 queued.setdefault(str(d["qid"]).upper(), []).append(str(d.get("message", "")))
         agents = [{"name": a["name"], "role": a["role"], "called": a.get("display_name") or a["name"],
@@ -226,6 +229,8 @@ class Board:
             "cost": total_cost, "cost_estimate": cost_estimate, "turn_counts": st.get("turn_counts"), "updated_at": st.get("updated_at"),
             "started_at": st.get("started_at"), "error": st.get("error"),
             "managed": st.get("managed") or {}, "night": bool(st.get("night")), "night_pending": night_pending, "questions": st.get("questions") or [],
+            "discussion": bool(st.get("discussion")), "discussion_pending": discussion_pending,
+            "review_files": _review_files(rd, st),
             "decisions": st.get("decisions") or [],
             "golden": _golden(st),
             "status_lines": st.get("status_lines") or {},  # B5: a live line per working agent from its latest check
@@ -492,6 +497,10 @@ class Board:
                     if self.mon.controller.protocol:  # the chat reminders due (orch/reminders.py, `only: [chat]`)
                         for note in self._chat_reminders(mgr, n_chat):
                             prompt = REM.append(prompt, note)
+                    if self.discussion_on(rd):  # B6: what it writes for the critic is held until the discussion closes
+                        critic = (self.mon.by_role("verifier") or [mgr])[0]
+                        prompt = REM.append(prompt, render(self.mon.controller.templates["discussion_manager"],
+                                                           critic=critic.called).strip())
                     key = (((read_json(rd / "state.json", {}) or {}).get("sessions") or {}).get(mgr.name)
                            or {}).get("session_key")
                     res = run_variants(mgr, TurnRequest(
@@ -518,6 +527,16 @@ class Board:
 
         threading.Thread(target=work, daemon=True).start()
         return {"id": cid}
+
+    @staticmethod
+    def discussion_on(rd: Path) -> bool:
+        """The discussion switch as last set: a switch not yet read by the run counts."""
+        on = bool((read_json(rd / "state.json", {}) or {}).get("discussion"))
+        for p in sorted((rd / "inbox").glob("*.json")):
+            d = read_json(p) or {}
+            if isinstance(d, dict) and d.get("kind") == "discussion":
+                on = bool(d.get("on"))
+        return on
 
     def _chat_reminders(self, a: Any, n: int) -> List[str]:
         """Texts of the reminders for board chat (`only: [chat]`) due at this agent's n-th chat message of its session
@@ -555,6 +574,20 @@ def _turn_env(a: Any, rd: Path) -> Dict[str, str]:
     those, and the job finder knows whose processes they are)."""
     from . import jobs as _jobs
     return {**(a.env or {}), _jobs.TAG_VAR: _jobs.tag_for(rd.name, a.name)}
+
+
+def _review_files(rd: Path, st: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """B9: the review files the manager wrote, newest first, each with its link under /log/."""
+    out = []
+    root = rd.parent.parent
+    for e in reversed(st.get("review_files") or []):
+        p = Path(e.get("path") or "")
+        try:
+            href = "log/" + str(p.resolve().relative_to(root.resolve()))
+        except (ValueError, OSError):
+            href = ""
+        out.append({**e, "name": p.name, "href": href, "exists": p.is_file()})
+    return out
 
 
 def _golden(st: Dict[str, Any]) -> Dict[str, Any]:
@@ -1024,7 +1057,19 @@ def _handler(boards: Dict[str, Board]):
             if u.path == "/api/answer":
                 b.control({"kind": "answer", "qid": body.get("qid"), "message": msg})
             elif u.path == "/api/night":
+                st = read_json(b.run_dir / "state.json", {}) or {}
+                if any(q.get("to") == "human" and q.get("status") == "open" for q in st.get("questions") or []):
+                    return self.js({"error": "A question for you is open: night mode can switch once it is answered."},
+                                   409)
                 b.control({"kind": "night", "on": bool(body.get("on"))})
+            elif u.path == "/api/discussion":
+                b.control({"kind": "discussion", "on": bool(body.get("on"))})
+            elif u.path == "/api/milestone":
+                b.control({"kind": "milestone", "action": "reopen", "ms": int(body.get("ms", -1))})
+            elif u.path == "/api/review":
+                b.control({"kind": "review"})
+            elif u.path == "/api/review_comments":
+                b.control({"kind": "review_comments", "path": str(body.get("path") or "")})
             elif u.path == "/api/job":
                 b.control({"kind": "job"})
             elif u.path == "/api/gate":

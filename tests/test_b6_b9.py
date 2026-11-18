@@ -1,0 +1,403 @@
+"""B6 (the manager's job) and B9 (gates), mock backend only:
+
+B6: per-milestone rubrics (3–8, parsed from <rubric>, shown in the review); discussion mode (the manager's messages
+held, one batch after it closes, supersede); milestone fallback (state and checklist file); the golden board sent
+again after a compacted session.
+B9: send back on the wait gate; night mode can't switch while a question for me is open; a manager question blocks
+new work until answered (unless blocking="no"); gate summary; review file -> comments back to the manager.
+"""
+
+import json
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from orch import boards as B  # noqa: E402
+from orch import routing as RT  # noqa: E402
+from orch.config import load_config  # noqa: E402
+from orch.controller import MonitorRunner  # noqa: E402
+from orch.managed import ManagedRunner, parse_rubric  # noqa: E402
+from orch.recorder import Recorder, read_json  # noqa: E402
+from role_view_checks import assert_no_role_leaks  # noqa: E402
+from test_orch import make_cfg, managed, run, turns  # noqa: E402
+
+
+def unit(tmp, **kw):
+    cfg = load_config(make_cfg(tmp, [managed(mgr={"milestones": 1}, **kw)]))
+    r = ManagedRunner(cfg.monitor("m"), threading.Event(), log=lambda s: None)
+    r.rec = Recorder.create(str(tmp / "out"), "m", cfg.monitor("m").snapshot())
+    r.st.setdefault("fwd", {})
+    return r
+
+
+class Live:
+    """A run in a thread, and helpers to wait on its state and drop control files in its inbox."""
+
+    def __init__(self, tc, cfg):
+        self.tc, self.out, self.holder = tc, Path(json.loads(Path(cfg).read_text())["output_dir"]) / "m", {}
+        self.th = threading.Thread(target=lambda: self.holder.update(res=run(cfg)), daemon=True)
+        self.th.start()
+
+    def state(self):
+        runs = sorted(self.out.glob("*/state.json")) if self.out.exists() else []
+        return (read_json(runs[-1]) or {}, runs[-1].parent) if runs else ({}, None)
+
+    def until(self, pred, what, timeout=15):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            st, rd = self.state()
+            try:
+                if st and pred(st):
+                    return st, rd
+            except (KeyError, TypeError, IndexError):
+                pass
+            time.sleep(0.05)
+        self.tc.fail(f"timed out waiting for {what}")
+
+    def control(self, data, name):
+        _st, rd = self.state()
+        (rd / "inbox" / f"{time.strftime('%Y%m%d-%H%M%S')}-{name}.json").write_text(json.dumps(data))
+
+    def gate(self, kind, not_key=None):
+        return self.until(lambda st: (st["managed"].get("gate") or {}).get("kind") == kind
+                          and st["managed"]["gate"]["key"] != not_key, f"a {kind} gate")
+
+    def done(self, timeout=20):
+        self.th.join(timeout)
+        self.tc.assertFalse(self.th.is_alive(), "the run did not finish")
+        return self.holder["res"]
+
+
+# --------------------------------------------------------------------------- B6
+
+
+class TestRubrics(unittest.TestCase):
+    def test_parse_counts_from_three_to_eight(self):
+        for n in (3, 5, 8):
+            items = parse_rubric("<rubric>\n" + "\n".join(f"{i}. criterion {i}" for i in range(1, n + 1)) + "\n</rubric>")
+            self.assertEqual(items, [f"criterion {i}" for i in range(1, n + 1)])
+        self.assertEqual(parse_rubric("<rubric>\n- [ ] **each reviewer concern** is strongly supported\n* tables "
+                                      "self-explaining\n</rubric>"),
+                         ["each reviewer concern is strongly supported", "tables self-explaining"])
+        self.assertEqual(parse_rubric("<rubric>\n| criterion | what a 5 looks like |\n|---|---|\n| concerns answered "
+                                      "| all |\n| no n/a cells | none |\n| verdicts first | 5 |\n</rubric>"),
+                         ["concerns answered", "no n/a cells", "verdicts first"])
+        self.assertEqual(parse_rubric("no rubric here"), [])
+
+    def test_kickoff_rubric_is_kept_and_shown_at_the_review(self):
+        status, rec = run(make_cfg(Path(tempfile.mkdtemp()), [managed(mgr={"milestones": 1, "replies": {"kickoff": [
+            '<message to="Jordan">Answer each concern.</message>\n<rubric>\n1. each reviewer concern is strongly '
+            'supported\n2. every table is self-explaining\n3. no superseded numbers\n4. verdict first in each '
+            'section\n</rubric>']}})]))
+        self.assertEqual(status, "completed")
+        ms = rec.state["managed"]["milestones"][0]
+        self.assertEqual(len(ms["rubric"]), 4)
+        review = next(t for t in turns(rec) if t["agent"] == "boss" and t["purpose"] == "review")
+        self.assertIn("Your rubric for this milestone:\n\n1. each reviewer concern is strongly supported", review["input"])
+        self.assertIn("4. verdict first in each section", review["input"])
+        self.assertFalse(any("rubric" in x for x in (rec.state.get("fwd") or {}).get("boss", [])))
+        assert_no_role_leaks(self, rec, also=["each reviewer concern"])
+
+    def test_too_few_criteria_or_none_are_flagged_and_asked_again(self):
+        status, rec = run(make_cfg(Path(tempfile.mkdtemp()), [managed(mgr={"milestones": 2, "replies": {"kickoff": [
+            '<message to="Jordan">Go.</message>\n<rubric>\n- correct\n- clear\n</rubric>',
+            '<message to="Jordan">Go on.</message>']}})]))
+        self.assertEqual(status, "completed")
+        ts = [t for t in turns(rec) if t["agent"] == "boss"]
+        notes = [t for t in ts if "Your rubric for milestone 1 has 2 criteria; set 3–8" in t["input"]]
+        self.assertTrue(notes, "the manager is asked to set 3–8")
+        self.assertTrue(any("Your rubric for milestone 2 has 0 criteria" in t["input"] for t in ts))
+        warn = [json.loads(x) for x in (rec.run_dir / "events.jsonl").read_text().splitlines()]
+        self.assertTrue(any(e.get("what") == "rubric_count" for e in warn))
+        review2 = [t for t in ts if t["purpose"] == "review"][-1]
+        self.assertIn("You set no rubric for this milestone", review2["input"])
+
+
+class TestDiscussion(unittest.TestCase):
+    def test_hold_then_one_batch_that_supersedes(self):
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(controller={"approve_plan": True}, mgr={"milestones": 1, "replies": {
+            "discussion": ['We agreed on short tables.\n\n<message to="Jordan">BATCH-MARK: keep every table short; '
+                           'this replaces my earlier notes.</message>']}})])
+        L = Live(self, cfg)
+        _st, rd = L.gate("plan")
+        L.control({"kind": "discussion", "on": True}, "discussion-on")
+        L.until(lambda st: st.get("discussion"), "the discussion switch")
+        # the manager writes to the critic from a board chat while we discuss
+        L.control({"to": ["critic"], "message": "HELD-MARK: use long tables.", "from": "boss", "via": "chat",
+                   "source": "chat-001"}, "board-note")
+        st, _ = L.until(lambda st: any(m.get("reason") == RT.DISCUSSION for m in st.get("messages") or []), "a held message")
+        held = next(m for m in st["messages"] if m.get("reason") == RT.DISCUSSION)
+        self.assertEqual((held["status"], held["to"]), ("held", "critic"))
+        self.assertTrue((rd / "inbox" / "held").is_dir())
+        L.control({"kind": "discussion", "on": False}, "discussion-off")
+        st, _ = L.until(lambda st: any(e.get("from") == "boss" and "BATCH-MARK" in e.get("body", "")
+                                       and e["status"] == "delivered" for e in st.get("messages") or []),
+                        "the batch delivered to the critic")
+        old = next(m for m in st["messages"] if m["id"] == held["id"])
+        new = next(m for m in st["messages"] if "BATCH-MARK" in m.get("body", ""))
+        self.assertEqual((old["status"], old.get("by")), ("superseded", new["id"]))
+        L.control({"kind": "gate", "decision": "approve", "message": "", "gate": L.gate("plan")[0]["managed"]["gate"]["key"]},
+                  "approve")
+        status, rec = L.done()
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        batch = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "discussion")
+        self.assertIn("HELD-MARK", batch["input"])  # the manager sees what was held
+        crit = [t for t in ts if t["agent"] == "critic"]
+        self.assertTrue(any("BATCH-MARK" in t["input"] for t in crit))
+        self.assertFalse(any("HELD-MARK" in t["input"] for t in crit))
+        assert_no_role_leaks(self, rec, also=["HELD-MARK", "We agreed on short tables", "discussion"])
+
+    def test_reminder_and_phases_wait_while_on(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        r.set_discussion(True)
+        _p, sent = r.add_reminders(r.manager, "hello", "incoming")
+        self.assertIn("discussion", sent)
+        self.assertEqual(r.held_by("kickoff"), "discussion")
+        self.assertEqual(r.held_by("work"), "")  # the critic and the worker go on
+        m = r.deliver(r.manager, r.critic, "Do X.")
+        self.assertEqual((m["status"], m["reason"]), ("held", RT.DISCUSSION))
+        self.assertNotIn("Do X.", " ".join(r.st["fwd"].get("critic", [])))
+        r.set_discussion(False)
+        self.assertTrue(r.mg.get("discussion_batch"))
+        self.assertEqual(r.held_by("kickoff"), "")
+
+
+class TestMilestoneFallback(unittest.TestCase):
+    def test_reopen_marks_state_and_checklist(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        r.mg.update(milestones=[{"title": "Tables", "status": "done"}, {"title": "Prose", "status": "active"}], ms=1)
+        p = r.agent_dir(r.critic) / "checklist-m1.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(B.CHECKLIST_HEAD + "\n## Step 1: tables\n\n- [x] totals added\n")
+        r.control({"kind": "milestone", "action": "reopen", "ms": 0})
+        r.check_control()
+        ms = r.mg["milestones"][0]
+        self.assertEqual(ms["status"], "open")
+        ck = B.parse_checklist(p.read_text())
+        self.assertEqual(ck["steps"][-1]["title"], "Step 2: Reopened")
+        self.assertFalse(B.step_done(ck["steps"][-1]))
+        self.assertIn("- [ ] reopened", p.read_text())
+        self.assertEqual(r.mg["milestones"][1]["status"], "active")  # the current one is untouched
+        self.assertFalse(r.st["fwd"].get("boss"))  # no prompt to the manager
+        r.reopen_milestone(1)  # not finished: nothing to reopen
+        self.assertEqual(r.mg["milestones"][1]["status"], "active")
+
+
+class TestGoldenAfterCompact(unittest.TestCase):
+    def test_board_is_sent_again_after_a_compact(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        r.setup_boards()
+        r.golden_path().write_text(B.GOLDEN_HEAD + "\n- Tables before prose\n")
+        g = r.check_golden()
+        r.rec.update_session("critic", session_id="s1")
+        r.st.setdefault("golden_seen", {})["critic"] = {"hash": g["hash"], "session": "s1"}
+        self.assertEqual(r.golden_board_reminder(r.critic, "critic", "", False), "")
+        r.after_compact(r.critic, "compact between steps")
+        self.assertIn("Tables before prose", r.golden_board_reminder(r.critic, "critic", "", False))
+
+    def test_auto_compact_in_a_turn_counts(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        r.setup_boards()
+        r.st.setdefault("golden_seen", {})["writer"] = {"hash": "h", "session": "s1"}
+        rec = {"status": "ok", "output": "Done.", "turn_id": "r001-t01-writer", "meta": {"compacted": True}}
+        with mock.patch.object(MonitorRunner, "turn", return_value=rec):
+            r.turn(r.workers[0], "go", 1, "work")
+        self.assertNotIn("writer", r.st["golden_seen"])
+
+
+# --------------------------------------------------------------------------- B9
+
+
+class TestWaitGateSendBack(unittest.TestCase):
+    def test_send_back_goes_to_the_manager(self):
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(
+            mgr={"milestones": 1, "replies": {"pause": [
+                "Please run the cluster job.\n\n<decision>PAUSE</decision>",
+                '<message to="Jordan">Meanwhile, draft the tables from the pilot.</message>\n<decision>CONTINUE</decision>']}},
+            critic={"replies": {"verify": [
+                "<pause>Someone has to run the cluster job.</pause>\n<checklist>- [ ] job run</checklist>\n<verdict>FAIL</verdict>",
+                "Good.\n<checklist>- [x] job run</checklist>\n<verdict>PASS</verdict>"]}})])
+        L = Live(self, cfg)
+        st, _ = L.gate("wait")
+        L.control({"kind": "gate", "decision": "revise", "message": "NOTE-X: I can't run it this week.",
+                   "gate": st["managed"]["gate"]["key"]}, "sendback")
+        status, rec = L.done()
+        self.assertEqual(status, "completed")
+        pauses = [t for t in turns(rec) if t["agent"] == "boss" and t["purpose"] == "pause"]
+        self.assertEqual(len(pauses), 2)
+        self.assertIn("NOTE-X", pauses[1]["input"])
+        self.assertIn("I'm sending it back", pauses[1]["input"])
+        self.assertEqual(rec.state["managed"]["gates"][0]["decision"], "revise")
+        g = next(t for t in turns(rec) if t["agent"] == "critic" and t["purpose"] == "guidance")
+        self.assertIn("draft the tables from the pilot", g["input"])
+        assert_no_role_leaks(self, rec, also=["NOTE-X"])
+
+
+class TestNightSwitchDuringQuestion(unittest.TestCase):
+    def test_switch_waits_until_the_question_closes(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        q = r.new_question(r.manager, "human", "Which model?\nA) one\nB) two", "t0")
+        r.control({"kind": "night", "on": True})
+        r.check_control()
+        self.assertFalse(r.st.get("night"))
+        self.assertTrue(r.st.get("night_queued"))
+        r.control({"kind": "answer", "qid": q["id"], "message": "A"})
+        r.check_control()
+        self.assertEqual(q["status"], "answered")
+        self.assertTrue(r.st.get("night"))
+        self.assertNotIn("night_queued", r.st)
+
+    def test_board_refuses_the_switch(self):
+        from orch.board import Board, serve
+        import urllib.error
+        import urllib.request
+        tmp = Path(tempfile.mkdtemp())
+        r = unit(tmp)
+        r.new_question(r.manager, "human", "Which model?", "t0")
+        r.rec.save()
+        cfg = load_config(str(tmp / "cfg.json"))
+        srv, url = serve({"m": Board("m", lambda: r.rec.run_dir, cfg.monitor("m"))}, port=8893)
+        try:
+            req = urllib.request.Request(url + "api/night", data=json.dumps({"on": True}).encode())
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req)
+            self.assertEqual(e.exception.code, 409)
+            self.assertFalse([p for p in (r.rec.run_dir / "inbox").glob("*.json")
+                              if json.loads(p.read_text()).get("kind") == "night"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+class TestBlockingQuestions(unittest.TestCase):
+    def test_blocking_question_holds_new_work_until_answered(self):
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(
+            mgr={"milestones": 1, "replies": {"answer": [
+                "<question>Do we cite the new run?\nA) yes\nB) no\nI recommend A.</question>"]}},
+            critic={"replies": {"verify": [
+                "<question>Do we cite the new run?</question>\n<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                "Good.\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})])
+        L = Live(self, cfg)
+        st, rd = L.until(lambda st: (st["managed"].get("held") or {}).get("why", "").startswith("question"), "the hold")
+        n = len(list((rd / "rounds").glob("r*/t*.json")))
+        time.sleep(0.6)
+        self.assertEqual(len(list((rd / "rounds").glob("r*/t*.json"))), n)  # no new turn while it waits
+        q = next(x for x in st["questions"] if x["to"] == "human")
+        self.assertTrue(q["blocking"])
+        L.control({"kind": "answer", "qid": q["id"], "message": "A"}, "answer")
+        status, rec = L.done()
+        self.assertEqual(status, "completed")
+        amend = next(t for t in turns(rec) if t["purpose"] == "amend")
+        self.assertIn("A) yes", amend["input"])  # my answer reached the critic before it went on
+        self.assertNotIn("held", rec.state["managed"])
+
+    def test_non_blocking_question_lets_the_work_go_on(self):
+        status, rec = run(make_cfg(Path(tempfile.mkdtemp()), [managed(
+            mgr={"milestones": 1, "replies": {"answer": [
+                '<question blocking="no">Do we cite the new run?\nA) yes\nB) no</question>\n'
+                '<message to="Jordan">Assume yes for now.</message>']}},
+            critic={"replies": {"verify": [
+                "<question>Do we cite it?</question>\n<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                "Good.\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})]))
+        self.assertEqual(status, "completed")
+        q = next(x for x in rec.state["questions"] if x["to"] == "human")
+        self.assertEqual((q["status"], q["blocking"]), ("open", False))
+
+    def test_night_mode_decides_and_records(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        r.st["night"] = True
+        r.after_manager({"output": "I chose A.\n<question>Which model?\nA) one\nB) two</question>", "turn_id": "t1"},
+                        relay=False)
+        q = r.st["questions"][-1]
+        self.assertEqual(q["status"], "night")
+        self.assertEqual(r.held_by("work"), "")
+        self.assertTrue(any(d["by"] == "manager (night mode)" for d in r.st["decisions"]))
+
+
+class TestGateSummary(unittest.TestCase):
+    def test_summary_at_plan_and_milestone_gates(self):
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(controller={"approve_plan": True, "approve_milestones": True},
+                                                          mgr={"milestones": 1})])
+        L = Live(self, cfg)
+        st, _ = L.gate("plan")
+        self.assertIn("checked against the goal", st["managed"]["gate"]["summary"])
+        L.control({"kind": "gate", "decision": "approve", "message": "", "gate": st["managed"]["gate"]["key"]}, "ok1")
+        st, _ = L.gate("milestone")
+        g = st["managed"]["gate"]
+        self.assertIn("Changed: the part is done", g["summary"])
+        self.assertNotIn("<summary>", g["text"])
+        L.control({"kind": "gate", "decision": "approve", "message": "", "gate": g["key"]}, "ok2")
+        status, rec = L.done()
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        self.assertIn("`<summary>`", next(t for t in ts if t["purpose"] == "plan")["input"])
+        review = next(t for t in ts if t["purpose"] == "review")
+        self.assertIn("(what\nchanged, what was checked, where to look)", review["input"])
+        self.assertIn("Changed: the part is done", rec.state["final_report"])
+        assert_no_role_leaks(self, rec, also=["Changed: the part is done"])
+
+
+class TestReviewFile(unittest.TestCase):
+    def test_request_write_comment_send_back(self):
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(controller={"approve_plan": True}, mgr={"milestones": 1, "replies": {
+            "review_file": ["REVIEW-MARK\n\n## Overview\n\nOne milestone, not started: verdict pending.\n\n"
+                            "## Plan\n\nThe plan covers the goal."],
+            "incoming": ["Thanks: I will shorten the overview."]}})])
+        L = Live(self, cfg)
+        st, rd = L.gate("plan")
+        L.control({"kind": "review"}, "review")
+        st, _ = L.until(lambda st: (st.get("review_files") or [{}])[-1].get("status") == "written", "the review file")
+        e = st["review_files"][-1]
+        p = Path(e["path"])
+        self.assertEqual(p.parent.name, "reviews")
+        self.assertIn("REVIEW-MARK", p.read_text())
+        req = next(t for t in turns_dir(rd) if t["purpose"] == "review_file")
+        self.assertIn(str(p), req["input"])
+        self.assertIn("Overview first", req["input"])
+        p.write_text(p.read_text().replace("The plan covers the goal.",
+                                           "The plan covers the goal.\n\n> COMMENT-MARK: say which tables come first."))
+        L.control({"kind": "review_comments", "path": str(p)}, "comments")
+        L.until(lambda st: any(t for t in (st.get("messages") or []) if "COMMENT-MARK" in t.get("body", "")
+                               and t["status"] == "delivered"), "the comments delivered")
+        L.control({"kind": "gate", "decision": "approve", "message": "", "gate": L.gate("plan")[0]["managed"]["gate"]["key"]},
+                  "approve")
+        status, rec = L.done()
+        self.assertEqual(status, "completed")
+        got = next(t for t in turns(rec) if t["agent"] == "boss" and "COMMENT-MARK" in t["input"])
+        self.assertIn("+> COMMENT-MARK: say which tables come first.", got["input"])
+        self.assertEqual(rec.state["review_files"][-1]["status"], "comments sent")
+        assert_no_role_leaks(self, rec, also=["REVIEW-MARK", "COMMENT-MARK", "review file"])
+
+    def test_board_lists_the_file_with_a_link(self):
+        from orch.board import Board
+        tmp = Path(tempfile.mkdtemp())
+        r = unit(tmp)
+        p = r.reviews_dir() / "20261119-120000.md"
+        p.parent.mkdir(parents=True)
+        p.write_text("# Review\n")
+        r.st["review_files"] = [{"path": str(p), "status": "written"}]
+        r.rec.save()
+        d = Board("m", lambda: r.rec.run_dir, load_config(str(tmp / "cfg.json")).monitor("m")).data()
+        f = d["review_files"][0]
+        self.assertTrue(f["exists"])
+        self.assertEqual(f["href"], f"log/m/reviews/{p.name}")
+
+
+def turns_dir(rd):
+    out = []
+    for p in sorted((Path(rd) / "rounds").glob("r*/t*.json")):
+        out.append(read_json(p))
+    return out
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -173,15 +173,16 @@ Reply with a concise report when done.
 {{human_messages}}
 
 Could you split this into milestones? Please list them in the order the work should happen, as a numbered
-list with one milestone per line: "1. Short title — what has to be true when it is done". Then tell me how
-you will judge whether a milestone is finished: a small table of criteria with what a 5 out of 5 looks like,
-and the score you need before you accept one. {{critic}} oversees the hands-on work and will report to you when
-a milestone is ready.
+list with one milestone per line: "1. Short title — what has to be true when it is done". Say the overall score
+(out of 5) a milestone needs before you accept it; you set each milestone's own rubric when it starts.
+{{critic}} oversees the hands-on work and will report to you when a milestone is ready. End with a `<summary>` for
+my OK: what the plan covers, what you checked it against, and where to look.
 """,
     "manager_plan_revise": """\
 {{comment}}
 
-Please send me the updated milestone list in the same form.
+Please send me the updated milestone list in the same form, with a `<summary>`: what changed, what you checked, and
+where to look.
 """,
     "manager_kickoff": """\
 {{human_messages}}
@@ -193,8 +194,9 @@ Milestone {{n}} of {{total}} is next: {{milestone}}
 Please write the instruction that gets {{critic}} started on it: what is needed, what matters most and what to
 watch out for. Describe the work itself and keep it high level; {{critic}} does not hear about milestones,
 your rubric or scores. Put the instruction inside `<message to="{{critic}}">…</message>`; anything outside it is
-for me. Then write your `<state>` for this part of the work: the instruction in short and the decisions that still
-hold.
+for me. Set this milestone's rubric in `<rubric>…</rubric>`: 3–8 criteria specific to its work, one per line, each
+scored out of 5 at the review. Then write your `<state>` for this part of the work: the instruction in short and the
+decisions that still hold.
 """,
     "manager_question": """\
 {{human_messages}}
@@ -204,8 +206,9 @@ hold.
 {{question}}
 
 Please answer if you can, inside `<message to="{{critic}}">…</message>`. If only I can decide it, ask me in a
-`<question>…</question>` (one per decision), and still give {{critic}} your best guess to work with until I reply.
-If the answer changes the work, update your `<state>`.
+`<question>…</question>` (one per decision): the work waits for my answer. If {{critic}} can go on with your best
+guess meanwhile, write `<question blocking="no">` and give {{critic}} that guess. If the answer changes the work,
+update your `<state>`.
 """,
     # B7: a question that came with a finished milestone: the review comes next; the next milestone starts afresh
     "manager_question_before_report": """\
@@ -219,9 +222,13 @@ keep your scores, decision and the next milestone's instruction for the review.
 
 {{report}}
 
-Please score it against your rubric: a small table with a score out of 5 for each criterion, then your overall
-score as `<score>x</score>` (out of 5). If the milestone is done, write me a short summary (tables welcome) and end
-with `<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
+{{rubric}}
+
+Please judge it as I would, against that rubric: a small table with one row per criterion and a score out of 5,
+then your overall score as `<score>x</score>` (out of 5). Look at the logs, reports and files it names where you need
+to; read deeper only where something looks wrong. If the milestone is done, write me a `<summary>` for my OK (what
+changed, what was checked, where to look), a short report (tables welcome), and end with
+`<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
 `<message to="{{critic}}">…</message>`, in terms of the work and at a high level (only that is passed on, so leave
 out milestones and scores), and end with `<decision>REVISE</decision>`. If your working state changes, update your
 `<state>`: on ACCEPT fold in what this milestone settled, on REVISE what still has to happen. Anything settled that
@@ -552,4 +559,58 @@ the run is quiet, off track, or a job or watcher it relies on has died; otherwis
                           "briefly.",
     # the manager's light status look while work runs (queued for its next turn; it starts no turn)
     "manager_progress_status": "{{line}}",
+    # B6: the milestone's rubric, in the review prompt; and the note when it has none or too few / too many criteria
+    "rubric_review": "Your rubric for this milestone:\n\n{{items}}",
+    "rubric_missing": "You set no rubric for this milestone. Set 3–8 criteria specific to its work in "
+                      "`<rubric>…</rubric>` (one per line) first, then score against them.",
+    "rubric_note": "Your rubric for milestone {{n}} has {{count}} criteria; set 3–8, specific to its work, in "
+                   "`<rubric>…</rubric>` (one per line), in your next reply.",
+    # B6 discussion mode: a reminder while it is on, and the one turn after I close it
+    "discussion_manager": "We are in a discussion: nothing you write reaches {{critic}} until I close it. Keep what "
+                          "{{critic}} should get for the one message you send then.",
+    "manager_discussion_end": """\
+I closed our discussion. Send {{critic}} the new directions now, in one `<message to="{{critic}}">…</message>`:
+everything we settled that changes the work, complete on its own. It replaces the messages held during the
+discussion; carry over what in them still applies.
+
+{{held}}
+
+If nothing changes for {{critic}}, write no message; one line for me is enough. Anything settled that should hold
+beyond this goes on the golden board.
+""",
+    "discussion_held_none": "Nothing was held during the discussion.",
+    "discussion_held": "Held during the discussion (not sent):\n\n{{messages}}",
+    # B9: a pause sent back from the wait gate
+    "manager_wait_revise": """\
+About the pause (what it waited for: {{waited}}): I'm sending it back, it is not done.
+
+{{message}}
+
+Please decide again. If the work should stay paused, write for me, in a few plain lines, what I need to do and what
+to send back, and end with `<decision>PAUSE</decision>`. If there is useful work meanwhile, put it inside
+`<message to="{{critic}}">…</message>` and end with `<decision>CONTINUE</decision>`.
+""",
+    # B9 review file: the manager writes a review for me to comment on; my comments come back
+    "review_file_request": """\
+Please write me a review of where the work stands, as a Markdown file at `{{path}}` (create it; edit nothing else).
+I will comment in the file and send it back.
+
+- Overview first: what the goal is, how many parts there are, and the verdict for each (does it achieve its
+  purpose: yes / partly / no), in plain words.
+- Then each part: the verdict, the evidence (a small table, its conclusion next to it), what is open and the next
+  action with its cost.
+- Self-contained: assume I forgot the context; plain names, no internal codes; every term and table readable alone.
+- Concise: say each thing once; only final, correct results.
+
+In your reply, one line for me with the path. Write nothing for {{critic}} in this turn.
+""",
+    "review_comments": """\
+I commented on your review `{{path}}`. My changes and comments, as a diff of the file:
+
+{{diff}}
+
+Please answer each comment here. If they change the work, tell {{critic}} what changes in one message.
+""",
+    # B6 milestone fallback: the item added to a reopened milestone's checklist file
+    "checklist_reopened": "reopened: check this part again before it counts as done",
 }

@@ -7,7 +7,8 @@ The ledger (`state["messages"]`) holds one entry per message:
 
     sent        recorded and on its way: waiting for the recipient's next prompt
     held        not delivered, with a reason: an address the sender may not use, the recipient's session open in a
-                terminal (it goes out when the terminal closes), held by design (`by_design`: e.g. the critic's
+                terminal (it goes out when the terminal closes), the manager's messages while I discuss with it
+                (`discussion`: its one message when the discussion closes supersedes them), held by design (`by_design`: e.g. the critic's
                 checklist, which the worker never sees), or a note up with nothing to decide (`next_turn`: it starts
                 no turn and is delivered in the manager's next regular turn)
     delivered   seen in the recipient's actual prompt (`turn`, `how`: prompt / cut in / live)
@@ -33,7 +34,8 @@ from .recorder import now_iso
 MAY_ADDRESS = {"manager": ("verifier", "worker"), "verifier": ("worker", "manager"), "worker": ()}
 # sender role -> recipient roles it directs (its messages to them supersede its older waiting ones)
 DIRECTS = {"manager": ("verifier", "worker"), "verifier": ("worker",)}
-NEXT_TURN = "waits for next turn"  # a note up with nothing to decide: held until the manager's next regular turn
+NEXT_TURN = "waits for next turn"
+DISCUSSION = "discussion"  # the manager's messages while the user discusses with it: held until it closes (B6)  # a note up with nothing to decide: held until the manager's next regular turn
 MAX_HOPS = 2  # a message written in a turn that a message started counts one hop more; past this it waits
 
 
@@ -148,4 +150,4 @@ class Ledger:
             return []
         return [m for m in self.rows if m is not new and m["from"] == new["from"] and m["to"] == new["to"]
                 and m["status"] in ("sent", "held") and not m.get("by_design") and m.get("source") != new.get("source")
-                and any(k in (m.get("carrier") or {}) for k in ("inbox", "wm", "fwd"))]
+                and any(k in (m.get("carrier") or {}) for k in ("inbox", "wm", "fwd", "discussion"))]

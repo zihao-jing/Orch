@@ -75,7 +75,11 @@ QUESTION_TAG = re.compile(r"<question>.*?</question>", re.S | re.I)  # a questio
 TERMINAL_HOLD = "its session is open in a terminal; delivered when the terminal closes"
 # purposes whose <message> blocks orch delivers itself; in the others a phase of the run carries the manager's
 # message to the critic (critic_message) and the critic's message to the worker (its feedback)
-SELF_DELIVERED = ("incoming", "ack")  # turns whose messages orch delivers itself (route_reply)
+SELF_DELIVERED = ("incoming", "ack", "discussion", "review_file")  # turns whose messages orch delivers itself (route_reply)
+# B6: phases that send the manager's words to the critic; they wait while I discuss with the manager
+DISCUSSION_WAITS = ("kickoff", "answer", "pause", "mreview", "restart")
+# B9: phases that go on while a blocking question waits for me (the gates are mine; a job is only watched)
+QUESTION_GOES_ON = ("plan_gate", "gate", "wait", "job", "done")
 CRITIC_TO_WORKER_PHASES = ("verify", "brief", "guidance", "amend")
 BY_DESIGN = {"checklist": "the critic's own checklist; the worker never sees it",
              "plan": "the critic's own plan; the worker gets one step at a time",
@@ -194,6 +198,32 @@ def parse_criteria(text: str) -> List[List[Any]]:
     return rows
 
 
+RUBRIC_MIN, RUBRIC_MAX = 3, 8  # B6: criteria per milestone, set by the manager for that milestone's work
+_RUBRIC_HEAD = re.compile(r"^(?:#|criteri(?:on|a)|rubric|what a 5 looks like|score)$", re.I)
+
+
+def parse_rubric(text: str) -> List[str]:
+    """The criteria of the last <rubric> block of a reply, one per line (list markers, numbers, checkboxes and table
+    borders dropped; a table gives its first cell); [] without one."""
+    blocks = T.bodies(text or "", "rubric")
+    if not blocks:
+        return []
+    out: List[str] = []
+    for ln in blocks[-1].split("\n"):
+        s = ln.strip()
+        if s.startswith("|"):
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if not cells or set("".join(cells)) <= set("-: "):
+                continue
+            s = next((c for c in cells if c and not re.match(r"^\d+(?:\.\d+)?$", c)), "")
+        s = re.sub(r"^(?:[-*•+]|\d{1,2}[.)])\s+", "", s)
+        s = re.sub(r"^\[[ xX]\]\s*", "", s).strip()
+        s = re.sub(r"^\*\*(.+?)\*\*", r"\1", s).strip()
+        if s and not _RUBRIC_HEAD.match(re.sub(r"[*_`]", "", s).strip()):
+            out.append(s)
+    return out
+
+
 def _cap(text: str) -> str:
     return text[:1].upper() + text[1:]
 
@@ -274,8 +304,45 @@ class ManagedRunner(MonitorRunner):
             self.check_addresses(agent, r.get("output") or "")
             self.check_tooling(agent, r)
             self.route_reply(agent, r)
+            if agent.role == "manager":
+                self.take_rubric(r)
             self.rec.save()
+        if (r.get("meta") or {}).get("compacted"):  # the CLI compacted the session during the turn
+            self.after_compact(agent, "auto-compact")
         return r
+
+    def after_compact(self, agent: AgentConfig, how: str) -> None:
+        """A compacted session lost the golden board it was given: it gets it again with its next message (once)."""
+        if (self.st.get("golden_seen") or {}).pop(agent.name, None) is not None:
+            self.rec.event("golden_resend", agent=agent.name, why=how)
+        self.rec.save()
+
+    # ---- B6: the manager's rubric for each milestone (3–8 criteria for that milestone's work)
+
+    def take_rubric(self, r: Dict[str, Any]) -> None:
+        """A <rubric> in a manager reply sets the current milestone's criteria; a count outside 3–8 is flagged on the
+        board and the manager is asked once (in its next message) to set 3–8."""
+        ms = self.cur() if self.mg.get("milestones") else None
+        items = parse_rubric(r.get("output") or "")
+        if ms is None or not items:
+            return
+        ms.update(rubric=items, rubric_turn=r.get("turn_id"))
+        self.rec.event("rubric", milestone=self.mg.get("ms", 0), count=len(items), turn=r.get("turn_id"))
+        if not RUBRIC_MIN <= len(items) <= RUBRIC_MAX:
+            self.rubric_off(len(items))
+
+    def rubric_off(self, count: int) -> None:
+        n = self.mg.get("ms", 0) + 1
+        self.rec.progress(f"⚠ the manager's rubric for milestone {n} has {count} criteria (3–8 expected); asked again")
+        self.rec.event("board_warning", what="rubric_count", count=count,
+                       problem=f"milestone {n}'s rubric has {count} criteria (3–8 expected)")
+        self.forward(self.manager, self.mtpl("rubric_note", n=n, count=count).strip())
+
+    def rubric_text(self, ms: Dict[str, Any]) -> str:
+        items = ms.get("rubric") or []
+        if not items:
+            return self.mtpl("rubric_missing").strip()
+        return self.mtpl("rubric_review", items="\n".join(f"{i}. {x}" for i, x in enumerate(items, 1))).strip()
 
     # ---- B8: the worker's model changed: the critic is told once, in one neutral line, at its next turn
 
@@ -356,6 +423,8 @@ class ManagedRunner(MonitorRunner):
 
         if role == "manager" and self.st.get("night"):
             add("night_mode", self.mtpl("night_manager"))
+        if role == "manager" and self.discussion_on():
+            add("discussion", self.mtpl("discussion_manager"))
         if (role == "critic" and purpose not in ("checkin", "report") and self.mon.controller.protocol
                 and self.carries_from_user(agent)):
             add("reply_routing", self.mtpl("critic_reply_routing"))
@@ -410,6 +479,8 @@ class ManagedRunner(MonitorRunner):
     def board_vars(self) -> None:
         """The paths the manager's protocol names (fixed for a project, so its system prompt stays the same)."""
         self.manager.prompt_vars["golden_board"] = str(self.golden_path())
+        # B6: the critic's step checklist, one file per milestone (N), which the manager compares with its milestones
+        self.manager.prompt_vars["checklist_files"] = str(self.agent_dir(self.critic) / "checklist-mN.md")
 
     def setup_boards(self) -> None:
         if B.ensure_golden(self.golden_path()):
@@ -793,7 +864,7 @@ class ManagedRunner(MonitorRunner):
                                      additive=s["additive"], carrier={"phase": purpose}, **mine))
             else:  # a message turn's messages start their recipient's turn; a phase's wait for a pause in the run
                 self.deliver(agent, t, body, i=i, hops=hops, urgent=s["urgent"], additive=s["additive"],
-                             activate=True if purpose == "incoming" else "wait", **mine)
+                             activate=True if purpose in ("incoming", "discussion") else "wait", **mine)
         if agent.role == "verifier" and purpose in CRITIC_TO_WORKER_PHASES:
             for w in self.workers:
                 for name, why in BY_DESIGN.items():
@@ -817,6 +888,12 @@ class ManagedRunner(MonitorRunner):
         if not text:
             text = self.for_worker(body) if target.role == "worker" and sender.role == "verifier" else \
                 (self.mtpl("relay_note", note=body).strip() or body)
+        if sender.role == "manager" and self.discussion_on():  # B6: nothing goes down while I discuss with it
+            m = L.add(sender.name, target.name, body, text, source=source, i=i, via=via, purpose=purpose, hops=hops,
+                      urgent=urgent, additive=additive, status="held", reason=RT.DISCUSSION,
+                      carrier={"discussion": True})
+            self.rec.progress(f"💬 {m['id']} from {sender.called} to {target.called} held for the discussion")
+            return m
         m = L.add(sender.name, target.name, body, text, source=source, i=i, via=via, purpose=purpose, hops=hops,
                   urgent=urgent, additive=additive, activate=(activate if hops <= RT.MAX_HOPS else False))
         if held_up:
@@ -915,6 +992,17 @@ class ManagedRunner(MonitorRunner):
                 continue
             frm = str(data.get("from") or "human")
             sender = next((a for a in self.mon.agents if a.name == frm), None)
+            if sender is not None and sender.role == "manager" and self.discussion_on():
+                (inbox / "held").mkdir(exist_ok=True)  # B6: out of the inbox, so no turn takes it in
+                os.replace(p, inbox / "held" / p.name)
+                for name in names:
+                    L.add(frm, name, msg, source=str(data.get("source") or p.name), i=data.get("i"),
+                          via=str(data.get("via") or "chat"), urgent=bool(data.get("urgent")),
+                          additive=bool(data.get("additive")), status="held", reason=RT.DISCUSSION,
+                          carrier={"discussion": p.name})
+                self.rec.progress(f"💬 a message from {sender.called} held for the discussion")
+                changed = True
+                continue
             for name in names:
                 tgt = next((a for a in self.mon.agents if a.name == name), None)
                 if tgt is None:
@@ -978,6 +1066,8 @@ class ManagedRunner(MonitorRunner):
         self.take_messages()
         self.scan_inbox()
         self.sync_live()
+        self.discussion_batch()  # B6: the one turn after I close a discussion
+        self.review_file_turn()  # B9: a review file I asked for
         for _ in range(2 * RT.MAX_HOPS + 2):  # an answer can start the other agent's turn; hops bound the chain
             ran = False
             for a in (self.manager, self.critic):
@@ -1025,16 +1115,29 @@ class ManagedRunner(MonitorRunner):
                 self.rec.progress(f"⚠ {m['id']} for {a.called} was not found in its prompt; it waits for its next turn")
         self.rec.save()
 
+    # board controls that act at once, also while a turn runs or the run waits (the others wait for check_control)
+    AT_ONCE = ("reply", "correction", "terminal", "discussion", "milestone", "review", "review_comments")
+
     def take_messages(self) -> None:
-        """Replies from a terminal, and address corrections from board chats (other controls wait for check_control)."""
-        for d in self.rec.take_control(("reply", "correction", "terminal")):
+        """Replies from a terminal, address corrections from board chats, and the switches that act at once."""
+        for d in self.rec.take_control(self.AT_ONCE):
             self.message_control(d)
 
     def message_control(self, d: Dict[str, Any]) -> None:
+        kind = d.get("kind")
+        if kind == "discussion":
+            return self.set_discussion(bool(d.get("on")))
+        if kind == "milestone":
+            if d.get("action") == "reopen":
+                self.reopen_milestone(int(d.get("ms", -1)))
+            return
+        if kind == "review":
+            return self.request_review()
+        if kind == "review_comments":
+            return self.review_comments(str(d.get("path") or ""))
         a = next((x for x in self.mon.agents if x.name == d.get("agent")), None)
         if a is None:
             return
-        kind = d.get("kind")
         if kind == "correction":
             self.correct(a, [str(b) for b in d.get("bad") or []])
         elif kind == "terminal":
@@ -1078,6 +1181,218 @@ class ManagedRunner(MonitorRunner):
         self.rec.event("reply_routed", agent=a.name, via=via, source=source, sent=len(sent), bad=len(bad))
         if sent:
             self.rec.progress(f"✉ {a.called} ({via}): {len(sent)} message(s) passed on")
+        self.rec.save()
+
+    # ---- B6 discussion mode: a board switch. While it is on, the manager's messages to the other agents are held in
+    # the ledger (reason "discussion") and the phases that would send its words down wait; the manager is reminded
+    # that it is in a discussion. When I close it, the manager gets one turn to send one batch, which supersedes
+    # the held messages; the critic decides whether the change interrupts the worker (urgent).
+
+    def pending_switch(self, kind: str) -> Optional[bool]:
+        """The newest switch of this kind still waiting in inbox/ (read only), None when there is none."""
+        val: Optional[bool] = None
+        try:
+            files = sorted((self.rec.run_dir / "inbox").glob("*.json"))
+        except OSError:
+            return None
+        for p in files:
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(d, dict) and d.get("kind") == kind:
+                val = bool(d.get("on"))
+        return val
+
+    def discussion_on(self) -> bool:
+        """On as set, or switched on on the board and not applied yet (a message is never sent past the switch)."""
+        return bool(self.st.get("discussion")) or self.pending_switch("discussion") is True
+
+    def set_discussion(self, on: bool) -> None:
+        if on == bool(self.st.get("discussion")):
+            return
+        self.st["discussion"] = on
+        self.rec.event("discussion", on=on)
+        if on:
+            self.st["discussion_since"] = now_iso()
+            self.rec.progress(f"💬 discussion on: nothing from {self.manager.called} goes to the others until it closes")
+        else:
+            self.mg["discussion_batch"] = {"at": now_iso(), "since": self.st.pop("discussion_since", "")}
+            self.rec.progress(f"💬 discussion closed: {self.manager.called} sends one batch with the new directions")
+        self.rec.save()
+
+    def discussion_held(self) -> List[Dict[str, Any]]:
+        return [m for m in self.ledger.rows if m["status"] == "held" and m.get("reason") == RT.DISCUSSION]
+
+    def discussion_batch(self) -> None:
+        """The manager's one turn after I close the discussion: one message for the critic, which supersedes what
+        was held (routing supersede); anything still held after it is dropped as replaced by the batch."""
+        a, mg = self.manager, self.mg
+        if not mg.get("discussion_batch") or self.discussion_on():
+            return
+        if self.terminal_busy(a) or self.rec.agent_busy(a.name):
+            return  # the manager is busy (a board chat, the terminal): the batch comes when it is free
+        mg.pop("discussion_batch")
+        held = self.discussion_held()
+        if held:
+            names = {x.name: x.called for x in self.mon.agents}
+            msgs = "\n\n".join(f"To {names.get(m['to'], m['to'])}:\n<<<\n{m['body']}\n>>>" for m in held)
+            held_text = self.mtpl("discussion_held", messages=msgs).strip()
+        else:
+            held_text = self.mtpl("discussion_held_none").strip()
+        self._activating = True
+        try:
+            r = self.say(a, self.mtpl("manager_discussion_end", held=held_text), "discussion")
+            if r.get("status") == "ok":
+                self.after_manager(r, relay=False)
+        except _Failed as e:
+            self.rec.progress(f"⚠ {a.called}'s turn after the discussion did not finish: {e}")
+            r = {}
+        finally:
+            self._activating = False
+        new = [m for m in self.ledger.rows if m.get("source") == r.get("turn_id") and m["from"] == a.name
+               and m["status"] in ("sent", "delivered")]
+        for m in self.discussion_held():  # not superseded by a message to the same agent: replaced by the batch
+            self.ledger.mark(m, "superseded", by=new[0]["id"] if new else "",
+                             reason="replaced by the batch sent when the discussion closed" if new
+                             else "the discussion closed with nothing new to send")
+        self.rec.event("discussion_batch", turn=r.get("turn_id"), held=[m["id"] for m in held],
+                       sent=[m["id"] for m in new])
+        self.rec.progress(f"💬 after the discussion: {len(new)} message(s) sent, {len(held)} held one(s) replaced")
+        self.rec.save()
+
+    # ---- B9: work that waits for me (a blocking question) or for a discussion to close
+
+    def held_by(self, ph: str) -> str:
+        """Why the next phase must not start now ('' when it may): a blocking question of the manager's for me
+        (outside night mode) holds every phase but the gates; a discussion holds the phases that send the manager's
+        words down."""
+        if ph in QUESTION_GOES_ON:
+            return ""
+        if not self.st.get("night"):
+            qs = [q["id"] for q in self.human_open() if q.get("blocking")]
+            if qs:
+                return "question " + ", ".join(qs)
+        if ph in DISCUSSION_WAITS and self.discussion_on():
+            return "discussion"
+        return ""
+
+    def wait_held(self, why: str) -> None:
+        """One short wait while the work is held: messages are still answered and controls read."""
+        mg = self.mg
+        if (mg.get("held") or {}).get("why") != why:
+            mg["held"] = {"why": why, "since": now_iso()}
+            self.rec.event("held", why=why, phase=mg.get("phase"))
+            self.rec.progress(f"⏸ the work waits for my answer to {why[len('question '):]}" if why.startswith("question")
+                              else f"⏸ {self.manager.called}'s next step waits for the discussion to close")
+            self.rec.save()
+        self.activate("wait")
+        if self.should_stop():
+            raise StopRequested()
+        time.sleep(0.2)
+
+    def release_held(self) -> None:
+        h = self.mg.pop("held", None)
+        if h:
+            self.rec.event("held_released", why=h.get("why"))
+            self.rec.progress("▶ the work goes on")
+            self.rec.save()
+
+    # ---- B6 milestone fallback: the board moves a finished milestone back to open (no prompt to the manager)
+
+    def reopen_milestone(self, i: int) -> None:
+        mss = self.mg.get("milestones") or []
+        if not 0 <= i < len(mss) or mss[i].get("status") != "done":
+            self.rec.progress(f"ⓘ milestone {i + 1} is not a finished one; nothing reopened")
+            return
+        ms = mss[i]
+        ms.update(status="open", reopened_at=now_iso())
+        ms.setdefault("reopens", []).append(now_iso())
+        p = self.agent_dir(self.critic) / f"checklist-m{i + 1}.md"
+        text = B.read(p) or B.CHECKLIST_HEAD
+        n = len(B.parse_checklist(text).get("steps") or []) + 1
+        item = self.mtpl("checklist_reopened").strip()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text.rstrip("\n") + f"\n\n## Step {n}: Reopened\n\n- [ ] {item}\n", encoding="utf-8")
+        rec = (self.st.get("checklists") or {}).get(f"m{i + 1}")
+        if rec is not None:
+            rec["hash"] = B.digest(B.read(p))
+        self.rec.event("milestone_reopened", milestone=i, checklist=str(p))
+        self.rec.progress(f"↺ milestone {i + 1} ({ms.get('title', '')}) moved back to open")
+        self.rec.save()
+
+    # ---- B9 review file: the manager writes a review for me to comment on; my comments go back to it
+
+    def reviews_dir(self) -> Path:
+        return self.rec.run_dir.parent / "reviews"
+
+    def request_review(self) -> None:
+        if self.mg.get("review_req"):
+            return
+        path = self.reviews_dir() / f"{time.strftime('%Y%m%d-%H%M%S')}.md"
+        self.mg["review_req"] = {"at": now_iso(), "path": str(path)}
+        self.rec.event("review_requested", path=str(path))
+        self.rec.progress(f"📝 review file asked for; {self.manager.called} writes it when free")
+        self.rec.save()
+
+    def review_file_turn(self) -> None:
+        a, mg = self.manager, self.mg
+        req = mg.get("review_req")
+        if not req or self.terminal_busy(a) or self.rec.agent_busy(a.name):
+            return
+        mg.pop("review_req")
+        p = Path(req["path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        self._activating = True
+        try:
+            r = self.say(a, self.mtpl("review_file_request", path=str(p)), "review_file")
+            if r.get("status") == "ok":
+                self.after_manager(r, relay=False)
+        except _Failed as e:
+            self.rec.progress(f"⚠ {a.called}'s review file turn did not finish: {e}")
+            r = {}
+        finally:
+            self._activating = False
+        how = "written"
+        if not p.is_file() and self.for_me(r.get("output") or "").strip():
+            p.write_text(self.for_me(r["output"]).strip() + "\n", encoding="utf-8")  # written in the reply instead
+            how = "from its reply"
+        if not p.is_file():
+            self.rec.progress(f"⚠ {a.called} wrote no review file")
+            self.st.setdefault("review_files", []).append({"path": str(p), "requested_at": req["at"],
+                                                           "turn": r.get("turn_id"), "status": "missing"})
+            self.rec.save()
+            return
+        orig = p.parent / ".orig" / p.name  # what the manager wrote: my comments are what I change in the file
+        orig.parent.mkdir(exist_ok=True)
+        orig.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+        self.st.setdefault("review_files", []).append({"path": str(p), "requested_at": req["at"], "written_at": now_iso(),
+                                                       "turn": r.get("turn_id"), "status": "written", "how": how})
+        self.rec.event("review_written", path=str(p), turn=r.get("turn_id"))
+        self.rec.progress(f"📝 review file written: {p}")
+        self.rec.save()
+
+    def review_comments(self, path: str) -> None:
+        """My comments in a review file (what I changed in it, as a diff) go to the manager as a message from me."""
+        import difflib
+        e = next((x for x in self.st.get("review_files") or [] if x["path"] == path), None)
+        if e is None:
+            self.rec.progress(f"⚠ no review file {path}")
+            return
+        p = Path(path)
+        now, before = B.read(p), B.read(p.parent / ".orig" / p.name)
+        diff = "".join(difflib.unified_diff(before.splitlines(True), now.splitlines(True), "as written",
+                                            "with my comments", n=2))
+        if not diff.strip():
+            self.rec.progress(f"ⓘ no comments found in {p.name}; nothing sent")
+            return
+        text = self.mtpl("review_comments", path=path, diff="```diff\n" + diff.rstrip() + "\n```").strip()
+        self.note_file({"to": [self.manager.name], "message": text, "from": "human", "via": "review"})
+        (p.parent / ".orig" / p.name).write_text(now, encoding="utf-8")  # the next round of comments starts here
+        e.update(status="comments sent", comments_at=now_iso())
+        e["rounds"] = int(e.get("rounds") or 0) + 1
+        self.rec.event("review_comments", path=path)
+        self.rec.progress(f"📝 my comments on {p.name} sent to {self.manager.called}")
         self.rec.save()
 
     # ---- an agent's session open in a terminal (orch/hooks/terminal_relay.py): one writer at a time
@@ -1777,6 +2092,7 @@ class ManagedRunner(MonitorRunner):
             if res.session_id and res.session_id != sid:
                 self.rec.update_session(agent.name, session_id=res.session_id)
             self.note_session(agent.name, "compacted between steps", change="compact", turn=record["turn_id"])
+            self.after_compact(agent, "compact between steps")
         else:
             self.rec.progress(f"🗜 {agent.called}: compact between steps failed ({res.status}); the session goes on")
 
@@ -1790,8 +2106,12 @@ class ManagedRunner(MonitorRunner):
         caller takes the message for the critic itself) and note a pause it calls; return its whole reply."""
         text = r.get("output") or ""
         mine = truncate(self.for_me(text), 1500)
-        for q in T.bodies(text, "question"):
+        for attrs, q in T.blocks(text, "question"):
+            if not (q or "").strip():
+                continue
             nq = self.new_question(self.manager, "human", q, r["turn_id"], parent, assumption=mine)
+            # B9: the work that depends on it waits for my answer, unless the manager says it can go on meanwhile
+            nq["blocking"] = T._norm(attrs.get("blocking", "")) not in ("no", "false", "0")
             if self.st.get("night"):  # nobody is watching: the manager's choice stands until I say otherwise
                 nq.update(status="night", answered_by=self.manager.name, answer=mine, answer_turn=r["turn_id"],
                           answered_at=now_iso())
@@ -1802,6 +2122,13 @@ class ManagedRunner(MonitorRunner):
                 a = self.find_agent(attrs.get("to", ""))
                 if a and a.role == "verifier" and body:
                     note = self.mtpl("relay_note", note=body).strip()
+                    if self.discussion_on():  # B6: held until the discussion closes; its batch replaces it
+                        for m in self.ledger.rows:
+                            if m.get("source") == r.get("turn_id") and m["to"] == a.name and m.get("i") == i \
+                                    and m["status"] == "sent":
+                                self.ledger.mark(m, "held", reason=RT.DISCUSSION, text=note,
+                                                 carrier={"discussion": True})
+                        continue
                     self.forward(a, note)
                     # now a waiting note: a newer message to the critic (e.g. the kickoff's instruction after one
                     # written with the plan) replaces it instead of both being delivered (routing.py)
@@ -1952,6 +2279,7 @@ class ManagedRunner(MonitorRunner):
             .write_text(json.dumps(data), encoding="utf-8")
 
     def check_control(self) -> None:
+        night: Optional[bool] = None
         answers: Dict[str, List[str]] = {}  # several answers to one question become one relay
         talked: Dict[str, str] = {}  # settled in conversation with the manager: its summary is the answer
         for d in self.rec.take_control():
@@ -1965,14 +2293,12 @@ class ManagedRunner(MonitorRunner):
             elif d.get("kind") == "gate":
                 self.st.setdefault("gate_queue", []).append(d)
             elif d.get("kind") == "night":
-                self.st["night"] = bool(d.get("on"))
-                self.rec.event("night", on=self.st["night"])
-                self.rec.progress("🌙 night mode on: the manager decides alone" if self.st["night"] else "☀ night mode off")
+                night = bool(d.get("on"))  # applied after the answers below: one may close the open question
             elif d.get("kind") == "job":
                 self.mg["job_release"] = True
             elif d.get("kind") == "pause" and d.get("message"):  # from a chat with the manager on the board
                 self.mg["pause_req"] = {"text": str(d["message"]), "turn": d.get("turn", "")}
-            elif d.get("kind") in ("reply", "correction", "terminal"):  # the terminal; corrections from a board chat
+            elif d.get("kind") in self.AT_ONCE:  # the terminal; corrections from a board chat; board switches
                 self.message_control(d)
         for qid, msgs in answers.items():
             if msgs and qid not in talked:
@@ -1980,7 +2306,37 @@ class ManagedRunner(MonitorRunner):
         for qid, text in talked.items():
             if text:
                 self.human_answer(qid, text, via="conversation")
+        self.switch_night(night)
         self.rec.save()
+
+    def human_open(self) -> List[Dict[str, Any]]:
+        """Questions for me that are still open."""
+        return [q for q in self.st.get("questions") or [] if q.get("to") == "human" and q.get("status") == "open"]
+
+    def switch_night(self, want: Optional[bool]) -> None:
+        """B9: night mode switches only while no question for me is open; a switch asked meanwhile waits (queued) and
+        is applied once the question closes."""
+        if want is not None:
+            self.st["night_queued"] = want
+        want = self.st.get("night_queued")
+        if want is None:
+            return
+        if want == bool(self.st.get("night")):
+            self.st.pop("night_queued", None)
+            return
+        open_ = self.human_open()
+        if open_:
+            ids = ", ".join(q["id"] for q in open_)
+            if self.st.get("night_queued_for") != ids:
+                self.st["night_queued_for"] = ids
+                self.rec.progress(f"🌙 night mode switches {'on' if want else 'off'} once {ids} is closed")
+                self.rec.event("night_queued", on=want, questions=ids)
+            return
+        self.st.pop("night_queued", None)
+        self.st.pop("night_queued_for", None)
+        self.st["night"] = want
+        self.rec.event("night", on=want)
+        self.rec.progress("🌙 night mode on: the manager decides alone" if want else "☀ night mode off")
 
     def wait_gate(self, gate: Dict[str, Any]) -> Dict[str, Any]:
         """Pause until I approve or send it back (board, terminal, or `orch approve`)."""
@@ -2029,7 +2385,10 @@ class ManagedRunner(MonitorRunner):
                     if self.pump_line(line):
                         continue
                     ok = line.lower() in ("", "y", "yes", "ok", "approve", "approved", "lgtm")
-                    decision = {"decision": "approve" if ok else "revise", "message": "" if ok else line}
+                    if gate["kind"] == "wait":  # typed text is my note with "done" (send back: `orch approve --revise`)
+                        decision = {"decision": "approve", "message": "" if ok else line}
+                    else:
+                        decision = {"decision": "approve" if ok else "revise", "message": "" if ok else line}
                 else:
                     time.sleep(0.5)
         finally:
@@ -2075,6 +2434,11 @@ class ManagedRunner(MonitorRunner):
                               "turn": req.get("turn", "")}
                 mg["phase"] = ph = "wait"
                 self.rec.progress("⏸ the manager paused the work until a task of mine is done")
+            why = "" if mg.get("in_work") else self.held_by(ph)  # a round cut off by a restart is redone first
+            if why:
+                self.wait_held(why)
+                continue
+            self.release_held()
             try:
                 out = getattr(self, "ph_" + ph)(mg)
             except _Failed as f:
@@ -2142,7 +2506,8 @@ class ManagedRunner(MonitorRunner):
         if not ms:
             raise _Failed("the manager's plan has no numbered milestone list")
         text = self.after_manager(r)
-        mg.update(plan_text=text, plan_turn=r["turn_id"], comment="",
+        summ = T.bodies(text, "summary")
+        mg.update(plan_text=text, plan_turn=r["turn_id"], comment="", plan_summary=summ[-1] if summ else "",
                   milestones=[{**x, "status": "pending", "rounds": 0, "score": None} for x in ms])
         self.rec.progress("**Plan:**\n" + "\n".join(f"{i + 1}. {x['text']}" for i, x in enumerate(ms)))
         mg["phase"] = "plan_gate" if self.mon.controller.approve_plan else "kickoff"
@@ -2150,7 +2515,7 @@ class ManagedRunner(MonitorRunner):
 
     def ph_plan_gate(self, mg: Dict[str, Any]) -> Optional[str]:
         d = self.wait_gate({"kind": "plan", "title": "Milestone plan", "text": mg.get("plan_text", ""),
-                            "turn": mg.get("plan_turn")})
+                            "summary": mg.get("plan_summary", ""), "turn": mg.get("plan_turn")})
         if d["decision"] == "approve":
             if d.get("message"):
                 self.forward(self.manager, d["message"])
@@ -2165,9 +2530,12 @@ class ManagedRunner(MonitorRunner):
         ms.update(status="active", started_at=now_iso(), started_round=int(self.st.get("round", 0)) + 1)
         self.ck_rec(start=True)  # the critic's checklist file for this milestone
         self.fresh_sessions()
+        ms.pop("rubric", None)  # set afresh for this milestone (take_rubric, in the turn)
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
                                              milestone=ms["text"], human_messages=""), "kickoff")
         self.after_manager(r, relay=False)
+        if not ms.get("rubric"):
+            self.rubric_off(0)
         mg.update(note=self.critic_message(r, "kickoff"), note_at=now_iso(), ms_round=0, stall=0,
                   limit=False, phase="brief", plan_done=None, plan_total=None, step_round=None)
         return None
@@ -2746,6 +3114,11 @@ class ManagedRunner(MonitorRunner):
         """The critic proposes stopping the whole run until a person acts; the manager decides."""
         w = mg.get("wait") or {}
         r = self.say(self.manager, self.mtpl("manager_pause", proposal=w.get("text", ""), human_messages=""), "pause")
+        return self.pause_decision(r, w)
+
+    def pause_decision(self, r: Dict[str, Any], w: Dict[str, Any]) -> Optional[str]:
+        """The manager's PAUSE (the run waits for me) or CONTINUE (the critic gets work meanwhile)."""
+        mg = self.mg
         out = r.get("output") or ""
         if T.value(out, "decision") == "PAUSE" or (T.bodies(out, "pause") and T.value(out, "decision") != "CONTINUE"):
             self.after_manager(r)
@@ -2771,6 +3144,12 @@ class ManagedRunner(MonitorRunner):
         d = self.wait_gate({"kind": "wait", "milestone": mg.get("ms", 0), "turn": w.get("turn"),
                             "title": f"Waiting for you ({w.get('who') or 'a human task'})", "text": w.get("text", "")})
         msg = (d.get("message") or "").strip()
+        if d["decision"] == "revise":  # B9: sent back with my notes: the manager decides again
+            msg = msg or "Not done; please decide again."
+            self.decide(f"Pause sent back: {msg}", "you", "wait")
+            r = self.say(self.manager, self.mtpl("manager_wait_revise", message=msg,
+                                                 waited=truncate(w.get("proposal") or w.get("text", ""), 600)), "pause")
+            return self.pause_decision(r, {**w, "proposal": w.get("proposal") or w.get("text", "")})
         if msg:
             self.decide(msg, "you", "wait")
             self.forward(self.manager, self.mtpl("manager_resumed", message=msg,
@@ -2868,7 +3247,8 @@ class ManagedRunner(MonitorRunner):
     def ph_mreview(self, mg: Dict[str, Any]) -> Optional[str]:
         c, ms = self.mon.controller, self.cur()
         r = self.say(self.manager, self.mtpl("manager_review", n=mg["ms"] + 1, title=ms["title"],
-                                             report=mg.get("report", ""), human_messages=""), "review")
+                                             report=mg.get("report", ""), human_messages="",
+                                             rubric=self.rubric_text(ms)), "review")
         out = r.get("output") or ""
         dec = T.value(out, "decision")
         if dec not in ("ACCEPT", "REVISE"):
@@ -2884,6 +3264,7 @@ class ManagedRunner(MonitorRunner):
             r = self.say(self.manager, f"Your overall score of {score}/5 is below the {c.min_score}/5 we agreed on. "
                                        f"What should {self.critic.called} do next?", "review")
         text = self.after_manager(r, relay=False)
+        summ = [b for x in (out, r.get("output") or "") for b in T.bodies(x, "summary")]
         self.st.setdefault("reviews", []).append(
             {"milestone": mg["ms"], "turn": r["turn_id"], "score": score, "criteria": crit,
              "decision": "ACCEPT" if accept else "REVISE", "round": self.st.get("round", 0), "at": now_iso()})
@@ -2892,7 +3273,8 @@ class ManagedRunner(MonitorRunner):
             self.drop_phase_messages(r["turn_id"], self.critic.name, "the milestone was accepted; the next one starts "
                                                                      "with a new instruction")
         if accept or mg.get("limit"):
-            ms.update(status="awaiting_ok", summary=self.for_me(text), summary_turn=r["turn_id"], accepted=accept)
+            ms.update(status="awaiting_ok", summary=self.for_me(text), summary_turn=r["turn_id"], accepted=accept,
+                      gate_summary=summ[-1] if summ else "")
             gate = c.approve_milestones or not accept
             mg.update(phase="gate" if gate else "next", guidance="" if accept else self.critic_message(r, "review"),
                       guidance_at=now_iso())
@@ -2912,7 +3294,8 @@ class ManagedRunner(MonitorRunner):
         ms = self.cur()
         why = "" if ms.get("accepted", True) else f" — {self.limit_title()}, the manager has not accepted it"
         d = self.wait_gate({"kind": "milestone", "milestone": mg["ms"], "title": f"Milestone {mg['ms'] + 1}: "
-                            f"{ms['title']}{why}", "text": ms.get("summary", ""), "turn": ms.get("summary_turn")})
+                            f"{ms['title']}{why}", "text": ms.get("summary", ""), "summary": ms.get("gate_summary", ""),
+                            "turn": ms.get("summary_turn")})
         if d.get("message"):
             self.decide(f"Milestone {mg['ms'] + 1} ({ms['title']}): {d['decision']}. {d['message']}", "you", "gate")
         held = (mg.get("guidance") or "").strip()  # the manager's message for the critic, held while I decide
@@ -2949,7 +3332,7 @@ class ManagedRunner(MonitorRunner):
         mg["ms"] += 1
         mg["phase"] = "kickoff" if mg["ms"] < len(mg["milestones"]) else "done"
         if mg["phase"] == "done":
-            self.st["final_report"] = ms.get("summary", "")
+            self.st["final_report"] = "\n\n".join(x for x in (ms.get("gate_summary"), ms.get("summary")) if x)
         return None
 
 

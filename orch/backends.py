@@ -280,6 +280,8 @@ class ClaudeBackend(Backend):
                 meta["models"] = sorted(data["modelUsage"])  # the models that actually answered
             if data.get("is_error") and status == "ok":
                 status = "error"
+            if '"compact_boundary"' in out:  # the CLI compacted the session during the turn (auto-compact)
+                meta["compacted"] = True
         else:  # B8: no final result (an error or a cut-off): the last assistant message, never the raw stream
             output, sid2 = _claude_stream_text(out)
             sid = sid2 or sid
@@ -825,11 +827,12 @@ class MockBackend(Backend):
         if purpose == "plan":
             k = int(o.get("milestones", 2))
             ms = "\n".join(f"{i}. Part {i} — part {i} of the goal is done and checked" for i in range(1, k + 1))
-            return (f"Here is how I would split it.\n\n{ms}\n\n| criterion | what a 5 looks like |\n|---|---|\n"
-                    "| correctness | nothing wrong |\n| clarity | easy to read |\n\nI accept a milestone at 4/5 or more.")
+            return (f"Here is how I would split it.\n\n{ms}\n\nI accept a milestone at 4/5 or more.\n\n"
+                    "<summary>The plan covers the whole goal in order; checked against the goal; see the list above.</summary>")
         if purpose == "review":
             return ("| criterion | score |\n|---|---|\n| correctness | 5 |\n| clarity | 4 |\n\n"
-                    "This milestone is done.\n\n<score>4.5</score>\n<decision>ACCEPT</decision>")
+                    "This milestone is done.\n\n<summary>Changed: the part is done. Checked: the critic's list. "
+                    "Look at: the workspace.</summary>\n\n<score>4.5</score>\n<decision>ACCEPT</decision>")
         if purpose == "answer":
             return '<message to="critic">Go with the simpler option for now.</message>'
         if purpose == "chat":
@@ -841,6 +844,10 @@ class MockBackend(Backend):
             return "Thanks, carry on."
         if purpose == "incoming":
             return "Noted; nothing changes for now."
+        if purpose == "kickoff":
+            return ('<message to="critic">Please get the first part of the goal done and keep me posted.</message>\n\n'
+                    "<rubric>\n- the change is made where the goal asks\n- it is checked against the goal\n"
+                    "- nothing outside the scope changed\n</rubric>")
         return '<message to="critic">Please get the first part of the goal done and keep me posted.</message>'
 
 

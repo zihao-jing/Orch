@@ -3,7 +3,8 @@
 Every signal is an XML-style tag with a start and an end, so orch never has to guess where a block stops:
 
     <message to="critic">…</message>   delivered only to that agent (urgent="yes": cuts into its running turn)
-    <question>…</question>             one decision for the level above (one tag per question)
+    <question>…</question>             one decision for the level above (one tag per question); the manager's
+                                       blocking="no": the work goes on meanwhile
     <pause>…</pause>                   a pause (proposed by the critic, called by the manager)
     <plan>…</plan>                     the critic's steps for the current work (`- [x]` / `- [ ]` lines), one at a time
     <checklist>…</checklist>           the critic's checklist for the current step (`- [x]` / `- [ ]` lines)
@@ -14,6 +15,8 @@ Every signal is an XML-style tag with a start and an end, so orch never has to g
     <state>…</state>                   the manager's working state (saved to its state.md)
     <preference to="critic">…</preference>  the manager: one line added to that agent's preference.md
     <instruction>…</instruction>       what the next agent must act on: passed on whole, in place of the rest of the reply
+    <rubric>…</rubric>                 the manager: the current milestone's 3–8 criteria, one per line
+    <summary>…</summary>               the manager: what changed, what was checked, where to look (top of a gate)
 
 Text outside the tags is for whoever the agent is replying to. Tags inside `code` or ``` fences are only quoted,
 not used. A tag left open runs to the next protocol tag or to the end of the reply.
@@ -24,7 +27,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
-         "instruction")
+         "instruction", "rubric", "summary")
 _ALT = "|".join(re.escape(n) for n in NAMES)
 _OPEN = re.compile(rf"<({_ALT})((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)
 _ATTR = re.compile(r"([\w-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>/]+))")

@@ -547,7 +547,7 @@ class TestManaged(unittest.TestCase):
 
     def test_question_chain_up_to_me_does_not_block(self):
         cfg = make_cfg(self.tmp, [managed(
-            mgr={"milestones": 1, "replies": {"answer": ["<question>Do we cite the new run?\nA) yes\nB) no</question>\n\n"
+            mgr={"milestones": 1, "replies": {"answer": ["<question blocking=\"no\">Do we cite the new run?\nA) yes\nB) no</question>\n\n"
                                                          "<message to=\"Jordan\">Assume yes for now.</message>"]}},
             critic={"replies": {"verify": ["<question>Do we cite the new run in the main text?</question>\n\n"
                                            "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
