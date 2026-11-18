@@ -29,6 +29,9 @@ def render(template: str, **values: Any) -> str:
     return re.sub(r"\n{3,}", "\n\n", out).strip() + "\n"
 
 
+# templates replaced by the reminder registry (orch/reminders.py): a config that still overrides one loads, unused
+RETIRED_TEMPLATES = ("tag_reminder_manager", "tag_reminder_critic", "tag_reminder_worker")
+
 DEFAULT_TEMPLATES: Dict[str, str] = {
     # the auditor (managed mode): the digest of the last stretch of rounds; its system prompt says what to do with it
     "audit_request": "Audit of rounds {{lo}}–{{hi}} (run {{run}}). At most {{points}} points.\n\n{{digest}}",
@@ -424,13 +427,10 @@ step and the standing rules. The repository is at `{{cwd}}`.
     "manager_resumed": "I ended the pause and said this (it went to {{critic}} too): \"{{message}}\"\n\n"
                        "What the pause was waiting for: {{waited}}",
     "relay_note": "{{note}}",
-    "critic_reply_routing": """\
-If I asked you a question or requested an explanation alongside this review or instruction, put your
-complete answer inside `<message to="you">…</message>`. This sends the answer to me; address me as "you" in it.
-Plain text outside that tag goes to {{worker}}, so use it only for their instructions or feedback, written as
-your own request to "you". Keep any requested checklist and verdict separate. Answer my question yourself when
-you can; it does not replace the ongoing review or create a new task for {{worker}}.
-""",
+    # added to a critic review or instruction that carries a message from me (not on every turn)
+    "critic_reply_routing": "If I asked you something, answer it inside `<message to=\"you\">…</message>`; text outside "
+                            "tags goes to {{worker}}.",
+    # board chat with the manager (round turns get the protocol reminder at intervals instead)
     "manager_direct_voice": """\
 When writing to {{critic}}, speak as "I" and address them as "you". Present instructions, questions and decisions
 as your own. Keep my identity, our conversation and your role out of that message; do not attribute requests to
@@ -450,22 +450,6 @@ from the message you send to {{critic}}.
                      "the decisions register, and keep the work moving until every milestone is done. Still write each "
                      "question for me in <question>, with the choice you made and why: it is recorded for me to review in "
                      "the morning, and I can still overrule it. Pause only if nothing at all can be done without me.",
-    "tag_reminder_manager": "A reminder, in case it helps (not a request to add anything): what is for {{critic}} goes in "
-                            "<message to=\"{{critic}}\">…</message>; a decision only I can make in <question>…</question> "
-                            "(one per question); stopping the whole run until I act in <pause>…</pause>; in reviews "
-                            "<score>…</score> and <decision>…</decision>; your working state in <state>…</state> when it changes. "
-                            "Everything outside tags is read by me.",
-    "tag_reminder_critic": "A reminder, in case it helps (not a request to add anything): text outside tags reaches "
-                           "{{worker}}; what is only for me goes in <message to=\"you\">…</message>; an update for "
-                           "{{worker}} outside a review in <message to=\"{{worker}}\">…</message>; "
-                           "questions for me in <question>…</question>; proposing to stop the whole run until "
-                           "a person acts in <pause>…</pause>; {{worker}} gets one step of your <plan>…</plan> at a "
-                           "time; each review ends with <plan>…</plan>, <checklist>…</checklist> (the current step) and "
-                           "<verdict>PASS</verdict> (every step done) or <verdict>FAIL</verdict>.",
-    "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for me goes in "
-                           "<question>…</question>; jobs you start detached are noticed automatically, and "
-                           "<no-wait pid=\"…\"/> is only for a long-lived helper the result does not depend on; "
-                           "a job the work needs is waited for, not tagged.",
     "session_reset": """\
 This is a fresh conversation: your earlier one was cleared to keep turns quick, and the work carries on from where it
 is. Here is what you need from before.

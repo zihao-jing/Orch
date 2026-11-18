@@ -116,7 +116,7 @@ fresh_session: milestone    # a new session for each milestone
 | **An agent's prompt** | its `system_prompt.md` (missing: the role default in `orch/prompts/<role>.md`) |
 | Project notes and preferences | its `memory.md` and `memory/*.md`, added after the prompt ("Things to keep in mind:"; HTML comments are ignored) |
 | Display names used in messages | `display_name:` in each `agent.yaml`; fills `{{manager}}`, `{{critic}}`, `{{worker}}` in the prompts |
-| Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `tag_reminder` |
+| Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `reminders` |
 | Rounds per milestone, checklist, check-ins, job waiting | `critic/agent.yaml`: `milestone_rounds`, `checklist`, `checklist_nudge`, `checkin_every`, `job_wait`, `job_ignore` |
 | Fresh sessions, saved versions of files | `worker/agent.yaml`: `fresh_session`, `snapshot` |
 | Where runs are recorded | `output_dir:` in any `agent.yaml` (default `.orch/runs`) |
@@ -162,9 +162,8 @@ When the manager asks a side question during a critic review, the critic puts it
 manager without exposing that role in the prompt; explicit agent names remain supported. The manager speaks
 as "I" to the critic, and the critic addresses it as "you". Downstream messages present decisions as the
 sender's own, without naming an upstream user. Use neutral display names to keep role names out of prompts.
-With the protocol enabled, every
-critic review/instruction turn includes this routing reminder, including resumed sessions; it is independent
-of `tag_reminder`. Tagged answers are queued for the manager's next run turn, without creating an immediate
+With the protocol enabled, a
+critic review/instruction turn that carries a message from the manager ends with a one-line routing reminder. Tagged answers are queued for the manager's next run turn, without creating an immediate
 board-chat response. Dedicated critic reports and check-ins still address the manager directly.
 
 | tag | written by | what orch does |
@@ -184,9 +183,24 @@ reviews (no edits, no fixes written for the worker, no wider scope); the worker 
 commits nothing unless asked, writes no notes or status files, caps and pilots anything that spends, never starts
 a job twice and never keeps its turn open to wait (orch waits for its jobs between turns).
 
-**Tag reminders.** With probability `tag_reminder` (default 0.2) a turn's message ends with a short
-`<system-reminder>` listing that role's tags, worded as a reminder rather than a request, so an agent deep in a long
-session keeps the protocol in view without being pushed to add tags it doesn't need. The board marks those turns.
+**Reminders.** Short `<system-reminder>` lines at the end of a turn's message, at intervals rather than every turn
+(`orch/reminders.py`): `concise` (all, every 3–6 turns), `protocol` (whom the agent may address and the tag form; all,
+every 3–10 turns at random), `report_length` (worker, every 3rd turn); `golden_board` is a placeholder for the golden
+board. Change them under `reminders:` in any agent.yaml; edits apply from the next turn:
+
+```yaml
+reminders:
+  concise: {every: 4}        # a default's schedule
+  report_length: false       # a default off
+  cite_files:                # a new one: text (or role: text), to (roles, agent names or all), every N or random [lo, hi]
+    text: "Name the file behind every number you report."
+    to: [worker]
+    random: [3, 8]
+```
+
+`reminders: false` turns them off; the older `tag_reminder: <chance>` sets the protocol reminder's schedule (0 = off).
+Each turn record lists the reminders sent (`reminders`), and the board marks them. Automatic checks read messages
+without them.
 
 **Fresh sessions mid-run.** `orch reset-sessions <project> [--agent NAME]` (with the run stopped) clears the agents'
 conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. When the

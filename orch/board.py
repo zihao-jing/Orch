@@ -291,7 +291,7 @@ class Board:
         if "turn_id" in t:
             out = t.get("output") or ""
             row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
-                                         "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder",
+                                         "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder", "reminders",
                                          "cut_short", "interruptions")}
             row["output"] = out[:PREVIEW_CHARS]
             row["output_len"] = len(out)

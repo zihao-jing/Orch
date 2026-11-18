@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import random
 import os
 import re
 import sys
@@ -35,12 +34,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import audit as _audit
 from . import jobs as _jobs
+from . import reminders as R
 from . import tags as T
 
 from .backends import StopRequested
 from .config import AgentConfig
 from .controller import MonitorRunner, checklist_state, parse_options, relayed, resolve_choice, strip_checklist, truncate
 from .report import CHECKBOX
+from .templates import render
 from .recorder import now_iso
 
 def manager_pause(text: str) -> str:
@@ -234,26 +235,48 @@ class ManagedRunner(MonitorRunner):
 
     def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str, seq: Optional[int] = None,
              extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Keep critic reply routing explicit, including in resumed sessions; optionally remind other tags."""
-        role = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(agent.role)
-        routing_template = ("manager_direct_voice" if role == "manager" else "critic_reply_routing"
-                            if role == "critic" and purpose not in ("checkin", "report") else None)
-        if routing_template and self.mon.controller.protocol:
-            note = self.mtpl(routing_template).strip()
-            if note:
-                prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
-        if role == "manager" and self.st.get("night"):
-            prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{self.mtpl('night_manager').strip()}\n</system-reminder>\n"
-        p = self.mon.controller.tag_reminder
-        if role and not (role == "critic" and purpose == "checkin") and p > 0 and random.random() < p:
-            note = self.mtpl(f"tag_reminder_{role}").strip()
-            if note:
-                prompt = f"{prompt.rstrip()}\n\n<system-reminder>\n{note}\n</system-reminder>\n"
-                extra = {**(extra or {}), "tag_reminder": True}
+        """One turn; the reminders due are added at the end of its message (add_reminders)."""
         r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
         if r.get("status") == "ok":
             self.check_addresses(agent, r.get("output") or "")
         return r
+
+    def add_reminders(self, agent: AgentConfig, prompt: str, purpose: str) -> Tuple[str, List[str]]:
+        """Reminders at the end of the message (orch/reminders.py): night mode while it is on (the manager needs it
+        to act), the critic's reply routing when the message carries something from its user, and the registry's
+        reminders when they are due for this agent. Returns the prompt and the ids sent."""
+        role = R.ROLE_OF.get(agent.role)
+        if not role:
+            return prompt, []
+        sent: List[str] = []
+
+        def add(rid: str, text: str) -> None:
+            nonlocal prompt
+            if text.strip():
+                prompt = R.append(prompt, text)
+                sent.append(rid)
+
+        if role == "manager" and self.st.get("night"):
+            add("night_mode", self.mtpl("night_manager"))
+        if (role == "critic" and purpose not in ("checkin", "report") and self.mon.controller.protocol
+                and any((self.st.get("fwd") or {}).get(agent.name) or [])):
+            add("reply_routing", self.mtpl("critic_reply_routing"))
+        counters = self.st.setdefault("reminders", {}).setdefault(agent.name, {})
+        for rem in self.mon.controller.reminders:
+            text = R.text_for(rem, role)
+            if rem["id"] == R.GOLDEN_BOARD and not text:
+                text = self.golden_board_reminder()
+            if not text or purpose in rem.get("skip", ()) or not R.targets(rem, agent.name, role):
+                continue
+            if rem["id"] == "protocol" and not self.mon.controller.protocol:  # no tag protocol to remind of
+                continue
+            if R.due(counters, rem):
+                add(rem["id"], render(text, **self.names()))
+        return prompt, sent
+
+    def golden_board_reminder(self) -> str:
+        """Hook for the golden board (batch B3): the text of its periodic reminder. Nothing until it exists."""
+        return ""
 
     # whom each role may write to with <message to="…"> (besides to="you", its own user)
     MAY_ADDRESS = {"manager": ("verifier", "worker"), "verifier": ("worker", "manager"), "worker": ()}

@@ -631,7 +631,9 @@ class MonitorRunner:
                                                  "keeping the settings it had")
             return
         try:
-            new = next(m for m in cfg.monitors if m.name == self.mon.name).agent(agent.name)
+            new_mon = next(m for m in cfg.monitors if m.name == self.mon.name)
+            self.refresh_reminders(new_mon.controller.reminders)
+            new = new_mon.agent(agent.name)
         except (StopIteration, KeyError):
             note("gone", f"{agent.name} is not in the config any more; keeping its settings")
             return
@@ -669,6 +671,22 @@ class MonitorRunner:
         self.log(f"{agent.name}: settings reloaded from the config ({', '.join(sorted(changed))})")
         self._config_notes = {**getattr(self, "_config_notes", {}), agent.name: ""}
 
+    def refresh_reminders(self, reminders: List[Dict[str, Any]]) -> None:
+        """Reminders edited in the config apply from the next turn (their counters carry on)."""
+        c = self.mon.controller
+        if reminders == c.reminders:
+            return
+        old = {r["id"]: r for r in c.reminders}
+        new = {r["id"]: r for r in reminders}
+        changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+        c.reminders = reminders
+        self.rec.progress("🔧 reminders changed in the config; applied from the next turn: " + ", ".join(changed))
+        self.rec.event("reminders_reloaded", changed=changed)
+
+    def add_reminders(self, agent: AgentConfig, prompt: str, purpose: str) -> Tuple[str, List[str]]:
+        """The prompt with the reminders due this turn at its end, and their ids. None outside managed mode."""
+        return prompt, []
+
     # ------------------------------------------------------------------ turns
 
     def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str,
@@ -688,6 +706,10 @@ class MonitorRunner:
         late = "\n\n".join(x for x in fwd if x)
         if late:
             prompt = f"{late}\n\n{prompt}" if prompt.strip() else late
+        prompt, reminders = self.add_reminders(agent, prompt, purpose)  # last, so the message ends with them
+        if reminders:
+            extra = {**(extra or {}), "reminders": reminders}
+            rec.save()  # the reminder counters
         if len(prompt) > LARGE_TEXT:
             rec.progress(f"⚠ {agent.name}: a large prompt for `{rnd}` ({len(prompt):,} characters)")
         seq = seq or rec.next_seq(rnd)

@@ -596,7 +596,7 @@ function fold(t, defOpen){
       + routeCards(shown, rows, t.turn_id, text !== undefined);
   return `<details class="fold${to==='human'?' to-human':''}" data-t="${esc(t.turn_id)}"${open?' open':''}><summary>
     <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
-    <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
+    <span class="pill">${esc(t.purpose)}</span>${(t.reminders&&t.reminders.length)?`<span class="ink2" title="Reminders added at the end of this message: ${esc(t.reminders.join(', '))}">↺ ${esc(t.reminders.join(', '))}</span>`:(t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':'')}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
     ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
     ${t.model ? `<span class="mute mono" title="${t.cost_basis === 'estimate' ? 'cost is Claude Code\'s estimate, not the provider\'s price' : 'model'}">${esc(t.model)}${t.cost != null ? ' · ' + (t.cost_basis === 'estimate' ? '~' : '') + '$' + Number(t.cost).toFixed(2) : ''}</span>` : ''}
     ${routeChips(rows)}<span class="pv">${esc(run ? 'writing…' : headline(t.output))}</span></summary><div class="fb">${receivedLine(t.turn_id)}${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;

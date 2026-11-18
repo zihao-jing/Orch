@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from . import reminders as R
 from . import tags as T
 from .recorder import read_json
 from .report import turn_cost_basis, turn_model
@@ -163,7 +164,7 @@ def trace(turns: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> List[Di
         cand += [(s["origin"], s["id"], txt) for s, txt in srcs if txt and (s["ts"] or 0) <= start]
         paras = []
         before = prev_input.get(t["agent"], set())
-        for p in paragraphs(t.get("input") or ""):
+        for p in paragraphs(R.strip(t.get("input") or "")):  # orch's reminders are by design, not content
             origin, src = "orch", ""
             for o, sid, txt in reversed(cand):  # the most recent source that holds it
                 if p in txt:
@@ -245,7 +246,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     for x in win:
         t, paras = x["turn"], x["paras"]
         who = _agent_of(t)
-        inp, out = t.get("input") or "", t.get("output") or ""
+        inp, out = t.get("input") or "", R.strip(t.get("output") or "")
+        asked = R.strip(inp)  # what the turn asked: without the reminders at its end (lessons §9)
         rep = sum(len(p["text"]) for p in paras if p["repeat"])
         mix: Dict[str, int] = {}
         for p in paras:
@@ -255,7 +257,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
         cost = ((t.get("meta") or {}).get("turn_cost_usd")) or 0
         est = turn_cost_basis(t) == "estimate"
         sess = f"resumed #{t.get('session_turn')}" if t.get("resumed_session") else "new"
-        rows.append(f"| {t['turn_id']} | {t.get('purpose', '')} | {t.get('status', '')} | {sess} | "
+        rem = f" (↺ {', '.join(t['reminders'])})" if t.get("reminders") else ""  # reminders sent at its end
+        rows.append(f"| {t['turn_id']} | {t.get('purpose', '')}{rem} | {t.get('status', '')} | {sess} | "
                     f"{turn_model(t) or '?'} | {len(inp)} | {rep} | "
                     f"{len(out)} | {int(t.get('duration_s') or 0)} | {'~' if est else ''}{cost:.2f} | "
                     + ", ".join(f"{k} {v}" for k, v in sorted(mix.items(), key=lambda kv: -kv[1])) + " |")
@@ -266,7 +269,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
         elif t.get("status") != "ok" or len(out.strip()) < TINY_REPLY:
             flags.append({"kind": "short or failed reply", "weight": 2, "turn": t["turn_id"],
                           "line": f"{t['turn_id']} ({t.get('purpose')}) replied {len(out.strip())} chars, status "
-                                  f"{t.get('status')}", "excerpt": f"Asked (end of message): {clip(inp[-EXCERPT:])}\n"
+                                  f"{t.get('status')}", "excerpt": f"Asked (end of message): {clip(asked[-EXCERPT:])}\n"
                                                                    f"Reply: {clip(out) or '(empty)'}"})
         if rep >= REPEAT_MIN and rep >= REPEAT_SHARE * max(len(inp), 1):
             first = next(p for p in paras if p["repeat"])
@@ -352,7 +355,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           f"{max(x['turn'].get('ended_at') or '' for x in win)[:16]}. Sizes are characters. *repeat*: already in that "
           f"agent's previous message. Origins: the turn output, chat reply (*manager-chat*) or *human* note a "
           f"paragraph was copied from; *note from X* is a note agent X passed on from its chat; *orch* is orch's own "
-          f"text (templates, handovers, reminders). *session*: *resumed #n* continues the agent's session at its n-th "
+          f"text (templates, handovers). *↺ ids*: short reminders orch adds at the end of a message at intervals, by "
+          f"design; they are left out of the origins and repeats. *session*: *resumed #n* continues the agent's session at its n-th "
           f"turn, so the agent still has everything said before in it: a short message there is not a lost task. "
           f"*$*: the backend's figure; *~* marks Claude Code's own estimate for a model on another provider, priced "
           f"at Claude rates, which is not what the provider charged — don't judge spend on it.",

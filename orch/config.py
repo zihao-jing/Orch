@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .templates import DEFAULT_TEMPLATES
+from . import reminders as R
+from .templates import DEFAULT_TEMPLATES, RETIRED_TEMPLATES
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 TEXT_KEYS = ("goal", "instructions", "system_prompt", "task", "description")
@@ -210,7 +211,10 @@ class ControllerConfig:
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
     protocol: bool = True  # managed mode: add orch's fixed protocol (signals, who reads what, boundaries) to each prompt
     job_ignore: List[str] = field(default_factory=list)  # regexes: commands never waited on (e.g. a status loop)
-    tag_reminder: float = 0.2  # managed mode: chance per turn of a short reminder of the tags (0 = never)
+    # managed mode: older setting, the chance per turn of the protocol reminder (0 = off); now sets its schedule
+    tag_reminder: Optional[float] = None
+    # managed mode: short reminders at intervals (orch/reminders.py): [{id, text, to, every | random, skip}]
+    reminders: List[Dict[str, Any]] = field(default_factory=lambda: R.parse(None))
     job_wait: int = 21600  # seconds the critic waits for a job the worker says it is waiting on (0 = never wait)
     checkin_every: int = 0  # every N rounds a short update for the manager: from the critic's plan when it has one (0 = off)
     # a reply holding a line like this sends questions one level up (worker -> critic -> manager -> me)
@@ -405,7 +409,7 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "stop_on_error", "max_report_chars", "provider_retry_wait", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
-             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "audit_every", "audit_points")
+             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "reminders", "audit_every", "audit_points")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -513,6 +517,8 @@ def load_config(path: str) -> Config:
         mode = str(craw.get("mode", "pipeline"))
         templates = dict(DEFAULT_TEMPLATES)
         for k, v in (craw.get("templates") or {}).items():
+            if k in RETIRED_TEMPLATES:  # replaced by the reminder registry: accepted, not used
+                continue
             if k not in DEFAULT_TEMPLATES:
                 raise ConfigError(f"{where}.controller.templates: unknown template {k!r}; "
                                   f"known: {', '.join(DEFAULT_TEMPLATES)}")
@@ -528,10 +534,15 @@ def load_config(path: str) -> Config:
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
                       "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
-                      "audit_every", "audit_points"}
+                      "reminders", "audit_every", "audit_points"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
+        tag_reminder = float(craw["tag_reminder"] or 0) if craw.get("tag_reminder") is not None else None
+        try:
+            reminders = R.parse(craw.get("reminders"), tag_reminder, f"{where}.controller.reminders")
+        except (R.ReminderError, TypeError, ValueError) as e:
+            raise ConfigError(str(e)) from e
         controller = ControllerConfig(
             mode=mode,
             instructions=str(craw.get("instructions", "") or "").strip(),
@@ -557,7 +568,8 @@ def load_config(path: str) -> Config:
             checkin_every=int(craw.get("checkin_every", 0) or 0),
             job_wait=int(craw.get("job_wait", ControllerConfig.job_wait) or 0),
             protocol=bool(craw.get("protocol", True)),
-            tag_reminder=float(craw.get("tag_reminder", ControllerConfig.tag_reminder) or 0),
+            tag_reminder=tag_reminder,
+            reminders=reminders,
             job_ignore=[str(x) for x in (craw.get("job_ignore") or [])],
             audit_every=int(craw.get("audit_every", ControllerConfig.audit_every) or 0),
             audit_points=int(craw.get("audit_points", ControllerConfig.audit_points) or 5),

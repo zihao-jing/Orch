@@ -508,10 +508,11 @@ class TestManaged(unittest.TestCase):
         reviews = [t for t in ts if t["purpose"] == "verify"]
         self.assertIn(request, reviews[1]["input"])
         self.assertTrue(reviews[1]["resumed_session"])
-        self.assertIn('complete answer inside `<message to="you">', reviews[1]["input"])
-        self.assertIn("If I asked you a question", reviews[1]["input"])
+        self.assertIn('If I asked you something, answer it inside `<message to="you">', reviews[1]["input"])
+        self.assertTrue(reviews[1]["input"].rstrip().endswith("</system-reminder>"))
         self.assertNotRegex(reviews[1]["input"], r"(?i)\b(manager|user|human|Alex)\b")
-        self.assertFalse(reviews[1].get("tag_reminder"))  # routing does not depend on random reminders
+        self.assertIn("reply_routing", reviews[1].get("reminders") or [])  # sent because the message carries mine
+        self.assertNotIn("reply_routing", reviews[0].get("reminders") or [])  # not a fixed block on every review
         ack = [t for t in ts if t["purpose"] == "ack"][1]
         self.assertIn(answer, ack["input"])
         worker = [t for t in ts if t["purpose"] == "work"][2]
@@ -519,13 +520,15 @@ class TestManaged(unittest.TestCase):
         self.assertNotIn(answer, worker["input"])
         for t in ts:
             if t["purpose"] in ("report", "checkin") or t["role"] != "verifier":
-                self.assertNotIn("complete answer inside", t["input"])
+                self.assertNotIn("If I asked you something", t["input"])
 
     def test_reply_routing_reminder_respects_protocol_opt_out(self):
-        status, rec = run(make_cfg(self.tmp, [managed(controller={"protocol": False}, mgr={"milestones": 1})]))
+        status, rec = run(make_cfg(self.tmp, [managed(controller={"protocol": False, "tag_reminder": 1},
+                                                      mgr={"milestones": 1})]))
         self.assertEqual(status, "completed")
         for t in turns(rec):
-            self.assertNotIn("complete answer inside", t["input"])
+            self.assertNotIn("protocol", t.get("reminders") or [])
+            self.assertNotIn("If I asked you something", t["input"])
             self.assertNotIn('speak as "I"', t["input"])
 
     def test_worker_timeout_is_not_fatal(self):
@@ -1774,22 +1777,16 @@ class TestManaged(unittest.TestCase):
         seq = [(t["agent"], t["purpose"]) for t in turns(rec) if t["purpose"] in ("work", "verify")]
         self.assertEqual(seq[:2], [("writer", "work"), ("critic", "verify")])
 
-    def test_tag_reminder_is_added_now_and_then(self):
+    def test_tag_reminder_still_sets_the_protocol_reminder(self):
         status, rec = run(make_cfg(self.tmp, [managed(controller={"tag_reminder": 1}, mgr={"milestones": 1})]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
-        self.assertTrue(all("<system-reminder>" in t["input"] and t.get("tag_reminder") for t in ts))
+        self.assertTrue(all("protocol" in (t.get("reminders") or []) for t in ts if t["role"] != "auditor"))
         crit = next(t for t in ts if t["agent"] == "critic")["input"]
         self.assertIn('<message to="you">', crit)
-        self.assertIn("not a request to add anything", crit)
         status, rec = run(make_cfg(self.tmp / "x" if (self.tmp / "x").mkdir() is None else self.tmp,
                                    [managed(controller={"tag_reminder": 0}, mgr={"milestones": 1})]))
-        self.assertFalse(any(t.get("tag_reminder") for t in turns(rec)))
-        for t in turns(rec):
-            if "<system-reminder>" in t["input"]:
-                self.assertIn(t["role"], ("verifier", "manager"))
-                self.assertIn("complete answer inside" if t["role"] == "verifier" else 'speak as "I"',
-                              t["input"])  # deterministic communication reminders still apply
+        self.assertFalse(any("protocol" in (t.get("reminders") or []) for t in turns(rec)))
 
     def test_reset_sessions_keeps_the_run_and_hands_over(self):
         cfg_path = make_cfg(self.tmp, [managed(mgr={"milestones": 2})])
