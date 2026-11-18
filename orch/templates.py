@@ -30,7 +30,7 @@ def render(template: str, **values: Any) -> str:
 
 
 # templates replaced by the reminder registry (orch/reminders.py): a config that still overrides one loads, unused
-RETIRED_TEMPLATES = ("tag_reminder_manager", "tag_reminder_critic", "tag_reminder_worker")
+RETIRED_TEMPLATES = ("tag_reminder_manager", "tag_reminder_critic", "tag_reminder_worker", "manager_direct_voice")
 
 DEFAULT_TEMPLATES: Dict[str, str] = {
     # the auditor (managed mode): the digest of the last stretch of rounds; its system prompt says what to do with it
@@ -273,6 +273,11 @@ About your question:
 If this changes what {{worker}} should do, say what (and update your `<plan>` if it changes the steps). If it
 changes your verdict, end with a new `<verdict>`.
 """,
+    # added to critic_answer while the critic's last review has not reached the worker yet
+    "critic_answer_pending": "{{worker}} has not received your last review yet. If this changes what they should do, "
+                             "write the whole instruction as it should now read: it replaces that review, so they get "
+                             "one instruction. If nothing changes for them, write nothing outside the tags and the "
+                             "review goes out as it was.",
     "critic_report": """\
 {{human_messages}}
 
@@ -379,11 +384,11 @@ The repository is at `{{cwd}}`.
 
 {{feedback}}
 """,
-    "worker_timeout": "Your last turn ran past the time limit and was stopped. Check where things stand (running "
-                      "jobs, logs, partial results) before you continue.",
+    "worker_timeout": "Your last turn ran past the time limit and was stopped. Check where things stand (the jobs "
+                      "you started, logs, partial results) before you continue.",
     "milestone_fresh": "We are starting a new part of the work, so this is a fresh conversation. Everything done so "
-                       "far is in the repository at `{{cwd}}`: read the relevant files, logs and any running jobs "
-                       "before you change anything, and carry on from there.",
+                       "far is in the repository at `{{cwd}}`: read the project files and logs you need, and check the "
+                       "background jobs you started for this work, before you change anything; then carry on from there.",
     # the decisions register: everything settled so far, given in full when a milestone starts
     "decisions_intro": "Decisions so far. They are binding; where two say different things, the later one holds. "
                        "The list is kept up to date in `{{path}}`.",
@@ -417,10 +422,11 @@ step and the standing rules. The repository is at `{{cwd}}`.
     "decisions_intro_worker": "Decisions so far. They are binding; where two say different things, the later one holds.",
     "turn_interrupted": "Your last turn was cut off when the run was restarted, so here is the same message "
                         "again. Pick up from where you got to rather than starting over: check what you already "
-                        "did (files, running jobs, logs) and don't restart a job that is still running.",
+                        "did (files, the jobs you started, logs) and don't restart a job that is still running.",
     "backend_switched": "You are taking over this work from a colleague, so this is your first message here. "
-                        "Everything done so far is in the repository at `{{cwd}}`: read the current files "
-                        "(and any logs or running jobs) before you change anything, and carry on from there.",
+                        "Everything done so far is in the repository at `{{cwd}}`: read the current project files "
+                        "(and the logs and background jobs of this work) before you change anything, and carry on "
+                        "from there.",
     # relayed answers (put in front of the agent's next message)
     "relay_answer_manager": "About your question ({{question}}): {{answer}}",
     "relay_answer_critic": "My answer about \"{{question}}\": {{answer}}",
@@ -441,13 +447,6 @@ step and the standing rules. The repository is at `{{cwd}}`.
     # added to a critic review or instruction that carries a message from me (not on every turn)
     "critic_reply_routing": "If I asked you something, answer it inside `<message to=\"you\">…</message>`; text outside "
                             "tags goes to {{worker}}.",
-    # board chat with the manager (round turns get the protocol reminder at intervals instead)
-    "manager_direct_voice": """\
-When writing to {{critic}}, speak as "I" and address them as "you". Present instructions, questions and decisions
-as your own. Keep my identity, our conversation and your role out of that message; do not attribute requests to
-a user, manager or anyone above you. Ask for explanations as "Please explain this to me". Keep your reply to me separate
-from the message you send to {{critic}}.
-""",
     "urgent_resume": "I stopped you mid-turn for this, because it can't wait until you finish:\n\n{{note}}\n\n"
                      "Take it into account from here. Anything you were running in the foreground was ended; check "
                      "where it got to before you rely on it. Then finish the request you were working on, and reply "

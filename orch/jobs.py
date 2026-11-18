@@ -26,6 +26,9 @@ _SHELL = re.compile(r"^-?(\S*/)?(zsh|bash|sh|dash|ksh|fish)(\s+-\S+)*\s*$")
 # their launcher, so they are reparented to init and look detached. They are the editor's, never the worker's.
 _EDITOR = re.compile(r"\.vscode-server/|\.vscode/extensions/|\.cursor-server/|Visual Studio Code|Code Helper|"
                      r"Cursor Helper|JetBrains|--clientProcessId=|language-features|language-server")
+# The processes that run the team itself (`python -m orch run . --serve`, the `orch` script, its hooks): tooling, never
+# a job, and never shown to an agent in a job list.
+_ORCH = re.compile(r"(^|\s)-m\s+orch([\s.]|$)|(^|[\s/])orch(\s|$)|[/\s]orch/hooks/|\borch\.hooks\.")
 
 
 def snapshot() -> Dict[int, Proc]:
@@ -123,10 +126,15 @@ def is_shell(command: str) -> bool:
     return bool(_SHELL.match((command or "").strip()))
 
 
+def is_orch(command: str) -> bool:
+    """One of the processes that run the team (see _ORCH)."""
+    return bool(_ORCH.search(command or ""))
+
+
 def is_tool(command: str) -> bool:
-    """Not a job: a bare shell, or an editor's helper process (see _EDITOR)."""
+    """Not a job: a bare shell, an editor's helper process (see _EDITOR) or one of orch's own processes."""
     cmd = command or ""
-    return is_shell(cmd) or bool(_EDITOR.search(cmd))
+    return is_shell(cmd) or bool(_EDITOR.search(cmd)) or is_orch(cmd)
 
 
 _WAITER = re.compile(r"\bkill\s+-0\s+\d+|\b(while|until)\b.*\bsleep\s+\d")
@@ -165,8 +173,8 @@ def detect(before: Dict[int, Proc], workspaces: Iterable[str], ignore: Iterable[
     if not before:
         return []
     after = snapshot() if after is None else after
-    me = os.getpid()
-    new = {p: v for p, v in after.items() if p not in before and p != me}
+    mine = {os.getpid(), os.getppid()}  # orch itself and what launched it are never a job
+    new = {p: v for p, v in after.items() if p not in before and p not in mine}
     if not new:
         return []
     roots = [os.path.realpath(w) for w in workspaces if w]

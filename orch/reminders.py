@@ -15,6 +15,7 @@ In the project config (any agent.yaml, or ``controller:`` of a config file)::
         text: "Name the file behind every number you report."
         to: [worker]
         random: [3, 8]
+      chat_voice: {every: 5}       # board chat reminders (`only: [chat]`) count chat messages; the first gets it
 
 ``reminders: false`` turns them all off. The older ``tag_reminder: <chance>`` still works: it sets the protocol
 reminder's schedule (0 turns it off). Texts may use {{critic}} and {{worker}} (the display names); a reminder for the
@@ -56,6 +57,12 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         },
     },
     "report_length": {"to": ["worker"], "every": 3, "text": "Keep the report short; put details in files."},
+    # board chat with the manager (replaces the fixed manager_direct_voice block on every chat message)
+    "chat_voice": {
+        "to": ["manager"], "every": 3, "only": ["chat"],
+        "text": {"manager": "In a message to {{critic}}, write as \"I\" and give everything as your own; keep me, "
+                            "our conversation and your role out of it, and your reply to me outside that tag."},
+    },
     GOLDEN_BOARD: {"to": ["all"], "every": 10, "text": ""},  # placeholder until the golden board exists (B3)
 }
 
@@ -141,8 +148,8 @@ def parse(raw: Any, tag_reminder: Optional[float] = None, where: str = "reminder
         if isinstance(v, str):
             v = {"text": v}
         if not isinstance(v, dict):
-            raise ReminderError(f"{w}: settings (text, to, every / random) or false")
-        unknown = set(v) - {"text", "to", "every", "random", "skip", "enabled"}
+            raise ReminderError(f"{w}: settings (text, to, every / random, skip, only) or false")
+        unknown = set(v) - {"text", "to", "every", "random", "skip", "only", "enabled"}
         if unknown:
             raise ReminderError(f"{w}: unknown keys: {', '.join(sorted(unknown))}")
         if v.get("enabled") is False:
@@ -167,8 +174,25 @@ def parse(raw: Any, tag_reminder: Optional[float] = None, where: str = "reminder
         else:
             text = str(text).strip()
         out.append({"id": rid, "text": text, "to": _targets(spec.get("to")), **_schedule(spec, w),
-                    "skip": [str(x) for x in (spec.get("skip") or [])]})
+                    "skip": [str(x) for x in (spec.get("skip") or [])],
+                    "only": [str(x) for x in (spec.get("only") or [])]})
     return out
+
+
+def applies(rem: Dict[str, Any], purpose: str) -> bool:
+    """Does this reminder go with a turn of this purpose? `skip` leaves purposes out; `only` limits it to some
+    (e.g. `only: [chat]`: board chat messages, which are not round turns)."""
+    if purpose in rem.get("skip", ()):
+        return False
+    return not rem.get("only") or purpose in rem["only"]
+
+
+def chat_due(rem: Dict[str, Any], n: int) -> bool:
+    """For board chat, counted by the chat messages of the agent's current session (n: 0 for the first): the first
+    message always gets it, then every `every`-th (with `random: [lo, hi]`, every lo-th). Board chat keeps no counters
+    of its own, so the count comes from the chat log."""
+    step = int(rem.get("every") or (rem.get("random") or [1])[0] or 1)
+    return n % max(1, step) == 0
 
 
 def text_for(rem: Dict[str, Any], role: str) -> str:

@@ -153,7 +153,7 @@ backend_options:
   # everything it needs is in the digest orch sends; no files, no tools
   disallowed_tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
 timeout: 900
-audit_every: 10             # rounds between audits, plus one when the run ends (0 = only `orch audit`)
+audit_every: 10             # rounds between audits, plus one when the run ends (0 = no automatic audits, not even the final one; only `orch audit`)
 audit_points: 5             # at most this many points per audit
 """
 

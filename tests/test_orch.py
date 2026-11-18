@@ -753,7 +753,7 @@ class TestManaged(unittest.TestCase):
                 time.sleep(0.05)
         self.assertIn("These are the real labels.", seen[0])
         self.assertIn("not by your earlier recommendation", seen[0])
-        self.assertIn('speak as "I" and address them as "you"', seen[0])
+        self.assertIn('write as "I" and give everything as your own', seen[0])  # chat_voice: first chat message
 
     def test_claude_can_skip_my_hooks(self):
         from orch.backends import ClaudeBackend, TurnRequest
@@ -1950,7 +1950,8 @@ class TestProjectFolder(unittest.TestCase):
         critic.memory_files = [str(d / "agents/critic/notes.md")]  # explicit memory notes are still injected
         self.assertTrue(critic.current_system_prompt().endswith("Things to keep in mind:\n\nBritish spelling."))
         dsp = mon.agent("worker").current_system_prompt()  # the worker knows only "me": no other roles, no framework
-        self.assertNotRegex(dsp.lower(), r"critic|manager|orch\b|agents")
+        # the `.orch/` folder is named only as tooling to ignore (a path, as role_view_checks allows)
+        self.assertNotRegex(dsp.lower().replace("`.orch/`", ""), r"critic|manager|orch\b|agents")
         (d / "agents/worker/system_prompt.md").write_text("You are {{worker}}; {{critic}} reviews you.")
         wsp = load_config(str(d)).monitors[0].agent("worker").current_system_prompt()
         self.assertTrue(wsp.startswith("You are the worker; the critic reviews you.\n\n# How we work"), wsp[:120])

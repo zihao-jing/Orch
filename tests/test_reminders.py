@@ -76,7 +76,7 @@ class TestConfig(unittest.TestCase):
 
     def test_defaults(self):
         r = self.rems({"tag_reminder": None})
-        self.assertEqual(set(r), {"concise", "protocol", "report_length", R.GOLDEN_BOARD})
+        self.assertEqual(set(r), {"concise", "protocol", "report_length", "chat_voice", R.GOLDEN_BOARD})
         self.assertEqual(r["protocol"]["random"], [3, 10])
         self.assertEqual(r["report_length"]["to"], ["worker"])
         self.assertEqual(r["report_length"]["every"], 3)

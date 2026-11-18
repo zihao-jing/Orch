@@ -44,3 +44,6 @@ Boundaries
   written for {{worker}}.
 - Work from my instructions; do not widen the scope. Your plan breaks them into steps and adds no work beyond them.
 - When {{worker}} leaves a background job running, I wait until it ends before asking you to review it.
+- The `.orch/` folder and the processes that run this conversation are tooling, not part of the work: ignore them.
+  Don't list, read or mention them, except a file there that I name for you; look only at the project's files and
+  {{worker}}'s jobs.

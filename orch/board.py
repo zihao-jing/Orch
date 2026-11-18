@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from . import reminders as REM
 from . import routing as RT
 from .backends import TurnRequest, run_variants
 from .config import MonitorConfig
@@ -409,6 +410,9 @@ class Board:
             except Exception as e:  # pragma: no cover
                 text = f"({e})"
             problems = self._pass_on(a, text or "", cid) if status == "ok" else []
+            seen = RT.tooling_mentions(text or "", a.name, rd) if status == "ok" else []
+            if seen:  # a warning on the board: the critic and the worker are told to ignore orch's tooling
+                problems.append(f"mentions the tooling that runs it: {'; '.join(seen[:3])}")
             _append(rd / "chat.jsonl", {"id": cid, "role": "agent", "who": a.name, "with": a.name, "status": status,
                                         "text": text, "ts": now_iso(), "session_id": new_sid, "cost": cost,
                                         **({"problems": problems} if problems else {})})
@@ -468,6 +472,7 @@ class Board:
         elif not sid:
             return {"error": f"{mgr.called} has not started yet; try again in a moment"}
         cid = f"chat-{len(last) + 1:03d}-{int(time.time())}"
+        n_chat = sum(1 for r in last if r.get("role") == "human" and not r.get("with") and (r.get("ts") or "") > since)
         tag = {"qid": qid, "settle": True} if settle else ({"qid": qid} if qid else {})
         _append(rd / "chat.jsonl", {"id": cid + "-q", "role": "human", "text": shown, "ts": now_iso(), **tag})
         _append(rd / "chat.jsonl", {"id": cid, "role": "manager", "status": "running", "ts": now_iso(), **tag})
@@ -477,11 +482,9 @@ class Board:
             try:
                 with self._chat_lock, agent_lock(rd, mgr.name):
                     prompt = message
-                    if self.mon.controller.protocol:
-                        critic = (self.mon.by_role("verifier") or [mgr])[0]
-                        note = render(self.mon.controller.templates["manager_direct_voice"], critic=critic.called).strip()
-                        if note:
-                            prompt += f"\n\n<system-reminder>\n{note}\n</system-reminder>"
+                    if self.mon.controller.protocol:  # the chat reminders due (orch/reminders.py, `only: [chat]`)
+                        for note in self._chat_reminders(mgr, n_chat):
+                            prompt = REM.append(prompt, note)
                     key = (((read_json(rd / "state.json", {}) or {}).get("sessions") or {}).get(mgr.name)
                            or {}).get("session_key")
                     res = run_variants(mgr, TurnRequest(
@@ -508,6 +511,20 @@ class Board:
 
         threading.Thread(target=work, daemon=True).start()
         return {"id": cid}
+
+    def _chat_reminders(self, a: Any, n: int) -> List[str]:
+        """Texts of the reminders for board chat (`only: [chat]`) due at this agent's n-th chat message of its session
+        (0: the first, which always gets them)."""
+        role = REM.ROLE_OF.get(a.role, "")
+        critic = (self.mon.by_role("verifier") or [a])[0]
+        workers = self.mon.by_role("worker")
+        out = []
+        for rem in self.mon.controller.reminders:
+            text = REM.text_for(rem, role)
+            if text and rem.get("only") and REM.applies(rem, "chat") and REM.targets(rem, a.name, role) \
+                    and REM.chat_due(rem, n):
+                out.append(render(text, critic=critic.called, worker=workers[0].called if workers else "").strip())
+        return out
 
     def _pass_on(self, a: Any, text: str, cid: str) -> List[str]:
         """The <message> blocks of a chat reply, by the sender's role view (orch/routing.py), as notes in inbox/:
@@ -630,7 +647,7 @@ def _message_log(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any
             status=t.get("status"), turn=t.get("turn_id"))
 
     for ln in _lines(rd / "events.jsonl"):  # warnings
-        if '"route_problem"' not in ln:
+        if '"route_problem"' not in ln and '"tooling_mention"' not in ln:
             continue
         try:
             ev = json.loads(ln)

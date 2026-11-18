@@ -224,7 +224,7 @@ class ControllerConfig:
     accept_pattern: str = r"DECISION:\s*\**\s*ACCEPT"
     revise_pattern: str = r"DECISION:\s*\**\s*REVISE"
     # ---- the auditor (an agent with role: auditor): reads how the agents talk, never the task
-    audit_every: int = 10  # rounds between audits (0 = only `orch audit`); one more when the run ends
+    audit_every: int = 10  # rounds between audits, plus one when the run ends (0 = none of them; only `orch audit`)
     audit_points: int = 5  # at most this many points per audit
     # managed mode: an agent's session open in a terminal (orch/hooks/terminal_relay.py) holds its turns; a mark
     # with no activity for this many seconds is stale (a crashed terminal) and orch continues the session

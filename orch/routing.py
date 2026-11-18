@@ -7,8 +7,9 @@ The ledger (`state["messages"]`) holds one entry per message:
 
     sent        recorded and on its way: waiting for the recipient's next prompt
     held        not delivered, with a reason: an address the sender may not use, the recipient's session open in a
-                terminal (it goes out when the terminal closes), or held by design (`by_design`: e.g. the critic's
-                checklist, which the worker never sees)
+                terminal (it goes out when the terminal closes), held by design (`by_design`: e.g. the critic's
+                checklist, which the worker never sees), or a note up with nothing to decide (`next_turn`: it starts
+                no turn and is delivered in the manager's next regular turn)
     delivered   seen in the recipient's actual prompt (`turn`, `how`: prompt / cut in / live)
     superseded  replaced by a newer message from the same sender before it was delivered (`by`)
 
@@ -32,6 +33,7 @@ from .recorder import now_iso
 MAY_ADDRESS = {"manager": ("verifier", "worker"), "verifier": ("worker", "manager"), "worker": ()}
 # sender role -> recipient roles it directs (its messages to them supersede its older waiting ones)
 DIRECTS = {"manager": ("verifier", "worker"), "verifier": ("worker",)}
+NEXT_TURN = "waits for next turn"  # a note up with nothing to decide: held until the manager's next regular turn
 MAX_HOPS = 2  # a message written in a turn that a message started counts one hop more; past this it waits
 
 
@@ -75,6 +77,30 @@ def split_reply(text: str, sender: Any, agents: List[Any]) -> Tuple[List[Dict[st
     return out, bad
 
 
+# Mentions of the tooling that runs the team, in a critic's or worker's reply (design principle 3: it is hidden from
+# them). The bare word "orch" (not ".orch/" or a longer word), and paths into ".orch/" other than the files orch hands
+# the agent itself (its own folder under .orch/agents/, the decisions list).
+_ORCH_WORD = re.compile(r"(?<![\w./-])orch(?![\w-])", re.I)
+_ORCH_PATH = re.compile(r"\S*\.orch/\S*")
+
+
+def tooling_mentions(text: str, agent: str = "", run_dir: Any = None) -> List[str]:
+    """What a reply says about orch itself: its run folder, a `.orch/` path, or the word ([] when nothing)."""
+    text = text or ""
+    out: List[str] = []
+    if run_dir and str(run_dir) in text:
+        out.append(str(run_dir))
+    for m in _ORCH_PATH.finditer(text):
+        p = m.group(0).lstrip("`'\"([<").rstrip("`'\")]>,;:.")
+        if (agent and f".orch/agents/{agent}/" in p) or p.endswith("decisions.md") or any(x in p for x in out):
+            continue
+        out.append(p)
+    rest = _ORCH_PATH.sub(" ", text)
+    for m in _ORCH_WORD.finditer(rest):
+        out.append("…" + " ".join(rest[max(0, m.start() - 30):m.end() + 30].split()) + "…")
+    return list(dict.fromkeys(out))
+
+
 class Ledger:
     """The message ledger in a run's state (`state["messages"]`)."""
 
@@ -109,7 +135,8 @@ class Ledger:
     def seen(self, to: str, prompt: str, turn: str, how: str = "prompt") -> List[Dict[str, Any]]:
         """Mark every waiting message to `to` that this prompt (or cut-in note) carries as delivered."""
         hay, out = flat(prompt), []
-        for m in self.waiting(to):
+        later = [m for m in self.rows if m["to"] == to and m["status"] == "held" and m.get("next_turn")]
+        for m in self.waiting(to) + later:
             if carries(hay, m.get("text") or m.get("body") or ""):
                 self.mark(m, "delivered", turn=turn, how=how, delivered_at=now_iso())
                 out.append(m)

@@ -28,5 +28,7 @@ Boundaries
   asked, and no notes, status or backup files unless asked.
 - Settled decisions and approved settings stay as they are; describe a needed change and wait for an answer.
 - Anything that costs money or runs long: a hard cap, every call logged, a small pilot first. Never start the same
-  job twice; check what is already running.
+  job twice; check which of the jobs you started are still running.
+- The `.orch/` folder and the processes that run this conversation are tooling, not part of the work: ignore them.
+  Don't list, read or mention them; look only at the project's files and the jobs you started.
 - If a message says your last turn was cut off or ran out of time, check what you already did before continuing.

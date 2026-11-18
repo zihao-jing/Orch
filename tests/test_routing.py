@@ -69,9 +69,10 @@ class TestRouting(unittest.TestCase):
 
     # ---- board chat replies reach their recipient without waiting for a round; idle recipients are activated
 
-    def test_a_critic_chat_note_up_starts_an_idle_managers_turn(self):
+    def test_a_critic_chat_note_up_with_a_question_starts_an_idle_managers_turn(self):
         rec, mon = self._done_run()
-        b, cid = self._chat(rec, mon, "critic", 'Fine.\n<message to="Alex">The tables need a source column.</message>')
+        b, cid = self._chat(rec, mon, "critic", 'Fine.\n<message to="Alex">The tables need a source column. '
+                                               '<question>Add it to all tables? A) Yes (default) B) No</question></message>')
         r = _runner(mon, rec)
         r.activate("wait")
         ts = turns(rec)
@@ -93,9 +94,11 @@ class TestRouting(unittest.TestCase):
         crit = next(t for t in ts if t["purpose"] == "incoming" and t["agent"] == "critic")
         self.assertIn("Use short tables.", crit["input"])
         self.assertNotRegex(crit["input"], r"(?i)\b(manager|orch|board|Alex)\b")
-        self.assertTrue(any(t["agent"] == "boss" and t["purpose"] == "incoming" and "I will." in t["input"]
-                            for t in ts))  # the critic's answer to its user starts the manager's turn
+        # the critic's answer has nothing for the manager to decide: it waits for the manager's next regular turn
+        self.assertFalse(any(t["agent"] == "boss" and t["purpose"] == "incoming" for t in ts))
         L = r.ledger.rows
+        up = next(m for m in L if m["source"] == crit["turn_id"] and m["to"] == "boss")
+        self.assertEqual((up["status"], up["reason"]), ("held", "waits for next turn"))
         self.assertEqual(next(m for m in L if m["source"] == cid)["status"], "delivered")
         w = next(m for m in L if m["source"] == crit["turn_id"] and m["to"] == "writer")
         self.assertEqual((w["status"], list(w["carrier"])), ("sent", ["wm"]))  # a worker gets it at its next turn
@@ -197,10 +200,10 @@ class TestRouting(unittest.TestCase):
         crit = _last(rec, "critic")
         self.assertNotIn("Use long tables.", crit["input"])
         self.assertEqual([L[k]["status"] for k in ("terminal-b", "terminal-c")], ["delivered", "delivered"])
-        # a note up is never superseded
+        # a note up is never superseded (and, with nothing to decide, waits for the manager's next turn)
         r.route_text(critic, '<message to="Alex">one</message>', "c1", "terminal")
         r.route_text(critic, '<message to="Alex">two</message>', "c2", "terminal")
-        self.assertEqual([m["status"] for m in r.ledger.rows if m["source"] in ("c1", "c2")], ["sent", "sent"])
+        self.assertEqual([m["status"] for m in r.ledger.rows if m["source"] in ("c1", "c2")], ["held", "held"])
 
     def test_the_kickoff_instruction_supersedes_a_message_written_with_the_plan(self):
         # live run: the manager put an instruction for the critic in its plan reply, then wrote the real one at

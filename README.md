@@ -185,8 +185,10 @@ a job twice and never keeps its turn open to wait (orch waits for its jobs betwe
 
 **Reminders.** Short `<system-reminder>` lines at the end of a turn's message, at intervals rather than every turn
 (`orch/reminders.py`): `concise` (all, every 3–6 turns), `protocol` (whom the agent may address and the tag form; all,
-every 3–10 turns at random), `report_length` (worker, every 3rd turn); `golden_board` is a placeholder for the golden
-board. Change them under `reminders:` in any agent.yaml; edits apply from the next turn:
+every 3–10 turns at random), `report_length` (worker, every 3rd turn), `chat_voice` (board chat with the manager:
+write to the critic as "I", keep the chat out of it; the first chat message of a session, then every 3rd);
+`golden_board` is a placeholder for the golden board. `only: [chat]` limits a reminder to board chat, where it counts
+chat messages instead of turns. Change them under `reminders:` in any agent.yaml; edits apply from the next turn:
 
 ```yaml
 reminders:
@@ -287,10 +289,18 @@ terminal, or *held by design*, e.g. the critic's checklist and verdict, which ne
   messages written in a round. A recipient in the middle of a turn gets it when that turn ends; an urgent message
   (`urgent="yes"`) cuts in. A turn started by a message can start one more; past that (two hops) messages wait for
   the next regular turn, so the manager and critic can't ping-pong. Workers are never started this way: their
-  messages reach the running turn live where the backend can, else their next turn.
+  messages reach the running turn live where the backend can, else their next turn. A note up from the critic to the
+  manager starts a turn only when it has something to decide (a `<question>`, a `<pause>`, or `urgent="yes"`);
+  otherwise it is **held** ("waits for next turn") and delivered in the manager's next regular turn.
+- **One instruction per step.** When the critic amends its review after the manager answers a question, and the
+  review has not reached the worker yet, the amended instruction replaces it (the worker gets one instruction); an
+  amend with nothing for the worker leaves the review as it was, and `additive="yes"` sends both.
 - **Supersede rule.** A message sent down (manager → critic or worker, critic → worker) replaces the same sender's
   older messages to the same recipient that are still waiting, unless it is marked `additive="yes"`. Blocks of one
   reply never replace each other; notes up and messages from people are always additive.
+- **Tooling stays hidden.** The critic and worker are told to ignore `.orch/` and the processes that run them; job
+  lists never include orch's own processes, and a critic or worker reply that mentions orch, the run folder or a
+  `.orch/` path (other than its own files) is flagged as a warning on the board.
 - **Worker in a board chat.** The worker's user in a chat is the person chatting, so its `<message>` tags go nowhere;
   each is listed under the reply and corrected in one line at its next turn (as for any bad address).
 - A `<question>` inside a message is delivered whole to the agent the message is for.
@@ -319,7 +329,8 @@ An agent with `role: auditor` (scaffolded by `orch init --project` in `agents/au
 `audit_every` rounds (default 10), and once more when the run ends, it reads a digest of what was passed between the
 agents and keeps a short list of findings in `agents/auditor/audit.md`: repetition, unneeded context, messages that
 crossed a boundary (leakage), turns that achieved nothing, roles doing each other's jobs. It never judges the task,
-and nothing it writes reaches the agents; the agents are not told it exists.
+and nothing it writes reaches the agents; the agents are not told it exists. `audit_every: 0` turns automatic audits
+off, the one at the end of the run included; `orch audit` still runs one on demand.
 
 The digest holds only the messages, already compared by orch: each message's size, the part that repeats what that
 agent was already sent, where each paragraph came from (another agent, the human, the manager's chat replies, or
