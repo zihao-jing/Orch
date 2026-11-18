@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .backends import StopRequested, TurnRequest, TurnResult, get_backend
-from .config import HOT_AGENT_FIELDS, AgentConfig, MonitorConfig, load_config
+from .config import HOT_AGENT_FIELDS, RUN_PROMPT_VARS, AgentConfig, MonitorConfig, load_config
 from .recorder import Recorder, now_iso, read_json
 from . import jobs as _jobs
 from . import tags as T
@@ -700,6 +700,9 @@ class MonitorRunner:
             note("gone", f"{agent.name} is not in the config any more; keeping its settings")
             return
 
+        for k in RUN_PROMPT_VARS:  # set by the run itself (the golden board's path), not by the config
+            if k in agent.prompt_vars and k not in new.prompt_vars:
+                new.prompt_vars[k] = agent.prompt_vars[k]
         changed = {f: (getattr(agent, f), getattr(new, f)) for f in HOT_AGENT_FIELDS
                    if getattr(agent, f) != getattr(new, f)}
         cold = [f.name for f in dataclasses.fields(AgentConfig)

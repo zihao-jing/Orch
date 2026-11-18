@@ -207,6 +207,11 @@ Please answer if you can, inside `<message to="{{critic}}">…</message>`. If on
 `<question>…</question>` (one per decision), and still give {{critic}} your best guess to work with until I reply.
 If the answer changes the work, update your `<state>`.
 """,
+    # B7: a question that came with a finished milestone: the review comes next; the next milestone starts afresh
+    "manager_question_before_report": """\
+{{critic}} has finished this milestone; its report comes to you next for your review. Answer only the question now:
+keep your scores, decision and the next milestone's instruction for the review.
+""",
     "manager_review": """\
 {{human_messages}}
 

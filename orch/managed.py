@@ -357,7 +357,7 @@ class ManagedRunner(MonitorRunner):
         if role == "manager" and self.st.get("night"):
             add("night_mode", self.mtpl("night_manager"))
         if (role == "critic" and purpose not in ("checkin", "report") and self.mon.controller.protocol
-                and any((self.st.get("fwd") or {}).get(agent.name) or [])):
+                and self.carries_from_user(agent)):
             add("reply_routing", self.mtpl("critic_reply_routing"))
         g = self.check_golden()
         if role == "manager" and g.get("prune_due"):  # once each time the board grows past its limit
@@ -380,6 +380,19 @@ class ManagedRunner(MonitorRunner):
             if R.due(counters, rem):
                 add(rem["id"], render(text, **self.names()))
         return prompt, sent
+
+    # notes for the critic that are observations, not its user writing to it: no "answer me in <message to=you>"
+    OBSERVATIONS = ("progress_check", "model_change")
+
+    def carries_from_user(self, agent: AgentConfig) -> bool:
+        """Whether the agent's waiting notes hold something from its user (a progress check report or a model-change
+        line does not: nothing in it asks for an answer)."""
+        waiting = [x for x in (self.st.get("fwd") or {}).get(agent.name) or [] if x]
+        if not waiting:
+            return False
+        seen = {m.get("text") for m in self.ledger.rows
+                if m.get("to") == agent.name and m.get("kind") in self.OBSERVATIONS}
+        return any(x not in seen for x in waiting)
 
     # ------------------------------------------------------------------ the golden board (orch/boards.py)
     # One project file of rules, preferences and key decisions; the manager owns it and edits it in place. Every agent
@@ -2796,7 +2809,10 @@ class ManagedRunner(MonitorRunner):
         if not q:
             mg["phase"] = mg.get("after") or "work"
             return None
-        r = self.say(self.manager, self.mtpl("manager_question", question=q["text"], human_messages=""), "answer")
+        prompt = self.mtpl("manager_question", question=q["text"], human_messages="")
+        if mg.get("after") == "report":  # the critic passed the milestone and asked: the review is the next turn
+            prompt = prompt.rstrip() + "\n\n" + self.mtpl("manager_question_before_report").strip()
+        r = self.say(self.manager, prompt, "answer")
         self.after_manager(r, parent=[q["id"]], relay=False)
         answer = self.critic_message(r, "answer")
         if self.open_qs(self.manager.name, "human") and any(q["id"] in x["parent"] for x in self.open_qs(self.manager.name)):
