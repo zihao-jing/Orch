@@ -1199,8 +1199,12 @@ class TestManaged(unittest.TestCase):
         self.assertEqual((old["status"], old["session_id"]), ("interrupted", "mock-abc"))
         redo = next(x for x in turns(rec3) if x["agent"] == "writer" and x["turn_id"] != "r001-t01-writer")
         self.assertEqual((redo["round"], redo["session_id"]), (1, "mock-abc"))  # same round, same session
-        self.assertIn("cut off when the run was restarted", redo["input"])
-        self.assertIn("Make the tables.", redo["input"])
+        # B7: the session has the cut-off message; only what is new since goes with "continue", nothing is resent
+        self.assertNotIn("cut off when the run was restarted", redo["input"])
+        self.assertNotIn(w["input"].strip()[:200], redo["input"])
+        self.assertIn("Make the tables.", redo["input"])  # not in the cut-off turn's message (a new instruction)
+        self.assertIn("\ncontinue", redo["input"])
+        self.assertEqual(redo["continues"], "r001-t01-writer")
         self.assertEqual(rec3.state["managed"]["milestones"][0]["rounds"], 2)  # as without the crash, not 3
         self.assertEqual(sorted({x["round"] for x in turns(rec3) if x["agent"] == "writer"}), [1, 2])
 
@@ -2388,6 +2392,7 @@ class TestFallback(unittest.TestCase):
         w = self._w1(rec)
         self.assertNotEqual(w[1]["session_id"], w[0]["session_id"])
         self.assertIn("taking over this work", w[1]["input"])
+        self.assertIn("on another provider", w[1]["session_reset"][0]["reason"])  # B7: the reset and why
         self.assertEqual(w[2]["model"], "mock")  # no cooldown: back on the primary
         self.assertNotEqual(w[2]["session_id"], w[1]["session_id"])  # whose provider can't continue the backup's
 

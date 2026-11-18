@@ -82,7 +82,8 @@ class TestRoleViews(unittest.TestCase):
         self.assertIn("was not delivered. Write to me directly", work[1]["input"])
         self.assertNotIn("not delivered", work[0]["input"])
         events = [json.loads(x) for x in (rec.run_dir / "events.jsonl").read_text().splitlines()]
-        self.assertEqual(sorted(e["agent"] for e in events if e["event"] == "route_problem"), ["critic", "writer"])
+        # (milestone 2 starts new critic and worker sessions, where the mock replies from the top again)
+        self.assertEqual(sorted({e["agent"] for e in events if e["event"] == "route_problem"}), ["critic", "writer"])
         self.assertIn('<message to="Taylor"> names no one it can write to; not sent',
                       (rec.run_dir / "progress.md").read_text())
 

@@ -28,7 +28,7 @@ MODES = ("pipeline", "llm", "managed")
 # Agent settings that take effect on the agent's next turn without restarting the run. Everything else
 # (prompts, memory, role, working folder, name) is read at start; a change there is reported, not applied.
 HOT_AGENT_FIELDS = ("backend", "backend_options", "env", "timeout", "retries", "fallback", "fallback_cooldown",
-                    "safety_timeout", "check_every", "check_session")
+                    "safety_timeout", "check_every", "check_session", "compact_between_steps")
 
 # B5: a turn that progress checks watch (a worker's, in managed mode) may run long; only this high limit stops it
 SAFETY_TIMEOUT = 28800.0  # 8 h
@@ -80,7 +80,9 @@ class AgentConfig:
     memory_heading: str = "Things to keep in mind:"
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
-    fresh_session: str = ""  # "milestone": start a new session when each milestone starts (managed mode)
+    # "milestone": a new session when each milestone starts (managed mode); "never": keep it; "" = the role's default
+    # (the critic and workers start each milestone fresh, the manager keeps its session)
+    fresh_session: str = ""
     state_file: str = ""  # managed mode: the agent's working state (agents/<name>/state.md in a project folder)
     # backup models, tried in order when a turn still fails after its retries: each is a dict with any of
     # label, backend, backend_options, env, retries (already merged with the primary's settings when loaded)
@@ -93,6 +95,16 @@ class AgentConfig:
     safety_timeout: Optional[float] = None
     check_every: Optional[float] = None
     check_session: str = ""
+    # B7: orch asks the CLI to compact this agent's session between steps of the critic's plan (never mid-task);
+    # compaction otherwise stays the CLI's own (e.g. Claude Code's auto-compact, `--autocompact` in extra_args)
+    compact_between_steps: bool = False
+
+    @property
+    def fresh_mode(self) -> str:
+        """When this agent starts a new session in managed mode: "milestone" or "" (never)."""
+        if self.fresh_session == "never":
+            return ""
+        return self.fresh_session or ("milestone" if self.role in ("verifier", "worker") else "")
 
     def turn_limit(self, watched: bool = False) -> float:
         """Seconds a turn may run before it is stopped. `safety_timeout` when set. Otherwise `timeout` keeps its
@@ -371,6 +383,12 @@ def _load_text_files(d: Dict[str, Any], base: Path, where: str) -> Dict[str, Any
     return d
 
 
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
 def _as_list(v: Any) -> List[str]:
     if v is None:
         return []
@@ -395,7 +413,7 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
     known = {"name", "role", "description", "system_prompt", "task", "backend", "backend_options",
              "working_dir", "timeout", "retries", "env", "reviews", "feedback_to", "display_name",
              "memory_files", "memory_heading", "fresh_session", "state_file", "fallback", "fallback_cooldown",
-             "safety_timeout", "check_every", "check_session"}
+             "safety_timeout", "check_every", "check_session", "compact_between_steps"}
     unknown = set(merged) - known
     if unknown:
         raise ConfigError(f"{where} ({name}): unknown keys: {', '.join(sorted(unknown))}")
@@ -437,11 +455,12 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
         system_prompt_path=sp_path,
         memory_files=[_expand(x, base) for x in _as_list(merged.get("memory_files"))],
         memory_heading=str(merged.get("memory_heading", AgentConfig.memory_heading) or ""),
-        fresh_session="" if fresh == "never" else fresh,
+        fresh_session=fresh,
         state_file=_expand(merged["state_file"], base) if merged.get("state_file") else "",
         safety_timeout=safety or None,
         check_every=every,
         check_session=session,
+        compact_between_steps=_as_bool(merged.get("compact_between_steps", False)),
     )
 
 

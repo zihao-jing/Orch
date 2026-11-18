@@ -136,6 +136,16 @@ def provider_error(res: TurnResult) -> str:
     return truncate((text.strip().splitlines() or [""])[0], 300)
 
 
+def _cut_input(sess: Dict[str, Any], t: Dict[str, Any]) -> str:
+    """What the session holds of a cut-off turn's message (a cut-off "continue" still holds the message before it)."""
+    before = (sess.get("cut_off") or {}).get("input") or "" if t.get("continues") else ""
+    return (before + "\n\n" + (t.get("input") or "")).strip()
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text or "").split())
+
+
 LARGE_TEXT = 50_000  # a prompt or reply longer than this is flagged in the progress log (never cut)
 
 
@@ -279,9 +289,10 @@ class MonitorRunner:
             was = sess.get("backend")
             if not sess.get("session_id") or not was or was in {v.backend for v in a.variants()}:
                 continue  # still one of its models (a backup may be in use); a turn on another provider starts afresh
-            prev = {k: v for k, v in sess.items() if k != "previous"}
+            prev = {k: v for k, v in sess.items() if k not in ("previous", "resets", "cut_off")}
             self.rec.update_session(a.name, session_id=None, turns=0, backend=a.backend,
-                                    previous=(sess.get("previous") or []) + [prev])
+                                    previous=(sess.get("previous") or []) + [prev], cut_off=None)
+            self.note_session(a.name, f"backend changed ({was} → {a.backend})", previous=prev.get("session_id"))
             note = self.tpl("backend_switched", agent=a.called, cwd=a.working_dir).strip()
             q = self.st.setdefault("fwd", {}).setdefault(a.name, [])
             cut = render(self.mon.controller.templates.get("turn_interrupted", "")).strip()
@@ -289,7 +300,7 @@ class MonitorRunner:
             if note:
                 q.insert(0, note)
             # a turn cut off on the old backend is re-sent in full on the new one, not resumed
-            self.rec.event("backend_switched", agent=a.name, old=was, new=a.backend, session_id=sess.get("session_id"))
+            self.rec.event("backend_switched", agent=a.name, old=was, new=a.backend, session_id=prev.get("session_id"))
             self.rec.progress(f"🔁 **{a.name}** moved from `{was}` to `{a.backend}`; it starts a new session")
             self.log(f"{a.name}: backend {was} → {a.backend}, starting a new session")
         self.rec.save()
@@ -444,12 +455,14 @@ class MonitorRunner:
             reset_at = (self.st["sessions"].get(agent.name) or {}).get("reset_at") or ""
             if sid and reset_at and reset_at >= (t.get("started_at") or ""):
                 sid = None  # the agent was reset after this turn: start fresh, as the reset asked
+            reached = bool(sid) and self._reached_session(agent, t)
             if sid:
                 sess = self.st["sessions"].get(agent.name) or {}
                 rec.update_session(agent.name, session_id=sid, backend=agent.backend, role=agent.role,
-                                   turns=int(sess.get("turns", 0)) + 1, last_turn=t["turn_id"], last_status="interrupted")
+                                   turns=int(sess.get("turns", 0)) + 1, last_turn=t["turn_id"], last_status="interrupted",
+                                   cut_off={"turn": t["turn_id"], "input": _cut_input(sess, t)} if reached else None)
                 note = self.mon.controller.templates.get("turn_interrupted", "")
-                if note:
+                if note and not reached:  # not sure the message got there: it is sent again, with a note
                     self.st.setdefault("fwd", {}).setdefault(agent.name, []).insert(0, render(note).strip())
             rec.event("turn_recovered", turn=t["turn_id"], agent=agent.name, session_id=sid)
             rec.progress(f"↻ {agent.name}'s turn `{t['turn_id']}` was cut off by the restart; "
@@ -496,6 +509,31 @@ class MonitorRunner:
 
     def cut_short_note(self, agent: AgentConfig) -> str:
         return self.tpl("urgent_cut_short").strip()
+
+    def _reached_session(self, agent: AgentConfig, t: Dict[str, Any]) -> bool:
+        """Did a cut-off turn's message reach its session? Then the session already holds it (Claude Code writes the
+        prompt to the transcript before it starts work), and the turn is resumed with "continue", not sent again.
+        Evidence: the backend reported anything for the turn (the live log), or a Claude transcript starts with it."""
+        try:
+            if any(ln.strip() for ln in (self.rec.run_dir / "live" / f"{t['turn_id']}.jsonl")
+                   .read_text(encoding="utf-8").splitlines()):
+                return True
+        except OSError:
+            pass
+        return bool((t.get("output") or "").strip()) or bool(self._claude_session(agent, t))
+
+    def note_session(self, agent: str, reason: str, change: str = "reset", **info: Any) -> None:
+        """A session reset (or another change to an agent's session) and why: kept on the session until its next
+        turn records it (`session_reset` in the turn record), logged as an event and shown on the board as a small
+        system line."""
+        entry = {"reason": reason, "change": change, "at": now_iso(), **{k: v for k, v in info.items() if v is not None}}
+        with self.rec.lock:
+            s = self.st["sessions"].setdefault(agent, {"session_id": None, "turns": 0})
+            s.setdefault("resets", []).append(entry)
+        self.rec.event("session_note", agent=agent, **entry)
+        icon = {"compact": "🗜", "model": "🔀"}.get(change, "↺")
+        self.rec.progress(f"{icon} {agent}: " + (reason if change != "reset" else f"new session ({reason})"))
+        self.rec.save()
 
     def _live_session(self, turn_id: str) -> Optional[str]:
         try:
@@ -705,6 +743,7 @@ class MonitorRunner:
             raise StopRequested()
         self.refresh_agent(agent)
         rec = self.rec
+        base = prompt
         updates = rec.pending_worker_messages(agent.name) if agent.role == "worker" else []
         if updates:
             prompt = "\n\n".join(m["message"] for m in updates) + "\n\n" + prompt
@@ -717,15 +756,23 @@ class MonitorRunner:
         late = "\n\n".join(x for x in fwd if x)
         if late:
             prompt = f"{late}\n\n{prompt}" if prompt.strip() else late
-        prompt, reminders = self.add_reminders(agent, prompt, purpose)  # last, so the message ends with them
+        sess = self.st["sessions"].get(agent.name) or {}
+        sid = sess.get("session_id")
+        cut = sess.get("cut_off") if sid else None
+        new: List[str] = []
+        if cut:  # B7: the session already has the cut-off turn's message: "continue", plus only what is new since
+            had = _norm(cut.get("input") or "")
+            new = [x.strip() for x in [m["message"] for m in updates] + fwd + [base] if x.strip() and _norm(x) not in had]
+            prompt = "\n\n".join(new + [self.tpl("turn_continue").strip() or "continue"])
+        reminders: List[str] = []
+        if not cut or new:
+            prompt, reminders = self.add_reminders(agent, prompt, purpose)  # last, so the message ends with them
         if reminders:
             extra = {**(extra or {}), "reminders": reminders}
             rec.save()  # the reminder counters
         if len(prompt) > LARGE_TEXT:
             rec.progress(f"⚠ {agent.name}: a large prompt for `{rnd}` ({len(prompt):,} characters)")
         seq = seq or rec.next_seq(rnd)
-        sess = self.st["sessions"].get(agent.name) or {}
-        sid = sess.get("session_id")
         record: Dict[str, Any] = {
             "turn_id": rec.turn_id(rnd, seq, agent.name),
             "round": rnd, "seq": seq, "agent": agent.name, "role": agent.role, "purpose": purpose,
@@ -735,6 +782,14 @@ class MonitorRunner:
             "system_prompt": agent.current_system_prompt(), "input": prompt, "output": "",
             **(extra or {}),
         }
+        resets_before, terminal_before = list(sess.get("resets") or []), sess.get("terminal_use")
+        resets = [x for x in resets_before if x.get("change") != "model"]
+        if resets:  # why this turn starts a new (or compacted) session: recorded with the turn
+            record["session_reset"] = resets
+        if cut:
+            record["continues"] = cut.get("turn")
+        if sid and sess.get("terminal_use"):  # turns typed in a terminal report no cost; this turn's increase has them
+            record["cost_includes_terminal"] = sess["terminal_use"]
         rec.write_turn(record)  # relayed messages stay queued until the turn ends, so a restart re-sends them
         self.on_prompt(agent, record["turn_id"], prompt, "prompt")
         for m in updates:
@@ -743,7 +798,10 @@ class MonitorRunner:
         def message_status(ident: str, status: str, details: Dict[str, Any]) -> None:
             rec.worker_message_status(ident, status, delivery_turn=record["turn_id"], **details)
 
+        reached: List[bool] = []  # the backend reported something in this attempt: the message is in the session
+
         def live_event(ev: Dict[str, Any]) -> None:
+            reached.append(True)
             if ev.get("k") == "input_accepted":
                 for m in updates:
                     message_status(m["id"], "accepted", {"via": "prompt"})
@@ -755,6 +813,13 @@ class MonitorRunner:
                                    session_key=v.session_key, model=v.label)
             rec.live(record["turn_id"], ev)
         self.log(f"r{rnd} ▶ {agent.name} ({purpose}{', resume ' + sid[:8] if sid else ', new session'})")
+        if sid and sess.get("model") and agent.variants() and sess["model"] != agent.variants()[0].label \
+                and sess.get("session_key") == agent.variants()[0].session_key and not self.start_variant(agent, len(agent.variants())):
+            # the model changed in the config; the session goes on (same provider), and the turn says so
+            record["model_change"] = {"from": sess["model"], "to": agent.variants()[0].label}
+            rec.event("session_note", agent=agent.name, change="model", at=now_iso(),
+                      reason=f"model changed ({sess['model']} → {agent.variants()[0].label}); same session")
+            rec.progress(f"🔀 {agent.name}: model changed ({sess['model']} → {agent.variants()[0].label}); same session")
         t0 = time.monotonic()
         res: TurnResult = TurnResult("error", "", sid)
         attempts: List[Dict[str, Any]] = []
@@ -769,7 +834,7 @@ class MonitorRunner:
                                                else str(sess.get("backend")))
         v = chain[vi]
         backend = get_backend(v.backend)
-        attempt, urgent_send, entering = 0, "", True
+        attempt, urgent_send, entering, got_there = 0, "", True, False
         last_pe = ""  # the provider's message from the last attempt, if it refused the request
         while True:
             if entering:  # the primary model, or a backup taking over this turn
@@ -780,20 +845,33 @@ class MonitorRunner:
                 record.update(backend=v.backend, model=v.label, endpoint=host or None,
                               cost_basis=cost_basis(v.backend, [str(v.options.get("model") or "")], host))
                 if sid and v.session_key != sess_key:  # another provider can't continue this session: a new one
-                    sid = None
+                    old_sid, sid = sid, None
+                    if cut:  # the new session has none of it: the whole message goes again
+                        prompt = "\n\n".join(x for x in [m["message"] for m in updates] + fwd + [base] if x.strip())
+                        cut = None
                     note = self.fresh_session_note(agent)
                     if note:
                         prompt = f"{note}\n\n{prompt}"
+                    why = {"reason": f"backup {v.label} on another provider", "change": "reset", "at": now_iso(),
+                           "previous": old_sid}
+                    record.setdefault("session_reset", []).append(why)
                     record.update(session_id=None, resumed_session=False, input=prompt)
+                    rec.event("session_note", agent=agent.name, **why)
+                    rec.progress(f"↺ {agent.name}: new session ({why['reason']})")
                     rec.write_turn(record)
                 sess_key = v.session_key
             send = prompt
             if urgent_send:  # an urgent message cut in: the same session carries on with it
                 send, urgent_send = urgent_send, ""
+            elif attempt and sid and got_there:  # B7: the session has the message; don't send it again
+                send = self.tpl("turn_continue").strip() or "continue"
+                if not last_pe and res.status == "error" and (res.output or "").strip() == "" and res.exit_code == 0:
+                    send = self.tpl("turn_unusable", reason=reason or res.status).strip() or send
             elif attempt and res.session_id and not last_pe:  # correction: tell the agent what went wrong in its own session
                 send = (f"Your previous reply was unusable ({reason or res.status}). "
                         f"Please redo the last request and reply with text.\n\n{prompt}")
             hit.clear()
+            reached.clear()
             req = TurnRequest(
                 agent=agent.name, role=agent.role, prompt=send, system_prompt=record["system_prompt"],
                 session_id=sid, cwd=agent.working_dir, timeout=agent.turn_limit(self.watched(agent)),
@@ -809,6 +887,7 @@ class MonitorRunner:
                 res = backend.run(req, cancel)
             except Exception:
                 res = TurnResult("error", "", sid, None, traceback.format_exc(), [], {})
+            got_there = bool(reached) or bool((res.output or "").strip()) or bool(res.meta)
             pe = provider_error(res)
             if pe:  # the provider's refusal is not the agent's reply: it stays out of the turn's output
                 res = dataclasses.replace(res, output="")
@@ -895,6 +974,11 @@ class MonitorRunner:
                                session_key=v.session_key, model=v.label,
                                turns=int(sess.get("turns", 0)) + 1, last_turn=record["turn_id"],
                                last_status=res.status)
+        if res.status != "stopped":  # recorded with this turn; a stopped turn is recovered (and records them) later
+            now = self.st["sessions"].get(agent.name) or {}  # (notes made during the turn stay for the next one)
+            rec.update_session(agent.name, cut_off=None,
+                               resets=[x for x in now.get("resets") or [] if x not in resets_before],
+                               terminal_use=None if now.get("terminal_use") == terminal_before else now.get("terminal_use"))
         rec.write_turn(record)
         try:
             self.snapshot(record)

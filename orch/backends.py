@@ -197,6 +197,11 @@ class Backend:
     def run(self, req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:  # pragma: no cover
         raise NotImplementedError
 
+    def compact(self, req: TurnRequest, should_stop: Callable[[], bool]) -> Optional[TurnResult]:
+        """Compact an existing session between turns (B7), or None when this backend can't do it on request.
+        Compaction is otherwise the CLI's own (auto-compact)."""
+        return None
+
     @staticmethod
     def first_prompt_with_system(req: TurnRequest) -> str:
         if req.session_id is None and req.system_prompt:
@@ -276,6 +281,20 @@ class ClaudeBackend(Backend):
             status = "error"
             meta["parse_error"] = "could not parse claude JSON output"
         return TurnResult(status, output, sid, rc, err, _redact(cmd, req), meta)
+
+    COMPACT = "/compact"
+
+    def compact(self, req: TurnRequest, should_stop: Callable[[], bool]) -> Optional[TurnResult]:
+        """Claude Code runs its slash commands in print mode too: `claude -p --resume <id>` with `/compact` as the
+        prompt summarises the session in place (same session id; the transcript gets a compact boundary, as with
+        auto-compact). `compact_instructions` in backend_options are passed after it (`/compact <instructions>`).
+        A session can't be compacted with `--disable-slash-commands` in extra_args."""
+        if not req.session_id:
+            return None
+        extra = str(req.options.get("compact_instructions") or "").strip()
+        r = TurnRequest(**{**req.__dict__, "prompt": f"{self.COMPACT} {extra}".strip(), "on_event": None,
+                           "poll_messages": None, "on_message": None})
+        return self.run(r, should_stop)
 
 
 def _short_input(inp: Any) -> str:
@@ -615,10 +634,46 @@ class MockBackend(Backend):
     native_system_prompt = True
     _counts: Dict[str, int] = {}
     _lock = threading.Lock()
+    _running: Dict[str, int] = {}  # sessions with a turn running now
+    compacts: List[Dict[str, Any]] = []  # tests: every compact request, and whether a turn was running in that session
+
+    def compact(self, req: TurnRequest, should_stop: Callable[[], bool]) -> Optional[TurnResult]:
+        if not req.session_id or req.options.get("no_compact"):
+            return None
+        with self._lock:
+            self.compacts.append({"agent": req.agent, "session_id": req.session_id, "at": time.time(),
+                                  "mid_turn": bool(self._running.get(req.session_id))})
+            meta = self._cost(req, req.session_id)
+        return TurnResult("ok", "", req.session_id, 0, "", ["mock", "/compact"], meta)
+
+    def _cost(self, req: TurnRequest, sid: str) -> Dict[str, Any]:
+        """`cost_per_turn`: report a running session total like Claude Code (every use of the session adds to it)."""
+        c = req.options.get("cost_per_turn")
+        if not isinstance(c, (int, float)):
+            return {}
+        k = f"{sid}:cost"
+        self._counts[k] = self._counts.get(k, 0) + 1
+        return {"total_cost_usd": round(self._counts[k] * float(c), 6)}
 
     def run(self, req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
+        with self._lock:
+            sid = req.session_id or f"mock-{uuid.uuid4().hex[:12]}"
+            self._running[sid] = self._running.get(sid, 0) + 1
+        try:
+            res = self._run(req, should_stop, sid)
+        finally:
+            with self._lock:
+                self._running[sid] -= 1
+        if res.status == "ok":
+            with self._lock:
+                cost = self._cost(req, sid)
+            if cost:
+                res = TurnResult(res.status, res.output, res.session_id, res.exit_code, res.stderr, res.command,
+                                 {**res.meta, **cost})
+        return res
+
+    def _run(self, req: TurnRequest, should_stop: Callable[[], bool], sid: str) -> TurnResult:
         o = req.options
-        sid = req.session_id or f"mock-{uuid.uuid4().hex[:12]}"
         with self._lock:
             n = self._counts.get(sid, 0) + 1
             self._counts[sid] = n

@@ -391,6 +391,8 @@ The repository is at `{{cwd}}`.
     "milestone_fresh": "We are starting a new part of the work, so this is a fresh conversation. Everything done so "
                        "far is in the repository at `{{cwd}}`: read the project files and logs you need, and check the "
                        "background jobs you started for this work, before you change anything; then carry on from there.",
+    "milestone_fresh_critic": "We are starting a new part of the work, so this is a fresh conversation. Everything done "
+                              "so far is in the repository at `{{cwd}}`; read what you need there.",
     # the decisions register: everything settled so far, given in full when a milestone starts
     "decisions_intro": "Decisions so far. They are binding; where two say different things, the later one holds. "
                        "The list is kept up to date in `{{path}}`.",
@@ -422,6 +424,11 @@ whatever settled matters the current step must keep to. The repository is at `{{
     "decisions_pointer": "Everything decided so far is in `{{path}}` (the later entry holds where two differ); look "
                          "one up there when you need it.",
     "decisions_intro_worker": "Decisions so far. They are binding; where two say different things, the later one holds.",
+    # B7: a turn cut off after its message reached the session (restart, crash, provider error): the session has the
+    # message, so it is resumed with this alone (plus anything new since)
+    "turn_continue": "continue",
+    # a turn that ended without a usable reply, in a session that has the message
+    "turn_unusable": "Your last reply came through empty ({{reason}}). Please answer my last message again, in text.",
     "turn_interrupted": "Your last turn was cut off when the run was restarted, so here is the same message "
                         "again. Pick up from where you got to rather than starting over: check what you already "
                         "did (files, the jobs you started, logs) and don't restart a job that is still running.",

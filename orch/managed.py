@@ -42,7 +42,7 @@ from . import reminders as R
 from . import routing as RT
 from . import tags as T
 
-from .backends import StopRequested
+from .backends import StopRequested, TurnRequest, TurnResult, get_backend
 from .config import CHECK_EVERY, MANAGER_CHECK_EVERY, PROMPTS_DIR, AgentConfig
 from .controller import MonitorRunner, checklist_state, parse_options, relayed, resolve_choice, strip_checklist, truncate
 from .report import CHECKBOX
@@ -256,6 +256,9 @@ class ManagedRunner(MonitorRunner):
         agent's session is open in a terminal, and every <message> of its reply is routed (route_reply)."""
         self.hold_while_busy(agent)
         self.board_vars()
+        self.rec.charge_chats()  # board-chat turns so far are entries of their own (B7 cost attribution)
+        if agent.name in (self.mg.get("compact_due") or []) and agent.role != "monitor":
+            self.compact(agent, rnd)
         before = (self.st.get("golden") or {}).get("hash")
         r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
         if r.get("status") == "ok" and agent.role == "monitor":
@@ -642,8 +645,10 @@ class ManagedRunner(MonitorRunner):
         from .board import manager_chat_session
         since = (self.st["sessions"].get(agent.name) or {}).get("reset_at") or ""
         sid = manager_chat_session(rows, since, self.st, agent.name)
-        if sid and sid != (self.st["sessions"].get(agent.name) or {}).get("session_id"):
-            self.rec.update_session(agent.name, session_id=sid)
+        old = (self.st["sessions"].get(agent.name) or {}).get("session_id")
+        if sid and sid != old:
+            self.rec.update_session(agent.name, session_id=sid, cut_off=None)
+            self.note_session(agent.name, "a board chat continued in a new session", previous=old, session_id=sid)
 
     def switch_backends(self) -> None:
         """An agent moved to another backend starts a new session: with its handover notes (state file and what
@@ -969,8 +974,13 @@ class ManagedRunner(MonitorRunner):
                                   "its messages")
             elif d.get("event") == "end":
                 sid = d.get("session_id")
-                if sid and sid != (self.st["sessions"].get(a.name) or {}).get("session_id"):
-                    self.rec.update_session(a.name, session_id=sid)
+                old = (self.st["sessions"].get(a.name) or {}).get("session_id")
+                if sid and sid != old:
+                    self.rec.update_session(a.name, session_id=sid, cut_off=None)
+                    self.note_session(a.name, "the terminal session moved to a new session", previous=old,
+                                      session_id=sid)
+                # its turns there report no cost to orch; the next orch turn's increase includes them
+                self.rec.update_session(a.name, terminal_use=now_iso())
                 self.rec.progress(f"⌨ {a.called}'s terminal session closed; orch continues it")
             self.rec.event("terminal", agent=a.name, what=d.get("event"), session_id=d.get("session_id"))
         elif kind == "reply":
@@ -1440,6 +1450,10 @@ class ManagedRunner(MonitorRunner):
         if before is not None and done > before:
             mg["stall"] = 0
             mg["step_round"] = int(self.st.get("round", 0))
+            # B7: between steps (never mid-task), agents set to compact_between_steps compact before their next turn
+            due = [a.name for a in self.mon.agents if a.compact_between_steps and self.has_session(a)]
+            if due:
+                mg["compact_due"] = sorted(set(mg.get("compact_due") or []) | set(due))
             self.rec.event("plan_step", turn=r.get("turn_id"), done=done, total=total, next=cur)
             self.rec.progress(f"✓ step {done} of {total} done" + (f"; next: {_clip(cur, 160)}" if cur else ""))
 
@@ -1575,15 +1589,15 @@ class ManagedRunner(MonitorRunner):
             if a.role not in ("manager", "verifier", "worker"):
                 continue
             sess = self.st["sessions"].get(a.name) or {}
-            prev = {k: v for k, v in sess.items() if k != "previous"}
-            self.rec.update_session(a.name, session_id=None, turns=0, reset_at=now_iso(),
+            prev = {k: v for k, v in sess.items() if k not in ("previous", "resets", "cut_off")}
+            old = sess.get("session_id")
+            self.rec.update_session(a.name, session_id=None, turns=0, reset_at=now_iso(), cut_off=None,
                                     previous=(sess.get("previous") or []) + ([prev] if prev.get("session_id") else []))
-            fwd = [x for x in (self.st.setdefault("fwd", {}).get(a.name) or [])
-                   if x not in (HANDOVER, HANDOVER_TOP_DOWN)
-                   and not x.startswith(("Your last turn was cut off", "We are starting a new part", "You are taking over",
-                                         "This is a fresh conversation"))]
+            fwd = self.session_notes_dropped(a)
             self.st["fwd"][a.name] = [HANDOVER_TOP_DOWN if top_down else HANDOVER] + fwd  # written at its next turn
-            self.rec.event("session_reset", agent=a.name, session_id=sess.get("session_id"))
+            self.rec.event("session_reset", agent=a.name, session_id=old)
+            if old:
+                self.note_session(a.name, "sessions reset (refresh)", previous=old)
             done.append(a.name)
         if self.mg.get("fresh_for") is None:
             self.mg["fresh_for"] = self.mg.get("ms")  # no second fresh start for this milestone
@@ -1613,22 +1627,89 @@ class ManagedRunner(MonitorRunner):
         self.critic_asks(c, after="work")
         return None
 
+    # notes tied to an agent's old session (handovers, "you were cut off", a fresh-start line, a progress check of
+    # earlier work): a new session drops them
+    SESSION_NOTES = ("Your last turn was cut off", "We are starting a new part", "You are taking over",
+                     "This is a fresh conversation", "Your last turn ran past", "I ended your last turn early",
+                     "Progress check, ")
+
+    def session_notes_dropped(self, a: AgentConfig) -> List[str]:
+        q = self.st.setdefault("fwd", {}).get(a.name) or []
+        return [x for x in q if x not in (HANDOVER, HANDOVER_TOP_DOWN) and not x.startswith(self.SESSION_NOTES)]
+
     def fresh_sessions(self) -> None:
-        """Agents set to `fresh_session: milestone` start each milestone in a new session (once per milestone)."""
+        """B7. At a milestone start the critic and the workers start new sessions (`fresh_session`; "never" keeps
+        them): their system prompt and a short natural instruction, nothing pasted from earlier rounds. What holds
+        is on the golden board (its reminder comes with a new session's first message) and in the critic's checklist
+        file, which they read. The manager keeps its session (unless set to `fresh_session: milestone`)."""
         mg = self.mg
         if mg.get("fresh_for") == mg.get("ms"):
             return
         for a in self.mon.agents:
-            if a.fresh_session == "milestone" and self.has_session(a):
+            if a.fresh_mode == "milestone" and self.has_session(a):
                 sess = self.st["sessions"].get(a.name) or {}
-                prev = {k: v for k, v in sess.items() if k != "previous"}
-                self.rec.update_session(a.name, session_id=None, turns=0, previous=(sess.get("previous") or []) + [prev])
-                self.st.setdefault("fwd", {}).setdefault(a.name, []).insert(  # the worker: the critic's brief follows
-                    0, self.mtpl("milestone_fresh", cwd=a.working_dir).strip() if a.role == "worker" else HANDOVER)
-                self.rec.event("fresh_session", agent=a.name, milestone=mg.get("ms"), session_id=sess.get("session_id"))
+                prev = {k: v for k, v in sess.items() if k not in ("previous", "resets", "cut_off")}
+                old = sess.get("session_id")
+                self.rec.update_session(a.name, session_id=None, turns=0, cut_off=None,
+                                        previous=(sess.get("previous") or []) + [prev])
+                note = {"worker": "milestone_fresh", "verifier": "milestone_fresh_critic"}.get(a.role)
+                self.st["fwd"][a.name] = ([self.mtpl(note, cwd=a.working_dir).strip()] if note else [HANDOVER]) \
+                    + self.session_notes_dropped(a)  # the critic's brief, or the manager's kickoff, follows
+                self.rec.event("fresh_session", agent=a.name, milestone=mg.get("ms"), session_id=old)
+                self.note_session(a.name, f"milestone {mg.get('ms', 0) + 1} starts", previous=old)
                 self.log(f"{a.name}: fresh session for milestone {mg.get('ms', 0) + 1}")
         mg["fresh_for"] = mg.get("ms")
         self.rec.save()
+
+    def compact(self, agent: AgentConfig, rnd: int) -> None:
+        """B7: compact the agent's session before its next turn, between steps of the critic's plan (never mid-task:
+        the agent is idle and its lock is held). Claude Code: `/compact` in its resumed session; a backend that can't
+        compact on request (Codex) is skipped with one note. The compact is recorded as an entry of its own (its cost
+        too), and the next turn records the compact as its session reset."""
+        mg = self.mg
+        mg["compact_due"] = [x for x in mg.get("compact_due") or [] if x != agent.name]
+        self.rec.save()
+        sess = self.st["sessions"].get(agent.name) or {}
+        sid = sess.get("session_id")
+        if not sid:
+            return
+        chain = agent.variants()
+        v = next((x for x in chain if x.session_key == sess.get("session_key")), chain[0])
+        backend = get_backend(v.backend)
+        req = TurnRequest(agent=agent.name, role=agent.role, prompt="", system_prompt=agent.current_system_prompt(),
+                          session_id=sid, cwd=agent.working_dir, timeout=agent.timeout, options=v.options,
+                          env={**v.env, _jobs.TAG_VAR: _jobs.tag_for(self.rec.run_dir.name, agent.name)},
+                          context={"round": rnd, "purpose": "compact", "monitor": self.mon.name})
+        seq = self.rec.next_seq(rnd)
+        record: Dict[str, Any] = {
+            "turn_id": self.rec.turn_id(rnd, seq, agent.name), "round": rnd, "seq": seq, "agent": agent.name,
+            "role": agent.role, "purpose": "compact", "backend": v.backend, "model": v.label, "cwd": agent.working_dir,
+            "session_id": sid, "resumed_session": True, "status": "running", "started_at": now_iso(),
+            "input": "/compact", "output": "", "milestone": mg.get("ms", 0) if mg.get("milestones") else None}
+        t0 = time.monotonic()
+        with self.rec.agent_lock(agent.name):
+            try:
+                res = backend.compact(req, self.should_stop)
+            except Exception as e:
+                res = TurnResult("error", "", sid, None, f"{type(e).__name__}: {e}", [], {})
+        if res is None:
+            if not (self.st.get("compact_skipped") or {}).get(v.backend):
+                self.st.setdefault("compact_skipped", {})[v.backend] = True
+                self.rec.progress(f"🗜 {agent.called}: compact between steps is not available for `{v.backend}`; "
+                                  "its own context handling applies")
+                self.rec.event("compact_skipped", agent=agent.name, backend=v.backend)
+                self.rec.save()
+            return
+        record.update(status=res.status, output=res.output or "", meta=res.meta, command=res.command,
+                      stderr=(res.stderr or "")[-2000:], exit_code=res.exit_code, ended_at=now_iso(),
+                      duration_s=round(time.monotonic() - t0, 2), session_id=res.session_id or sid)
+        self.rec.write_turn(record)
+        if res.status == "ok":
+            if res.session_id and res.session_id != sid:
+                self.rec.update_session(agent.name, session_id=res.session_id)
+            self.note_session(agent.name, "compacted between steps", change="compact", turn=record["turn_id"])
+        else:
+            self.rec.progress(f"🗜 {agent.called}: compact between steps failed ({res.status}); the session goes on")
 
     @staticmethod
     def for_me(text: str) -> str:

@@ -206,6 +206,23 @@ def turn_cost_basis(t: Dict[str, Any]) -> str:
     return cost_basis(str(t.get("backend") or ""), list(ms), str(t.get("endpoint") or ""), str(t.get("stderr") or ""))
 
 
+def _chat_turns(run_dir: Path) -> List[Dict[str, Any]]:
+    """Finished board-chat turns (chat.jsonl): they run in the agents' own sessions."""
+    out = []
+    try:
+        lines = (run_dir / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return out
+    for ln in lines:
+        try:
+            c = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(c, dict) and c.get("role") in ("manager", "agent") and c.get("status") not in (None, "running"):
+            out.append(c)
+    return out
+
+
 def turn_costs(items: List[Dict[str, Any]], key: str = "cost") -> Optional[float]:
     """Each item's own cost, set in place under ``key``, and the total. Claude reports a resumed session's
     running total, so a turn costs the increase over that session's previous report."""
@@ -357,7 +374,9 @@ def render_run_report(run_dir: Path) -> str:
     every = [t for _, _, ts in rounds for t in ts]
     for t in every:
         t["_cost"] = (t.get("meta") or {}).get("total_cost_usd")  # running session totals; turn_costs takes the steps
-    total = turn_costs(every, "_cost")
+    # board-chat turns share the agents' sessions: each is its own entry, so a turn after a chat isn't charged for it
+    chats = [dict(c, _cost=c.get("cost")) for c in _chat_turns(run_dir)]
+    total = turn_costs(every + chats, "_cost")
     agents = sorted({str(t.get("agent")) for t in every})
     cards = [("status", pill(status)), ("mode", e(st.get("mode"))),
              ("round", f"{e(st.get('round'))} / {e(st.get('max_rounds'))}"),

@@ -603,7 +603,7 @@ function fold(t, defOpen){
       + routeCards(shown, rows, t.turn_id, text !== undefined);
   return `<details class="fold${to==='human'?' to-human':''}" data-t="${esc(t.turn_id)}"${open?' open':''}><summary>
     <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
-    <span class="pill">${esc(t.purpose)}</span>${(t.reminders&&t.reminders.length)?`<span class="ink2" title="Reminders added at the end of this message: ${esc(t.reminders.join(', '))}">↺ ${esc(t.reminders.join(', '))}</span>`:(t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':'')}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
+    <span class="pill">${esc(t.purpose)}</span>${(t.reminders&&t.reminders.length)?`<span class="ink2" title="Reminders added at the end of this message: ${esc(t.reminders.join(', '))}">↺ ${esc(t.reminders.join(', '))}</span>`:(t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':'')}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}${t.session_reset?`<span class="mute" title="This turn started a new or compacted session">↺ ${esc(t.session_reset)}</span>`:''}${t.continues?`<span class="mute" title="Resumed after the cut-off turn ${esc(t.continues)}">↻ continue</span>`:''}${t.model_change?`<span class="mute">🔀 ${esc(t.model_change.from)} → ${esc(t.model_change.to)}</span>`:''}
     ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
     ${t.model ? `<span class="mute mono" title="${t.cost_basis === 'estimate' ? 'cost is Claude Code\'s estimate, not the provider\'s price' : 'model'}">${esc(t.model)}${t.cost != null ? ' · ' + (t.cost_basis === 'estimate' ? '~' : '') + '$' + Number(t.cost).toFixed(2) : ''}</span>` : ''}
     ${routeChips(rows)}<span class="pv">${esc(run ? 'writing…' : headline(t.output))}</span></summary><div class="fb">${receivedLine(t.turn_id)}${heldLine(t.turn_id)}${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;
@@ -739,7 +739,7 @@ let chatWith = null;  // the agent name being talked to; null = the manager
 function talkable(){ return (D.agents||[]).filter(a => ['manager','verifier','worker'].includes(a.role)); }
 let msgFilter = 'all', msgPage = 15;  // how many of the filtered messages are shown; grows with "Show older"
 const openFeed = new Set();  // folded messages the reader opened (kept across the page's refreshes)
-const MSG_KINDS = {all: 'All', conversation: 'Conversations', transfer: 'Transfers', 'check-in': 'Check-ins', warning: 'Warnings'};
+const MSG_KINDS = {all: 'All', conversation: 'Conversations', transfer: 'Transfers', 'check-in': 'Check-ins', warning: 'Warnings', system: 'System'};
 function renderMessages(){  // every message the run passed on, newest first, folded and paged like the decisions
   const all = D.messages || [];
   setHTML($('mfilter'), Object.keys(MSG_KINDS).map(k => {
@@ -749,6 +749,8 @@ function renderMessages(){  // every message the run passed on, newest first, fo
   if (!rows.length){ setHTML($('messages'), '<div class="empty">No messages of this kind yet.</div>'); return; }
   const shown = rows.slice(0, msgPage), left = rows.length - shown.length;
   setHTML($('messages'), shown.map(m => {
+    if (m.kind === 'system')  // a session reset, compact or model change: one small line
+      return `<div class="mute" style="font-size:12px;padding:3px 0">${tm(m.ts)} · ${esc(m.from)} · ${esc(m.text)}</div>`;
     const id = m.id || `${m.ts}|${m.from}|${m.to}`;
     const tags = [m.kind, m.label, m.urgent ? '⚡ urgent' : '', m.status || ''].filter(Boolean).map(esc).join(' · ');
     const probs = (m.problems || []).map(p => `<div class="w" style="color:#b45309">⚠ ${esc(p)}</div>`).join('');

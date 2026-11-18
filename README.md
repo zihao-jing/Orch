@@ -68,8 +68,8 @@ of update for each piece:
 | `critic/state.md` | that standing instruction ("my standing instruction"), the critic's steps and current checklist (from its checklist file) | by orch, after every critic turn and every change of the manager's state |
 | `worker/state.md` | the worker's latest report | by orch, after every worker turn |
 
-Whenever an agent starts a fresh session (`orch reset-sessions`, a changed backend, or `fresh_session: milestone`
-for the manager or critic), its notes are built from its `state.md` and what happened since it was written, at the
+Whenever an agent starts a fresh session outside a milestone start (`orch reset-sessions`, a changed backend, or
+`fresh_session: milestone` for the manager), its notes are built from its `state.md` and what happened since it was written, at the
 moment its next turn starts; the golden board comes with that first message. The agents are not asked to read the files
 themselves: orch puts what they need into the message. You can edit any of them between turns: orch notices, and the agent's
 next turn starts with "I edited your working notes; they now read: …" (an edit of the manager's also updates the
@@ -107,7 +107,8 @@ backend: claude
 backend_options: {model: sonnet, effort: medium, permission_mode: auto}
 safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
 check_every: 20             # minutes between quick checks of a running turn or job (0 = off)
-fresh_session: milestone    # a new session for each milestone
+fresh_session: milestone    # a new session for each milestone (the default for the critic and workers; "never" keeps it)
+# compact_between_steps: true  # Claude Code: /compact between steps of the critic's plan (never mid-task)
 ```
 
 | You want to set… | Where |
@@ -120,7 +121,7 @@ fresh_session: milestone    # a new session for each milestone
 | Display names used in messages | `display_name:` in each `agent.yaml`; fills `{{manager}}`, `{{critic}}`, `{{worker}}` in the prompts |
 | Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `reminders` |
 | Rounds per milestone, checklist, check-ins, job waiting | `critic/agent.yaml`: `milestone_rounds`, `checklist`, `checklist_nudge`, `checkin_every`, `job_wait`, `job_ignore` |
-| Fresh sessions, saved versions of files | `worker/agent.yaml`: `fresh_session`, `snapshot` |
+| Fresh sessions, compacting, saved versions of files | `worker/agent.yaml` (or any agent's): `fresh_session`, `compact_between_steps`, `snapshot`; context length: `backend_options.extra_args: ["--autocompact", "400k"]` |
 | Progress checks: interval, turn limit | `worker/agent.yaml`: `check_every`, `safety_timeout`; `manager/agent.yaml`: `check_every` (its status lines) |
 | Who checks, and where | `monitor/agent.yaml` (model, tools, `check_session`); without it, `critic/agent.yaml`: `check_session` |
 | Where runs are recorded | `output_dir:` in any `agent.yaml` (default `.orch/runs`) |
@@ -243,10 +244,31 @@ when (S1, S2 …; where two say different things, the later one holds). It is a 
 board instead, which the manager keeps. The board shows it folded under the golden board. A run started before the
 register existed has it rebuilt from its history on resume.
 
-**Fresh worker sessions.** `fresh_session: milestone` on an agent starts it in a new session when each milestone
-starts; its work is in the files, and the critic's brief plus the golden board tell it what it needs. A long session
-re-reads its whole history on every step, so this keeps worker turns from getting slower and dearer as a run goes
-on. The manager and critic are best left in one session: they are cheap, and they need to remember the decisions.
+**Sessions and context.** At each milestone start the critic and the workers start new sessions (`fresh_session`:
+default `milestone` for them; `never` keeps the session): their system prompt and a short natural instruction ("We are
+starting a new part of the work…", then the manager's or the critic's instruction), nothing pasted from earlier rounds.
+What holds is on the golden board (sent with a new session's first message) and in the critic's checklist file,
+which the agents read. The manager keeps its session (unless set to `fresh_session: milestone`). Within a milestone
+the worker keeps its session across the steps of the critic's plan.
+
+Compaction is the CLI's job: Claude Code compacts on its own (set the window per agent with
+`backend_options.extra_args: ["--autocompact", "400k"]`); orch doesn't count context. `compact_between_steps: true`
+adds one explicit compact when a step of the critic's plan finishes, before the agent's next turn (never mid-task):
+Claude Code gets `/compact` as the prompt of `claude -p --resume <session>` (`backend_options.compact_instructions`
+are passed after it). It is recorded as a `compact` turn with its own cost. Codex and the other backends have no
+compact on request: the setting is skipped there with one note, and their own context handling applies.
+
+A turn cut off after its message reached the session (a restart, a crash, a provider error; Claude Code writes the
+prompt to the session before it starts work) is resumed with `continue`, plus only what is new since; the message is
+not sent again. When orch can't tell whether it arrived, the message is sent again with a note. Every session reset
+(milestone start, refresh, backend change, fallback to another provider, a board chat or terminal that moved the
+session) and every compact or model change is recorded with its reason in the next turn's record (`session_reset`,
+`model_change`) and in `events.jsonl` (`session_note`), and shown on the board as a small system line.
+
+**Cost per turn.** Claude Code reports a session's running total, so a turn's cost is the increase over the session's
+previous report. Board-chat turns run in the agents' own sessions and are entries of their own (`chat_costs` in
+`state.json`, `chat_cost` events), so the next orch turn is charged only its own. Turns typed in a terminal session
+report nothing to orch; the next orch turn's increase includes them (`cost_includes_terminal` in its record).
 
 **Pausing the whole run.** A pause stops the pipeline itself: no agent works and no rounds are spent until I
 continue it. It is for the point where everything the agents can do is done and the rest waits on people
@@ -426,8 +448,8 @@ orch audit .                           # audit the last audit_every rounds now (
   raised with `--max-rounds` stays when you resume without the flag; pass `--max-rounds` again to lower it.
 - **Changing models or backends mid-run** (for cost, or Codex ↔ Claude): edit the agent's `agent.yaml` and resume.
   A changed backend can't resume the old session, so the agent starts a new one with a handover note.
-- **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` sends it again in the same session,
-  so a restart costs at most one repeated turn. The cheapest moment is just after a worker turn ends with nothing
+- **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` continues it in the same session
+  with `continue` (the session has the message), so a restart costs at most part of one turn. The cheapest moment is just after a worker turn ends with nothing
   waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
 - **Cost.** Long sessions get dearer per turn because each turn re-reads the history: use `fresh_session:
   milestone` for workers, a cheaper model for the worker, and a low effort for the critic if the reviews stay good.

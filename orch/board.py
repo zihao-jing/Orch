@@ -303,7 +303,9 @@ class Board:
             out = t.get("output") or ""
             row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
                                          "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder", "reminders",
-                                         "cut_short", "interruptions")}
+                                         "cut_short", "interruptions", "continues", "model_change")}
+            row["session_reset"] = "; ".join(str(x.get("reason") or "") for x in t.get("session_reset") or []
+                                             if isinstance(x, dict)) or None
             row["output"] = out[:PREVIEW_CHARS]
             row["output_len"] = len(out)
             row["revise"] = bool(re.search(r"<decision>\s*REVISE", out, re.I))
@@ -661,12 +663,17 @@ def _message_log(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any
         add(t.get("started_at"), "check-in", who(t.get("agent")), who(mgr), full.get("output") or t.get("output"),
             status=t.get("status"), turn=t.get("turn_id"))
 
-    for ln in _lines(rd / "events.jsonl"):  # warnings
-        if '"route_problem"' not in ln and '"tooling_mention"' not in ln:
+    for ln in _lines(rd / "events.jsonl"):  # warnings, and session resets with their reasons (small system lines)
+        if '"route_problem"' not in ln and '"tooling_mention"' not in ln and '"session_note"' not in ln:
             continue
         try:
             ev = json.loads(ln)
         except json.JSONDecodeError:
+            continue
+        if ev.get("event") == "session_note":
+            what = {"compact": "session compacted", "model": "model changed"}.get(ev.get("change"), "new session")
+            add(ev.get("ts"), "system", who(ev.get("agent")), "", f"{what}: {ev.get('reason') or ''}".rstrip(": "),
+                label=ev.get("change") or "reset")
             continue
         add(ev.get("ts"), "warning", who(ev.get("agent")), "", ev.get("problem"))
 
@@ -1097,7 +1104,8 @@ def _lan_ip() -> str:
 
 def _turn_costs(turns: List[Dict[str, Any]], chat: List[Dict[str, Any]]) -> Optional[float]:
     """Each turn's own cost, in place, and the run's total (board chats share the manager's session)."""
-    return turn_costs(list(turns) + [c for c in chat if c.get("role") == "manager" and c.get("status") is not None])
+    return turn_costs(list(turns) + [c for c in chat if c.get("role") in ("manager", "agent")
+                                     and c.get("status") is not None])
 
 
 def page() -> str:

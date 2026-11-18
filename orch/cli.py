@@ -124,6 +124,7 @@ safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns ar
 check_every: 20             # minutes between quick checks of a running turn or background job (0 = off)
 retries: 1
 fresh_session: milestone    # a new session for each milestone: turns stay fast and cheap; the files carry the state
+# compact_between_steps: true  # Claude Code: /compact between steps of the critic's plan (never mid-task)
 # snapshot: [docs]          # folders whose every version is kept in the run log
 """,
         "agents/auditor/agent.yaml": AUDITOR_YAML,
