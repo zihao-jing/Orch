@@ -226,6 +226,9 @@ class ControllerConfig:
     # ---- the auditor (an agent with role: auditor): reads how the agents talk, never the task
     audit_every: int = 10  # rounds between audits (0 = only `orch audit`); one more when the run ends
     audit_points: int = 5  # at most this many points per audit
+    # managed mode: an agent's session open in a terminal (orch/hooks/terminal_relay.py) holds its turns; a mark
+    # with no activity for this many seconds is stale (a crashed terminal) and orch continues the session
+    terminal_busy_timeout: float = 3600.0
 
 
 @dataclass
@@ -409,7 +412,8 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "stop_on_error", "max_report_chars", "provider_retry_wait", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
-             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "reminders", "audit_every", "audit_points")
+             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "reminders", "audit_every", "audit_points",
+             "terminal_busy_timeout")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -534,7 +538,7 @@ def load_config(path: str) -> Config:
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
                       "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
-                      "reminders", "audit_every", "audit_points"}
+                      "reminders", "audit_every", "audit_points", "terminal_busy_timeout"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
@@ -573,6 +577,7 @@ def load_config(path: str) -> Config:
             job_ignore=[str(x) for x in (craw.get("job_ignore") or [])],
             audit_every=int(craw.get("audit_every", ControllerConfig.audit_every) or 0),
             audit_points=int(craw.get("audit_points", ControllerConfig.audit_points) or 5),
+            terminal_busy_timeout=float(craw.get("terminal_busy_timeout", ControllerConfig.terminal_busy_timeout) or 0),
             **{k: str(craw[k]) for k in ("question_pattern", "note_pattern", "accept_pattern", "revise_pattern")
                if craw.get(k)},
         )

@@ -7,7 +7,8 @@ an end; write them exactly as shown.
 Whom you write to
 - Text outside the tags is for me.
 - `<message to="{{critic}}">…</message>` is the only way anything reaches {{critic}}; text outside it never does.
-  Put everything for {{critic}} in one message, complete on its own, and say what it replaces.
+  Put everything for {{critic}} in one message, complete on its own, and say what it replaces. A new message
+  replaces one {{critic}} has not received yet; add `additive="yes"` to send it in addition instead.
 - `<message to="{{critic}}" urgent="yes">…</message>`: a check-in now. {{critic}} answers while the hands-on work
   and its jobs keep running; no review is triggered. If your message changes the work, {{critic}} passes the change
   on.

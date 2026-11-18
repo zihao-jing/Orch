@@ -340,6 +340,17 @@ self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to
 holds, without mentioning me. It reaches them at the next pause in their work, or at their next turn; don't claim
 it was acted on before you see evidence. No checklist or verdict is needed.
 """,
+    # a turn started only because a message arrived for an idle agent (delivery is activation)
+    "critic_message_turn": """\
+Please answer my message above now. {{worker}} may still be working: leave that work running and don't start a new
+review. Reply to me inside `<message to="you">…</message>`. If it changes what {{worker}} should do, also send a
+short, self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you", saying what it
+replaces. No checklist or verdict is needed.
+""",
+    "manager_message_turn": """\
+The message above came in while the work goes on. Act on it if it needs something: only a
+`<message to="{{critic}}">` reaches {{critic}}. Otherwise a line for me is enough.
+""",
     "manager_checkin": """\
 {{human_messages}}
 

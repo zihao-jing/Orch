@@ -263,6 +263,7 @@ orch stop .                                    # stops after terminating the cur
 orch run --resume --serve                      # continue the same run, same agent sessions
 orch reset-sessions .                          # with the run stopped: fresh conversations, same run state
 orch audit .                                   # how the agents talk: findings in agents/auditor/audit.md
+orch terminal .                                # the command that opens the manager's session in a terminal
 orch report .orch/runs                         # regenerate HTML
 ```
 
@@ -271,6 +272,46 @@ Pressing Ctrl-C in `orch run` stops cleanly: running agent processes are termina
 
 Only one `orch run` drives a run at a time: a second `--resume` on a run another process is driving says which
 process holds it and does nothing else (with `--serve` it still shows the board). Stop the first one to take over.
+
+### Message routing: every reply, delivery as activation
+
+Every reply is scanned for `<message to="…">`, whatever produced it: a turn of the run, a chat on the board, or the
+manager's session open in a terminal. Each message is recorded in the run's ledger (`state.json` → `messages`) and
+shown on the board with its status: **sent** (waiting), **delivered** (found in the recipient's actual prompt, or in a
+note that cut into its turn), **held** (with the reason: an address the sender may not use, the recipient open in a
+terminal, or *held by design*, e.g. the critic's checklist and verdict, which never go to the worker) or
+**superseded**.
+
+- **Delivery is activation.** A message for an idle manager or critic starts a short turn of its own (purpose
+  `incoming`): right away for a chat, terminal or note message; during a gate, a job wait or a worker's turn for
+  messages written in a round. A recipient in the middle of a turn gets it when that turn ends; an urgent message
+  (`urgent="yes"`) cuts in. A turn started by a message can start one more; past that (two hops) messages wait for
+  the next regular turn, so the manager and critic can't ping-pong. Workers are never started this way: their
+  messages reach the running turn live where the backend can, else their next turn.
+- **Supersede rule.** A message sent down (manager → critic or worker, critic → worker) replaces the same sender's
+  older messages to the same recipient that are still waiting, unless it is marked `additive="yes"`. Blocks of one
+  reply never replace each other; notes up and messages from people are always additive.
+- **Worker in a board chat.** The worker's user in a chat is the person chatting, so its `<message>` tags go nowhere;
+  each is listed under the reply and corrected in one line at its next turn (as for any bad address).
+- A `<question>` inside a message is delivered whole to the agent the message is for.
+
+**Talking to the manager in a terminal.** `orch terminal .` prints the command that resumes the manager's session
+(`orch terminal . critic` for another agent), with `ORCH_RUN_DIR`/`ORCH_AGENT` set. With the relay hook
+(`orch/hooks/terminal_relay.py`) installed, orch holds that agent's turns while the session is open, routes the
+`<message>` tags of each reply you get there, and continues the session when you close it; a mark with no activity
+for `controller.terminal_busy_timeout` seconds (default 3600) counts as stale. orch never edits your Claude settings:
+`orch terminal --hooks` prints the snippet to merge into `.claude/settings.local.json`:
+
+```json
+{"hooks": {
+  "SessionStart":     [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}],
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}],
+  "Stop":             [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}],
+  "SessionEnd":       [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}]
+}}
+```
+
+The hook does nothing in sessions outside an orch run or in the turns orch runs itself.
 
 ## The auditor: how the agents talk, not what they do
 
@@ -499,5 +540,7 @@ orch/recorder.py    run directory, state, events, turn and round records, inbox 
 orch/report.py      static HTML viewers
 orch/templates.py   all default prompts ({{goal}}, {{feedback}}, {{worker_reports}}, …)
 orch/audit.py       the auditor's digest (origins, repeats, relays, flags), its findings file, one audit
-orch/cli.py         orch init | validate | run | status | show | stop | inject | audit | report
+orch/routing.py     message routing: who may address whom, the message ledger, the supersede rule
+orch/hooks/         terminal_relay.py: Claude Code hook for an agent's session open in a terminal
+orch/cli.py         orch init | validate | run | status | show | stop | inject | audit | terminal | report
 ```

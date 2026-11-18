@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
@@ -35,6 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import audit as _audit
 from . import jobs as _jobs
 from . import reminders as R
+from . import routing as RT
 from . import tags as T
 
 from .backends import StopRequested
@@ -66,6 +68,14 @@ HANDOVER = "(handover notes: written when this agent's next turn starts)"
 HANDOVER_TOP_DOWN = "(handover notes for the top-down restart: written when this agent's next turn starts)"
 PLAN_STATUS = "(orch, from the critic's plan)"  # a check-in written by orch; only the newest one waits for the manager
 QUESTION_TAG = re.compile(r"<question>.*?</question>", re.S | re.I)  # a question block, removed from a forwarded note
+TERMINAL_HOLD = "its session is open in a terminal; delivered when the terminal closes"
+# purposes whose <message> blocks orch delivers itself; in the others a phase of the run carries the manager's
+# message to the critic (critic_message) and the critic's message to the worker (its feedback)
+SELF_DELIVERED = ("incoming", "ack")  # turns whose messages orch delivers itself (route_reply)
+CRITIC_TO_WORKER_PHASES = ("verify", "brief", "guidance", "amend")
+BY_DESIGN = {"checklist": "the critic's own checklist; the worker never sees it",
+             "plan": "the critic's own plan; the worker gets one step at a time",
+             "verdict": "the critic's verdict is for orch's gate, not for the worker"}
 
 
 def checklist_text(text: str) -> str:
@@ -235,10 +245,14 @@ class ManagedRunner(MonitorRunner):
 
     def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str, seq: Optional[int] = None,
              extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """One turn; the reminders due are added at the end of its message (add_reminders)."""
+        """One turn; the reminders due are added at the end of its message (add_reminders). It waits while the
+        agent's session is open in a terminal, and every <message> of its reply is routed (route_reply)."""
+        self.hold_while_busy(agent)
         r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
         if r.get("status") == "ok":
             self.check_addresses(agent, r.get("output") or "")
+            self.route_reply(agent, r)
+            self.rec.save()
         return r
 
     def add_reminders(self, agent: AgentConfig, prompt: str, purpose: str) -> Tuple[str, List[str]]:
@@ -278,8 +292,7 @@ class ManagedRunner(MonitorRunner):
         """Hook for the golden board (batch B3): the text of its periodic reminder. Nothing until it exists."""
         return ""
 
-    # whom each role may write to with <message to="…"> (besides to="you", its own user)
-    MAY_ADDRESS = {"manager": ("verifier", "worker"), "verifier": ("worker", "manager"), "worker": ()}
+    MAY_ADDRESS = RT.MAY_ADDRESS  # whom each role may write to with <message to="…"> (besides to="you", its own user)
 
     def bad_addresses(self, agent: AgentConfig, text: str) -> List[str]:
         """The <message to="…"> blocks of a reply that can't be delivered: no such recipient, the sender itself,
@@ -298,7 +311,11 @@ class ManagedRunner(MonitorRunner):
 
     def check_addresses(self, agent: AgentConfig, text: str) -> None:
         """An invalid address is reported on the board and corrected in one line at the sender's next turn."""
-        bad = self.bad_addresses(agent, text)
+        self.correct(agent, self.bad_addresses(agent, text))
+
+    def correct(self, agent: AgentConfig, bad: List[str]) -> None:
+        """Report addresses that can't be delivered (a round turn, a board chat or the terminal) and queue the
+        one-line correction for the sender's next turn."""
         if not bad:
             return
         role = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(agent.role)
@@ -324,16 +341,6 @@ class ManagedRunner(MonitorRunner):
         if r["status"] != "ok":
             if self.mon.controller.stop_on_error:
                 raise _Failed(f"{agent.name} {purpose} turn ended with status {r['status']}")
-        if agent.role == "verifier":
-            for note in self.notes_up(r.get("output") or ""):
-                note = QUESTION_TAG.sub("", note).strip()  # a question in it goes to the manager at once (critic_asks)
-                if note:
-                    self.forward(self.manager, self.mtpl("relay_note_up", note=note).strip())
-            if purpose == "checkin" and r["status"] == "ok":
-                sent, _problems = T.routes(r.get("output") or "", agent.name, self.mon.agents)
-                for target, body, _urgent in sent:  # invalid addresses: check_addresses after the turn
-                    if target.role == "worker":
-                        self.rec.queue_worker_message(target.name, self.for_worker(body), r["turn_id"], agent.name)
         return r
 
     # ------------------------------------------------------------------ working state (agents/<name>/state.md)
@@ -520,6 +527,362 @@ class ManagedRunner(MonitorRunner):
     def forward(self, agent: AgentConfig, text: str) -> None:
         if text:
             self.st.setdefault("fwd", {}).setdefault(agent.name, []).append(text)
+
+    # ------------------------------------------------------------------ message routing (orch/routing.py)
+    # Every reply is scanned: round turns here (route_reply), board chats and the terminal through inbox/. Each
+    # message gets a ledger entry; delivery is confirmed against the recipient's actual prompt (on_prompt).
+    # Delivery is activation: a message for an idle manager or critic starts a short turn of its own (activate).
+
+    @property
+    def ledger(self) -> RT.Ledger:
+        return RT.Ledger(self.st)
+
+    def roles(self) -> Dict[str, str]:
+        return {a.name: a.role for a in self.mon.agents}
+
+    def route_reply(self, agent: AgentConfig, r: Dict[str, Any]) -> None:
+        """Record (and, where no phase of the run carries it, deliver) each <message> of a turn's reply; log the
+        blocks held by design and the addresses that can't be delivered."""
+        out, tid, purpose = r.get("output") or "", r.get("turn_id") or "", r.get("purpose") or ""
+        L = self.ledger
+        hops = int(getattr(self, "_hops", 0) or 0) + 1 if purpose == "incoming" else 1
+        mine = {"source": tid, "via": "round", "purpose": purpose}
+        blocks = T.blocks(out, "message")
+        sent, _bad = RT.split_reply(out, agent, self.mon.agents)
+        by_i = {s["i"]: s for s in sent}
+        for i, (attrs, body) in enumerate(blocks):
+            to = (attrs.get("to") or "").strip()
+            if T.addressed(attrs, "you") and agent.role != "verifier":
+                continue  # the sender's own user reads it where it was written
+            note_up = agent.role == "verifier" and (T.addressed(attrs, "you") or (i in by_i and by_i[i]["target"].role == "manager"))
+            if note_up and (body or "").strip():
+                self.deliver(agent, self.manager, body, self.mtpl("relay_note_up", note=body).strip(), i=i, hops=hops,
+                             activate=(True if purpose == "incoming" else "wait"), urgent=T.urgent(attrs), **mine)
+                continue
+            s = by_i.get(i)
+            if s is None:
+                L.add(agent.name, to, body or "", status="held", i=i, reason=f'<message to="{to}"> names no one '
+                      f"{agent.called} can write to; not sent", **mine)
+                continue
+            t = s["target"]
+            if agent.role == "manager" and t.role == "verifier" and purpose not in SELF_DELIVERED:
+                self.supersede(L.add(agent.name, t.name, body, i=i, urgent=s["urgent"], additive=s["additive"],
+                                     carrier={"phase": purpose}, **mine))
+            elif agent.role == "verifier" and t.role == "worker" and purpose in CRITIC_TO_WORKER_PHASES:
+                self.supersede(L.add(agent.name, t.name, body, self.for_worker(body), i=i, urgent=s["urgent"],
+                                     additive=s["additive"], carrier={"phase": purpose}, **mine))
+            else:  # a message turn's messages start their recipient's turn; a phase's wait for a pause in the run
+                self.deliver(agent, t, body, i=i, hops=hops, urgent=s["urgent"], additive=s["additive"],
+                             activate=True if purpose == "incoming" else "wait", **mine)
+        if agent.role == "verifier" and purpose in CRITIC_TO_WORKER_PHASES:
+            for w in self.workers:
+                for name, why in BY_DESIGN.items():
+                    for body in T.bodies(out, name):
+                        L.add(agent.name, w.name, body, status="held", by_design=True, kind=name,
+                              reason="held by design: " + why, **mine)
+
+    def deliver(self, sender: AgentConfig, target: AgentConfig, body: str, text: str = "", source: str = "",
+                i: Optional[int] = None, via: str = "round", purpose: str = "", hops: int = 1, urgent: bool = False,
+                additive: bool = False, activate: Any = True) -> Dict[str, Any]:
+        """Send a message orch carries itself: to a worker as an update (live into its running turn where the
+        backend can, else at the start of its next turn), urgent ones as a note that cuts into the running turn,
+        the rest queued for the recipient's next turn, which starts now if it is idle (activate)."""
+        L = self.ledger
+        if not text:
+            text = self.for_worker(body) if target.role == "worker" and sender.role == "verifier" else \
+                (self.mtpl("relay_note", note=body).strip() or body)
+        m = L.add(sender.name, target.name, body, text, source=source, i=i, via=via, purpose=purpose, hops=hops,
+                  urgent=urgent, additive=additive, activate=(activate if hops <= RT.MAX_HOPS else False))
+        if urgent:
+            name = self.note_file({"to": [target.name], "message": text, "from": sender.name, "urgent": True,
+                                   "source": source, "msg": m["id"]})
+            m["carrier"] = {"inbox": name}
+        elif target.role == "worker":
+            wm = self.rec.queue_worker_message(target.name, text, source or m["id"], sender.name)
+            m["carrier"] = {"wm": wm["id"]}
+        else:
+            self.forward(target, text)
+            m["carrier"] = {"fwd": True}
+        self.supersede(m)
+        return m
+
+    def note_file(self, data: Dict[str, Any]) -> str:
+        inbox = self.rec.run_dir / "inbox"
+        inbox.mkdir(exist_ok=True)
+        name = f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() // 1000 % 1000000:06d}-orch-note.json"
+        (inbox / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return name
+
+    def supersede(self, new: Dict[str, Any]) -> None:
+        """A newer message down replaces the sender's older waiting ones to the same recipient (orch/routing.py)."""
+        L = self.ledger
+        for old in L.older_to_replace(new, self.roles()):
+            c = old.get("carrier") or {}
+            if "inbox" in c:
+                p = self.rec.run_dir / "inbox" / c["inbox"]
+                if not p.exists():
+                    continue  # already taken into a prompt
+                (p.parent / "superseded").mkdir(exist_ok=True)
+                os.replace(p, p.parent / "superseded" / p.name)
+            elif "wm" in c:
+                row = next((w for w in self.st.get("worker_messages") or [] if w["id"] == c["wm"]), None)
+                if not row or row["status"] not in ("queued", "deferred"):
+                    continue
+                self.rec.worker_message_status(row["id"], "superseded", by=new["id"])
+            elif "fwd" in c:
+                q = (self.st.get("fwd") or {}).get(old["to"]) or []
+                if old["text"] not in q:
+                    continue
+                q.remove(old["text"])
+            who = next((a.called for a in self.mon.agents if a.name == new["from"]), new["from"])
+            why = f"replaced by a newer message from {who} before it was delivered"
+            L.mark(old, "superseded", by=new["id"], reason=why)
+            self.rec.event("message_superseded", turn=old.get("source"), to=old["to"], by=new.get("source"),
+                           msg=old["id"], by_msg=new["id"], reason=why)
+            self.rec.progress(f"↷ {old['id']} to {old['to']} superseded by {new['id']}")
+
+    def drop_phase_messages(self, turn: str, to: str, reason: str, by: str = "") -> None:
+        """Messages a phase was going to carry that the run no longer passes on (e.g. at a gate)."""
+        for m in self.ledger.rows:
+            if m.get("source") == turn and m["to"] == to and m["status"] == "sent" and "phase" in (m.get("carrier") or {}):
+                self.ledger.mark(m, "superseded", reason=reason, **({"by_turn": by} if by else {}))
+
+    def scan_inbox(self, only: Optional[str] = None) -> None:
+        """Record the notes waiting in inbox/ (board chat replies, the terminal, my own notes). A note from the
+        critic or the manager to a worker becomes an update for the worker, like a check-in's."""
+        inbox = self.rec.run_dir / "inbox"
+        try:
+            files = sorted((p for p in inbox.iterdir() if p.is_file() and not p.name.startswith(".")),
+                           key=lambda p: (p.stat().st_mtime_ns, p.name))  # oldest first: newer ones supersede
+        except OSError:
+            return
+        L = self.ledger
+        known = {(m.get("carrier") or {}).get("inbox") for m in L.rows}
+        changed = False
+        for p in files:
+            if p.name in known:
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+            data: Dict[str, Any] = {"message": text}
+            if p.suffix == ".json":
+                try:
+                    data = json.loads(text) if text.strip() else {}
+                except json.JSONDecodeError:
+                    continue  # still being written
+                if not isinstance(data, dict) or data.get("kind"):
+                    continue
+            msg = str(data.get("message", "")).strip()
+            if not msg:
+                continue
+            to = data.get("to") or None
+            to = [to] if isinstance(to, str) else to
+            names = to or [self.manager.name]
+            if only is not None and only not in names:
+                continue
+            frm = str(data.get("from") or "human")
+            sender = next((a for a in self.mon.agents if a.name == frm), None)
+            for name in names:
+                tgt = next((a for a in self.mon.agents if a.name == name), None)
+                if tgt is None:
+                    continue
+                m = L.add(frm, name, msg, source=str(data.get("source") or p.name), i=data.get("i"),
+                          via=str(data.get("via") or ("note" if sender is None else "chat")),
+                          urgent=bool(data.get("urgent")), additive=bool(data.get("additive")),
+                          hops=int(data.get("hops") or 1), activate=True, carrier={"inbox": p.name})
+                if sender is not None and sender.role in ("verifier", "manager") and tgt.role == "worker" \
+                        and not m["urgent"] and len(names) == 1:
+                    text_w = self.for_worker(msg) if sender.role == "verifier" else msg
+                    (inbox / "consumed").mkdir(exist_ok=True)
+                    os.replace(p, inbox / "consumed" / p.name)
+                    wm = self.rec.queue_worker_message(name, text_w, m["source"], frm)
+                    m.update(text=text_w, carrier={"wm": wm["id"], "inbox": p.name})
+                self.supersede(m)
+                changed = True
+        if changed:
+            self.rec.save()
+
+    def before_inbox(self, agent: AgentConfig) -> None:
+        self.scan_inbox(only=agent.name)
+
+    def on_prompt(self, agent: AgentConfig, turn_id: str, text: str, how: str) -> None:
+        """What the agent was given: every waiting message it carries is delivered, in this turn."""
+        self.ledger.seen(agent.name, text, turn_id, how)
+        self.sync_live()
+        self.rec.save()
+
+    def sync_live(self) -> None:
+        """An update sent into a worker's running turn counts once the backend accepted it."""
+        rows = {w["id"]: w for w in self.st.get("worker_messages") or []}
+        for m in self.ledger.rows:
+            wm = rows.get((m.get("carrier") or {}).get("wm") or "")
+            if m["status"] == "sent" and wm and wm.get("status") == "accepted" and wm.get("delivery_turn"):
+                self.ledger.mark(m, "delivered", turn=wm["delivery_turn"], how="live" if wm.get("via") == "steer"
+                                 else "prompt", delivered_at=wm.get("updated_at") or now_iso())
+
+    # ---- delivery is activation
+
+    def next_agent(self) -> Optional[str]:
+        """The agent the next phase runs (None when it runs nobody, e.g. a gate)."""
+        mg = self.mg
+        ph = mg.get("phase", "plan")
+        if ph in ("plan", "kickoff", "answer", "pause", "mreview", "restart", "next"):
+            return self.manager.name
+        if ph in ("brief", "review", "amend", "report", "guidance", "checkin") or (ph == "work" and mg.get("checkin_due")):
+            return self.critic.name
+        return None
+
+    def activate(self, mode: str = "wait") -> None:
+        """Start a turn for the manager or critic when a message waits for it and it is idle. `mode`: "between"
+        (between two phases: only messages from a chat, the terminal, a note or a message turn; not when the next
+        phase runs that agent anyway), "wait" (the run waits: a gate, a job, a held turn) or "stage" (a worker's
+        turn is running)."""
+        if self.should_stop() or getattr(self, "_activating", False):
+            return
+        self.take_messages()
+        self.scan_inbox()
+        self.sync_live()
+        for _ in range(2 * RT.MAX_HOPS + 2):  # an answer can start the other agent's turn; hops bound the chain
+            ran = False
+            for a in (self.manager, self.critic):
+                busy = self.terminal_busy(a)
+                self.mark_terminal_hold(a, bool(busy))
+                if busy or self.rec.agent_busy(a.name):
+                    continue
+                want = [m for m in self.ledger.waiting(a.name)
+                        if m.get("activate") is True or (m.get("activate") == "wait" and mode != "between")]
+                if not want or (mode == "between" and self.next_agent() == a.name):
+                    continue
+                self.message_turn(a, want)
+                ran = True
+                if self.should_stop():
+                    return
+            if not ran:
+                return
+
+    def message_turn(self, a: AgentConfig, want: List[Dict[str, Any]]) -> None:
+        self._activating = True
+        self._hops = max(int(m.get("hops") or 1) for m in want)
+        frm = sorted({m["from"] for m in want})
+        self.rec.progress(f"✉ {a.called}: {len(want)} message(s) from {', '.join(frm)} arrived; it answers now")
+        self.rec.event("activation", agent=a.name, msgs=[m["id"] for m in want])
+        try:
+            r = self.say(a, self.mtpl("manager_message_turn" if a.role == "manager" else "critic_message_turn"), "incoming")
+            if r.get("status") == "ok" and a.role == "manager":
+                self.after_manager(r, relay=False)
+            elif r.get("status") == "ok":  # its words for its user, like a check-in update; a question goes up whole
+                update = "\n\n".join(x for x in [T.outside(r["output"]), self.ask_block(r["output"], "verifier")] if x)
+                if update:
+                    self.deliver(a, self.manager, update, self.mtpl("relay_note_up", note=update).strip(),
+                                 source=r["turn_id"], purpose="incoming", hops=self._hops + 1)
+        except _Failed as e:
+            self.rec.progress(f"⚠ {a.called}'s message turn did not finish: {e}")
+        finally:
+            self._activating = False
+            self._hops = 0
+        for m in want:  # never loop on a message: what this turn didn't carry waits for the next regular turn
+            if m["status"] == "sent":
+                m["activate"] = False
+                self.rec.progress(f"⚠ {m['id']} for {a.called} was not found in its prompt; it waits for its next turn")
+        self.rec.save()
+
+    def take_messages(self) -> None:
+        """Replies from a terminal, and address corrections from board chats (other controls wait for check_control)."""
+        for d in self.rec.take_control(("reply", "correction", "terminal")):
+            self.message_control(d)
+
+    def message_control(self, d: Dict[str, Any]) -> None:
+        a = next((x for x in self.mon.agents if x.name == d.get("agent")), None)
+        if a is None:
+            return
+        kind = d.get("kind")
+        if kind == "correction":
+            self.correct(a, [str(b) for b in d.get("bad") or []])
+        elif kind == "terminal":
+            if d.get("event") == "start":
+                self.rec.progress(f"⌨ {a.called}'s session is open in a terminal; orch holds its turns and routes "
+                                  "its messages")
+            elif d.get("event") == "end":
+                sid = d.get("session_id")
+                if sid and sid != (self.st["sessions"].get(a.name) or {}).get("session_id"):
+                    self.rec.update_session(a.name, session_id=sid)
+                self.rec.progress(f"⌨ {a.called}'s terminal session closed; orch continues it")
+            self.rec.event("terminal", agent=a.name, what=d.get("event"), session_id=d.get("session_id"))
+        elif kind == "reply":
+            self.route_text(a, str(d.get("text") or ""), str(d.get("source") or d.get("file") or ""),
+                            str(d.get("via") or "terminal"))
+
+    def route_text(self, a: AgentConfig, text: str, source: str, via: str) -> None:
+        """A reply written outside orch's turns (the terminal): its messages go out now, bad addresses are corrected
+        at the sender's next turn, and a pause the manager calls stops the work."""
+        if source and any(m.get("source") == source for m in self.ledger.rows):
+            return  # handed over twice
+        sent, bad = RT.split_reply(text, a, self.mon.agents)
+        for s in sent:
+            t = s["target"]
+            body = self.mtpl("relay_note_up", note=s["body"]).strip() if a.role == "verifier" and t.role == "manager" else ""
+            self.deliver(a, t, s["body"], body, source=source, i=s["i"], via=via, purpose=via, urgent=s["urgent"],
+                         additive=s["additive"])
+        for b in bad:
+            self.ledger.add(a.name, "", b, status="held", reason=f"{b} names no one {a.called} can write to; not sent",
+                            source=source, via=via)
+        self.correct(a, bad)
+        if a.role == "manager":
+            pause = manager_pause(text)
+            if pause:
+                self.mg["pause_req"] = {"text": pause, "turn": source}
+        self.rec.event("reply_routed", agent=a.name, via=via, source=source, sent=len(sent), bad=len(bad))
+        if sent:
+            self.rec.progress(f"✉ {a.called} ({via}): {len(sent)} message(s) passed on")
+        self.rec.save()
+
+    # ---- an agent's session open in a terminal (orch/hooks/terminal_relay.py): one writer at a time
+
+    def terminal_busy(self, a: AgentConfig) -> Optional[Dict[str, Any]]:
+        """The busy mark the terminal hook keeps for this agent, unless it has gone stale (a crashed terminal)."""
+        p = self.rec.run_dir / "busy" / f"{a.name}.json"
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        touched = float(d.get("touched") or 0)
+        if time.time() - touched > float(self.mon.controller.terminal_busy_timeout or 0):
+            stale = self.st.setdefault("terminal_stale", {})
+            if stale.get(a.name) != touched:
+                stale[a.name] = touched
+                self.rec.progress(f"⌨ {a.called}'s terminal mark is stale (no activity for "
+                                  f"{self.mon.controller.terminal_busy_timeout:g}s); orch continues its session")
+                self.rec.event("terminal_stale", agent=a.name)
+            return None
+        return d
+
+    def mark_terminal_hold(self, a: AgentConfig, busy: bool) -> None:
+        L = self.ledger
+        for m in L.rows:
+            if m["to"] != a.name:
+                continue
+            if busy and m["status"] == "sent":
+                L.mark(m, "held", reason=TERMINAL_HOLD)
+            elif not busy and m["status"] == "held" and m.get("reason") == TERMINAL_HOLD:
+                L.mark(m, "sent", reason="")
+
+    def hold_while_busy(self, a: AgentConfig) -> None:
+        """While the agent's session is open in a terminal, its turn waits (two writers would split the history);
+        meanwhile the terminal's messages are routed and the other agents answer theirs."""
+        if not self.terminal_busy(a):
+            return
+        self.rec.progress(f"⏸ {a.called}'s session is open in a terminal; its turn waits until the terminal closes")
+        self.rec.event("terminal_hold", agent=a.name)
+        main = threading.get_ident() == getattr(self, "_main_ident", None)
+        while self.terminal_busy(a):
+            if self.should_stop():
+                raise StopRequested()
+            if main:
+                self.mark_terminal_hold(a, True)
+                self.activate("wait")
+            time.sleep(0.3)
+        self.take_messages()
+        self.mark_terminal_hold(a, False)
+        self.rec.save()
 
     # ------------------------------------------------------------------ questions
 
@@ -1013,10 +1376,10 @@ class ManagedRunner(MonitorRunner):
                           answered_at=now_iso())
                 self.decide(f"{self.short_question(q)}: {mine or '(see the manager turn)'}", "manager (night mode)",
                             nq["id"])
-        if relay:
+        if relay:  # its message to the critic as a note; a message to the worker is routed after the turn (route_reply)
             for attrs, body in T.blocks(text, "message"):
                 a = self.find_agent(attrs.get("to", ""))
-                if a and a.name != self.manager.name and body:
+                if a and a.role == "verifier" and body:
                     self.forward(a, self.mtpl("relay_note", note=body).strip())
         pause = manager_pause(text) if r.get("purpose") != "pause" else ""  # it stops the run itself
         if pause:
@@ -1044,8 +1407,23 @@ class ManagedRunner(MonitorRunner):
         for qid in wq:
             self.settle(self.q(qid), "", "", r["turn_id"], status="passed_up")
         q = self.new_question(self.critic, self.manager.name, block, r["turn_id"], wq)
+        self.unnest_questions(r, block)
         self.mg.update(ask=q["id"], after=after, phase="answer")
         return True
+
+    def unnest_questions(self, r: Dict[str, Any], block: str) -> None:
+        """A question nested in the critic's note to the manager is asked at once (the next phase), so the note
+        that waits for the manager goes without it. Only here: a question is never cut from a note otherwise."""
+        q = (self.st.get("fwd") or {}).get(self.manager.name) or []
+        for m in RT.Ledger(self.st).rows:
+            if m.get("source") != r.get("turn_id") or m.get("to") != self.manager.name or not QUESTION_TAG.search(m["body"]):
+                continue
+            rest = QUESTION_TAG.sub("", m["body"]).strip()
+            new = self.mtpl("relay_note_up", note=rest).strip() if rest else ""
+            if m["text"] in q:
+                i = q.index(m["text"])
+                q[i:i + 1] = [new] if new else []
+            m.update(text=new or block, carrier={"phase": "answer"} if not new else m.get("carrier"))
 
     def worker_feedback(self, text: str, append: bool = False) -> None:
         fb = self.mg.setdefault("feedback", {})
@@ -1141,6 +1519,8 @@ class ManagedRunner(MonitorRunner):
                 self.mg["job_release"] = True
             elif d.get("kind") == "pause" and d.get("message"):  # from a chat with the manager on the board
                 self.mg["pause_req"] = {"text": str(d["message"]), "turn": d.get("turn", "")}
+            elif d.get("kind") in ("reply", "correction", "terminal"):  # the terminal; corrections from a board chat
+                self.message_control(d)
         for qid, msgs in answers.items():
             if msgs and qid not in talked:
                 self.human_answer(qid, "\n\n".join(msgs))
@@ -1174,6 +1554,7 @@ class ManagedRunner(MonitorRunner):
                 if self.should_stop():
                     raise StopRequested()
                 self.check_control()
+                self.activate("wait")  # a message for the manager or critic is answered while the run waits
                 queue_ = self.st.get("gate_queue") or []
                 while queue_ and decision is None:
                     d = queue_.pop(0)
@@ -1216,9 +1597,16 @@ class ManagedRunner(MonitorRunner):
 
     def main_loop(self) -> str:
         mg = self.mg
+        self._main_ident = threading.get_ident()
         self.adopt_state_files()
         while True:
             self.check_control()
+            if mg.get("phase", "plan") != "done":
+                try:
+                    self.activate("between")  # messages from a chat, the terminal or a note start their turn now
+                except _Failed as f:
+                    self.rec.set(error=str(f))
+                    return "failed"
             ph = mg.get("phase", "plan")
             if ph == "done":
                 self.audit_due(final=True)
@@ -1489,6 +1877,10 @@ class ManagedRunner(MonitorRunner):
                     raise StopRequested()
                 self.check_control()
                 self.urgent_checkin()
+                self.activate("wait")
+                if any(self.rec.pending_worker_messages(n) or self.ledger.waiting(n) for n in agents):
+                    why = "message"  # a message for the worker: its turn comes now, the job may keep running
+                    break
                 if mg.pop("job_release", False):
                     why = "released"  # explicit "Review now" on the board
                     break
@@ -1538,6 +1930,7 @@ class ManagedRunner(MonitorRunner):
                 future = ex.submit(self.turn, a, p, rnd, purpose, extra=extra)
                 while not wait([future], timeout=0.2).done:
                     self.urgent_checkin()
+                    self.activate("stage")  # the manager and critic answer their messages while the worker works
                 out.append(future.result())
             self.after_state_turn(a, out[-1])
         return out
@@ -1558,7 +1951,7 @@ class ManagedRunner(MonitorRunner):
             update = "\n\n".join(x for x in [T.outside(r["output"]), self.ask_block(r["output"], "verifier")] if x)
             a = self.say(self.manager, self.mtpl("manager_checkin", update=update, human_messages=""), "ack")
             if a["status"] == "ok":
-                self.after_manager(a)
+                self.after_manager(a, relay=False)  # its messages are routed after the turn (route_reply)
         except _Failed as e:
             self.rec.event("checkin_error", error=str(e))
             self.rec.progress(f"Urgent check-in did not finish: {e}; the worker continues")
@@ -1670,9 +2063,9 @@ class ManagedRunner(MonitorRunner):
             mg["phase"] = "work"
             return None
         r = self.say(self.critic, self.mtpl("critic_checkin", human_messages=""), "checkin")
-        update = self.clean_critic(r["output"])
+        update = "\n\n".join(x for x in [self.clean_critic(r["output"]), self.ask_block(r["output"], "verifier")] if x)
         a = self.say(self.manager, self.mtpl("manager_checkin", update=update, human_messages=""), "ack")
-        self.after_manager(a)
+        self.after_manager(a, relay=False)  # its messages are routed after the turn (route_reply)
         mg["phase"] = "work"
         return None
 
@@ -1750,6 +2143,9 @@ class ManagedRunner(MonitorRunner):
             {"milestone": mg["ms"], "turn": r["turn_id"], "score": score, "criteria": crit,
              "decision": "ACCEPT" if accept else "REVISE", "round": self.st.get("round", 0), "at": now_iso()})
         ms["score"], ms["criteria"] = score, crit
+        if accept:
+            self.drop_phase_messages(r["turn_id"], self.critic.name, "the milestone was accepted; the next one starts "
+                                                                     "with a new instruction")
         if accept or mg.get("limit"):
             ms.update(status="awaiting_ok", summary=self.for_me(text), summary_turn=r["turn_id"], accepted=accept)
             gate = c.approve_milestones or not accept
@@ -1781,6 +2177,7 @@ class ManagedRunner(MonitorRunner):
             if held:
                 self.rec.event("message_superseded", turn=ms.get("summary_turn"), to=self.critic.name,
                                reason="milestone approved at the gate")
+                self.drop_phase_messages(ms.get("summary_turn") or "", self.critic.name, "milestone approved at the gate")
             mg.update(phase="next", guidance="")
             return None
         comment = d.get("message") or held or "Please keep going on this milestone."
@@ -1789,9 +2186,11 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.manager, self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment,
                                              unsent=unsent), "feedback")
         if held:
+            why = ("replaced by the manager's message after the gate"
+                   + ("" if unsent or comment == held else "; not shown to the manager"))
             self.rec.event("message_superseded", turn=ms.get("summary_turn"), to=self.critic.name, by=r["turn_id"],
-                           reason="replaced by the manager's message after the gate"
-                                  + ("" if unsent or comment == held else "; not shown to the manager"))
+                           reason=why)
+            self.drop_phase_messages(ms.get("summary_turn") or "", self.critic.name, why, by=r["turn_id"])
         ms.update(status="active")
         self.after_manager(r, relay=False)
         mg.update(guidance=self.critic_message(r, "feedback"), guidance_at=now_iso(), ms_round=0, stall=0,

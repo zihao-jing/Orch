@@ -701,6 +701,8 @@ class MockBackend(Backend):
                     "<decision>PAUSE</decision>")
         if purpose == "ack":
             return "Thanks, carry on."
+        if purpose == "incoming":
+            return "Noted; nothing changes for now."
         return '<message to="critic">Please get the first part of the goal done and keep me posted.</message>'
 
 
@@ -741,7 +743,9 @@ def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
         if req.session_id and session_key and v.session_key != session_key:
             continue
         try:
-            res = get_backend(v.backend).run(dataclasses.replace(req, options=v.options, env=v.env), should_stop)
+            marks = {k: x for k, x in (req.env or {}).items() if k.startswith("ORCH_")}  # orch's own, kept for backups
+            res = get_backend(v.backend).run(dataclasses.replace(req, options=v.options, env={**v.env, **marks}),
+                                             should_stop)
         except Exception as e:
             res = TurnResult("error", "", req.session_id, stderr=f"{type(e).__name__}: {e}")
         tried.append(v.label)

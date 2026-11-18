@@ -352,7 +352,7 @@ function running(){ return (D.turns||[]).filter(t => t.status === 'running'); }
 const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milestone', brief:'briefing the worker', work:'working',
   verify:'reviewing the changes', answer:'answering a question', amend:'updating the notes', report:'writing the milestone report',
   review:'scoring the milestone', guidance:'passing on guidance', feedback:'reading your feedback',
-  checkin:'sending a quick update', ack:'reading the quick update'};
+  checkin:'sending a quick update', ack:'reading the quick update', incoming:'answering a message that just arrived'};
 function renderTiles(mg){
   const nb = $('night'), want = nightWanted();  // the switch as last set (the run applies it when the current turn ends)
   nb.textContent = want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
@@ -360,10 +360,11 @@ function renderTiles(mg){
   const run = running()[0];
   const nowTxt = run ? `<span class="dot live"></span> <b>${esc(called(run.agent))}</b>&nbsp;is ${esc(DOING[run.purpose]||run.purpose)}`
                      : D.status === 'waiting_job' ? 'Waiting for the worker\'s job to finish' : (D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? 'Paused until your task is done' : 'Waiting for your OK') : esc(D.status||''));
+  const term = Object.keys(D.terminal||{}).map(n => `<div class="mute" title="orch holds this agent's turns and routes the messages it writes there">⌨ ${esc(called(n))} is open in a terminal</div>`).join('');
   const QA = D.queued_answers || {}, live = qs.filter(q => q.status === 'open' && !QA[q.id]);  // settled-but-queued counts as done
   const openQ = live.length, mine = live.filter(q => q.to === 'human').length;
   const tiles = [
-    ['Now', `<div class="now" style="font-size:14px;font-weight:500">${nowTxt}</div>`, ''],
+    ['Now', `<div class="now" style="font-size:14px;font-weight:500">${nowTxt}</div>${term}`, ''],
     ['Milestones', `${done}<span class="mute" style="font-size:15px"> / ${mss.length||'–'}</span>`, mss[mg.ms] ? 'on: ' + esc(mss[mg.ms].title) : ''],
     ['Rounds', esc(D.round||0), 'worker ↔ critic'],
     ['Questions', `${openQ}<span class="mute" style="font-size:15px"> open</span>`, mine ? `<b style="color:var(--you)">${mine} for you</b>` : `${qs.length} asked in all`],
@@ -599,7 +600,7 @@ function fold(t, defOpen){
     <span class="pill">${esc(t.purpose)}</span>${(t.reminders&&t.reminders.length)?`<span class="ink2" title="Reminders added at the end of this message: ${esc(t.reminders.join(', '))}">↺ ${esc(t.reminders.join(', '))}</span>`:(t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':'')}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
     ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
     ${t.model ? `<span class="mute mono" title="${t.cost_basis === 'estimate' ? 'cost is Claude Code\'s estimate, not the provider\'s price' : 'model'}">${esc(t.model)}${t.cost != null ? ' · ' + (t.cost_basis === 'estimate' ? '~' : '') + '$' + Number(t.cost).toFixed(2) : ''}</span>` : ''}
-    ${routeChips(rows)}<span class="pv">${esc(run ? 'writing…' : headline(t.output))}</span></summary><div class="fb">${receivedLine(t.turn_id)}${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;
+    ${routeChips(rows)}<span class="pv">${esc(run ? 'writing…' : headline(t.output))}</span></summary><div class="fb">${receivedLine(t.turn_id)}${heldLine(t.turn_id)}${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;
 }
 const openMsgs = new Set(), shutMsgs = new Set();
 const LIMIT = {thread: 8, rounds: 5}, shown = {thread: 8, rounds: 5};  // newest first; older ones behind a link
@@ -793,7 +794,8 @@ function routeStatus(r){  // what became of one passed-on message, as a line of 
       + (r.turn_status === 'running' ? ', running now' : '') + (r.at ? ' · ' + tm(r.at) : '')];
     case 'waiting': return ['wait', r.urgent ? `⚡ waiting: urgent, cuts into ${to}'s running turn` : `⏳ waiting for ${to}'s next turn`];
     case 'unseen': return ['bad', `? not found in the prompts of ${to}'s ${r.later} later turn${r.later === 1 ? '' : 's'}`];
-    case 'superseded': return ['wait', `↷ not sent: ${esc(r.reason || 'a later message replaced it')}${r.turn ? ' (' + link(r.turn) + ')' : ''}`];
+    case 'superseded': return ['wait', `↷ superseded: ${esc(r.reason || 'a later message replaced it')}${r.turn ? ' (' + link(r.turn) + ')' : ''}`];
+    case 'held': return [r.by_design ? 'ok' : 'wait', `${r.by_design ? '⊘' : '⏸'} held: ${esc(r.reason || '')}`];
     case 'unknown': return ['bad', `⚠ sent into ${to}'s running turn${r.turn ? ' ' + link(r.turn) : ''}, not confirmed`];
     case 'failed': return ['bad', `⚠ not delivered: ${esc(r.problem || '')}`];
   }
@@ -810,7 +812,7 @@ function routeCards(text, rows, src, complete){  // each <message> a reply passe
   let h = '';
   for (let i = 0; i < n; i++){
     const b = complete ? blocks[i] : null, r = complete ? byI.get(i) : rows[i];
-    const rawTo = b ? b.to : (r.to || ''), you = /^you$/i.test(rawTo) || (r && r.status === 'you');
+    const rawTo = b ? b.to : (r.to || ''), you = (r && r.status === 'you') || (!r && /^you$/i.test(rawTo));
     const key = src + ':' + i, [cls, st] = you ? ['ok', 'for you'] : routeStatus(r);
     const name = you ? 'you' : (r && r.to ? called(r.to) : who(rawTo));
     const urgent = b ? b.urgent : !!(r && r.urgent);
@@ -830,11 +832,16 @@ function headline(text){  // a folded reply's one-line preview: its own words, e
   const {plain, blocks} = routedBlocks(text);
   return preview(plain || (blocks[0] ? blocks[0].body : '') || text);
 }
-const RCHIP = {read: ['ok', '✓'], you: ['ok', ''], waiting: ['wait', '⏳'], superseded: ['wait', '↷'], unseen: ['bad', '?'], unknown: ['bad', '⚠'], failed: ['bad', '⚠']};
+const RCHIP = {read: ['ok', '✓'], you: ['ok', ''], waiting: ['wait', '⏳'], held: ['wait', '⏸'], superseded: ['wait', '↷'], unseen: ['bad', '?'], unknown: ['bad', '⚠'], failed: ['bad', '⚠']};
 function routeChips(rows){  // the folded turn's header: one chip per message it passed on
   return (rows||[]).filter(r => r.status !== 'you').map(r => { const [cls, icon] = RCHIP[r.status] || ['', ''];
     const tip = routeStatus(r)[1].replace(/<[^>]+>/g, '');
     return `<span class="rchip ${cls}" title="${esc(tip)}">✉ ${esc(called(r.to))} ${icon}</span>`; }).join('');
+}
+function heldLine(id){  // blocks of this reply orch keeps from the next agent by design: logged, not lost
+  const hs = (D.held||{})[id]; if (!hs || !hs.length) return '';
+  const kinds = [...new Set(hs.map(h => h.kind))];
+  return `<div class="recv" title="${esc(hs.map(h => h.reason).join('; '))}">⊘ Held by design from ${esc(called(hs[0].to))}: ${esc(kinds.join(', '))}</div>`;
 }
 function receivedLine(id){  // on the recipient's side: which earlier messages this turn's prompt carries
   const rs = (D.received||{})[id]; if (!rs || !rs.length) return '';
@@ -874,7 +881,9 @@ function relayLine(id){  // what became of the messages this reply passed on
     const a = (D.agents||[]).find(x => x.name === r.to), to = esc(a ? a.called : who(r.to || 'critic'));
     const s = r.status === 'delivered'
       ? `✓ passed to ${to}${r.at ? ' at ' + tm(r.at) : ''}${r.turn ? ` · read in ${esc(r.turn)} (${esc(r.purpose || '')}${r.turn_status === 'running' ? ', running now' : ''})` : ''}`
-      : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}'s next turn`);
+      : r.status === 'held' ? `⏸ held for ${to}: ${esc(r.reason || '')}`
+      : r.status === 'superseded' ? `↷ superseded: ${esc(r.reason || 'a later message replaced it')}`
+      : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}: it is answered as soon as it is idle`);
     return `<div class="w">${s}</div>`; }).join('');
 }
 async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true;

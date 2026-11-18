@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from . import routing as RT
 from .backends import TurnRequest, run_variants
 from .config import MonitorConfig
 from .recorder import agent_lock, live_event, now_iso, read_json
@@ -193,8 +194,14 @@ class Board:
         for c in chat:
             if c.get("status") == "running":
                 live[c["id"]] = self._live_text(rd / "live" / f"{c['id']}.jsonl")
-        relays = _relays(rd, chat, turns)
-        routes, received = _routes(rd, turns, seen, cfg.get("agents") or [], st.get("worker_messages") or [])
+        ledger = st.get("messages") or []
+        relays = _relays(rd, chat, turns, ledger)
+        routes, received = _routes(rd, turns, seen, cfg.get("agents") or [], st.get("worker_messages") or [], ledger)
+        held = {}  # blocks of a reply orch keeps from the next agent by design: logged, not lost
+        for m in ledger:
+            if m.get("by_design"):
+                held.setdefault(m.get("source") or "", []).append({"kind": m.get("kind"), "to": m.get("to"),
+                                                                    "reason": m.get("reason")})
         # _turn_costs rewrites each row's cost into that turn's own step; the rows are cached across polls, so
         # work on copies or the next poll would take the steps for running totals and the total would fall.
         turns = [dict(t) for t in turns]
@@ -220,7 +227,8 @@ class Board:
             "managed": st.get("managed") or {}, "night": bool(st.get("night")), "night_pending": night_pending, "questions": st.get("questions") or [],
             "decisions": st.get("decisions") or [],
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
-            "chat": chat, "chat_more": chat_more, "relays": relays, "routes": routes, "received": received, "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
+            "chat": chat, "chat_more": chat_more, "relays": relays, "routes": routes, "received": received, "held": held,
+            "terminal": _terminal(rd), "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
             "worker_messages": st.get("worker_messages") or [],
             "messages": _message_log(rd, chat_all, turns, {a["name"]: a["called"] for a in agents}, mgr_name,
                                      st.get("worker_messages") or [], st.get("fwd") or {}),
@@ -350,7 +358,7 @@ class Board:
         inbox = self.run_dir / "inbox"
         inbox.mkdir(exist_ok=True)
         kind = data.get("kind", "note")
-        (inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{time.monotonic_ns() % 100000:05d}-board-{kind}.json") \
+        (inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() // 1000 % 1000000:06d}-board-{kind}.json") \
             .write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def chat_agent(self, name: str, message: str) -> Dict[str, Any]:
@@ -367,6 +375,8 @@ class Board:
         st = read_json(rd / "state.json", {}) or {}
         if not ((st.get("sessions") or {}).get(a.name) or {}).get("session_id"):
             return {"error": f"{a.called} has no conversation yet; try again after its first turn"}
+        if _terminal(rd).get(a.name):
+            return {"error": f"{a.called}'s session is open in a terminal; talk to it there, or close it first"}
         last = [json.loads(x) for x in _lines(rd / "chat.jsonl")]
         cid = f"chat-{len(last) + 1:03d}-{int(time.time())}"
         _append(rd / "chat.jsonl", {"id": cid + "-q", "role": "human", "text": message, "ts": now_iso(), "with": a.name})
@@ -390,7 +400,7 @@ class Board:
                     res = run_variants(a, TurnRequest(
                         agent=a.name, role=a.role, prompt=prompt, system_prompt=a.current_system_prompt(),
                         session_id=sid, cwd=a.working_dir, timeout=a.timeout, options=a.backend_options,
-                        env=a.env, context={"purpose": "chat", "monitor": self.mon.name},
+                        env=_turn_env(a, rd), context={"purpose": "chat", "monitor": self.mon.name},
                         on_event=lambda ev: live_event(rd, cid, ev)), lambda: False, sess.get("session_key"))
                 text, status, new_sid = res.output, res.status, res.session_id or sid
                 cost = (res.meta or {}).get("total_cost_usd")
@@ -398,17 +408,7 @@ class Board:
                     text = (res.stderr or "")[-1500:] or f"(chat turn ended with status {res.status})"
             except Exception as e:  # pragma: no cover
                 text = f"({e})"
-            from . import tags as T
-            problems: List[str] = []
-            if status == "ok":
-                sent, problems = T.routes(text or "", a.name, self.mon.agents)
-                allowed = ("worker", "manager") if a.role == "verifier" else ()  # a worker addresses no one
-                problems += [f'<message to="{t.called}"> names no one {a.called} can write to; not sent'
-                             for t, _b, _u in sent if t.role not in allowed]
-                sent = [x for x in sent if x[0].role in allowed]
-                for target, body, urg in sent:
-                    self.control({"to": [target.name], "message": body, "from": a.name,
-                                  **({"urgent": True} if urg else {})})
+            problems = self._pass_on(a, text or "", cid) if status == "ok" else []
             _append(rd / "chat.jsonl", {"id": cid, "role": "agent", "who": a.name, "with": a.name, "status": status,
                                         "text": text, "ts": now_iso(), "session_id": new_sid, "cost": cost,
                                         **({"problems": problems} if problems else {})})
@@ -430,6 +430,8 @@ class Board:
         rd = self.run_dir
         st = read_json(rd / "state.json", {}) or {}
         mgr = self.mon.by_role("manager")[0]
+        if _terminal(rd).get(mgr.name):
+            return {"error": f"{mgr.called}'s session is open in a terminal; talk to it there, or close it first"}
         last = [json.loads(x) for x in _lines(rd / "chat.jsonl")]
         q = None
         if qid:
@@ -485,7 +487,7 @@ class Board:
                     res = run_variants(mgr, TurnRequest(
                         agent=mgr.name, role=mgr.role, prompt=prompt, system_prompt=mgr.current_system_prompt(),
                         session_id=sid, cwd=mgr.working_dir, timeout=mgr.timeout, options=mgr.backend_options,
-                        env=mgr.env, context={"purpose": "chat", "monitor": self.mon.name},
+                        env=_turn_env(mgr, rd), context={"purpose": "chat", "monitor": self.mon.name},
                         on_event=lambda ev: live_event(rd, cid, ev)), lambda: False, key)
                 text, status, new_sid = res.output, res.status, res.session_id or sid
                 cost = (res.meta or {}).get("total_cost_usd")
@@ -493,9 +495,8 @@ class Board:
                     text = (res.stderr or "")[-1500:] or f"(chat turn ended with status {res.status})"
             except Exception as e:  # pragma: no cover
                 text = f"(chat failed: {e!r})"
-            from . import tags as T
             from .managed import manager_pause
-            sent, problems = T.routes(text or "", mgr.name, self.mon.agents) if status == "ok" else ([], [])
+            problems = self._pass_on(mgr, text or "", cid) if status == "ok" else []
             _append(rd / "chat.jsonl", {"id": cid, "role": "manager", "status": status, "text": text,
                                         "ts": now_iso(), "session_id": new_sid, "cost": cost,
                                         **({"problems": problems} if problems else {}), **tag})
@@ -504,12 +505,44 @@ class Board:
             pause = manager_pause(text) if status == "ok" else ""
             if pause:  # the manager stops the run from the chat
                 self.control({"kind": "pause", "message": pause})
-            for target, body, urg in sent:  # <message to="critic"> -> that agent's next turn
-                self.control({"to": [target.name], "message": body, "from": mgr.name,
-                              **({"urgent": True} if urg else {})})
 
         threading.Thread(target=work, daemon=True).start()
         return {"id": cid}
+
+    def _pass_on(self, a: Any, text: str, cid: str) -> List[str]:
+        """The <message> blocks of a chat reply, by the sender's role view (orch/routing.py), as notes in inbox/:
+        the run records each one, delivers it (a note for an idle agent starts its turn; urgent ones cut in) and
+        shows its status here. A worker addresses no one, and a critic's `to="you"` is for whoever it is talking
+        to, so both stay in the chat. Bad addresses are listed and corrected at the sender's next turn."""
+        sent, bad = RT.split_reply(text, a, self.mon.agents)
+        for x in sent:
+            t, msg = x["target"], x["body"]
+            if a.role == "verifier" and t.role == "manager":
+                msg = render(self.mon.controller.templates["relay_note_up"], critic=a.called, note=msg).strip()
+            self.control({"to": [t.name], "message": msg, "from": a.name, "source": cid, "i": x["i"], "via": "chat",
+                          **({"urgent": True} if x["urgent"] else {}), **({"additive": True} if x["additive"] else {})})
+        if bad:
+            self.control({"kind": "correction", "agent": a.name, "bad": bad, "source": cid})
+        return [f"{b} names no one {a.called} can write to; not sent" for b in bad]
+
+
+def _turn_env(a: Any, rd: Path) -> Dict[str, str]:
+    """A chat turn's environment: the agent's own, plus the mark of a turn orch runs (the terminal hook ignores
+    those, and the job finder knows whose processes they are)."""
+    from . import jobs as _jobs
+    return {**(a.env or {}), _jobs.TAG_VAR: _jobs.tag_for(rd.name, a.name)}
+
+
+def _terminal(rd: Path) -> Dict[str, Dict[str, Any]]:
+    """Agents whose session is open in a terminal now (the hook's busy marks, without stale ones)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    cfg = read_json(rd / "config.json", {}) or {}
+    timeout = float(((cfg.get("controller") or {}).get("terminal_busy_timeout")) or 3600)
+    for p in sorted((rd / "busy").glob("*.json")) if (rd / "busy").is_dir() else []:
+        d = read_json(p) or {}
+        if isinstance(d, dict) and time.time() - float(d.get("touched") or 0) <= timeout:
+            out[p.stem] = {"since": d.get("since"), "session_id": d.get("session_id")}
+    return out
 
 
 def manager_chat_session(rows: List[Dict[str, Any]], since: str, st: Dict[str, Any], manager: str) -> Optional[str]:
@@ -614,10 +647,39 @@ def _message_log(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any
     return out
 
 
-def _relays(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+def _ledger_row(m: Dict[str, Any], turns: List[Dict[str, Any]], ledger: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """One message's status as the page shows it, from the run's ledger (orch/routing.py): delivered (the turn
+    whose prompt carried it), waiting, held (with the reason) or superseded (by which message)."""
+    row: Dict[str, Any] = {"i": m.get("i"), "to": m.get("to"), "urgent": bool(m.get("urgent")), "msg": m.get("id"),
+                           "via": m.get("via")}
+    st = m.get("status")
+    if st == "delivered":
+        t = next((t for t in turns if t.get("turn_id") == m.get("turn")), None)
+        row.update(status="delivered", turn=m.get("turn"), at=m.get("delivered_at"), how=m.get("how"),
+                   purpose=(t or {}).get("purpose"), turn_status=(t or {}).get("status"))
+    elif st == "held":
+        row.update(status="held", reason=m.get("reason"), by_design=bool(m.get("by_design")))
+    elif st == "superseded":
+        by = next((x for x in ledger if x.get("id") == m.get("by")), None) or {}
+        src = by.get("source") or m.get("by_turn") or ""
+        row.update(status="superseded", reason=m.get("reason"), turn=src if re.match(r"r\d+-t\d+-", src) else None)
+    else:
+        row["status"] = "waiting"
+    return row
+
+
+def _relays(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any]],
+            ledger: Optional[List[Dict[str, Any]]] = None) -> Dict[str, List[Dict[str, Any]]]:
     """For each chat reply, what became of the <message to="…"> blocks it passed on: still waiting in inbox/,
-    or delivered (when, and in which turn of the agent it was for)."""
+    or delivered (when, and in which turn of the agent it was for). The run's ledger has the true status;
+    runs from before it are judged from the inbox."""
     from . import tags as T
+    ledger = ledger or []
+    out_l: Dict[str, List[Dict[str, Any]]] = {}
+    for c in chat:
+        ms = [m for m in ledger if m.get("source") == c.get("id") and m.get("to")]
+        if ms:
+            out_l[c["id"]] = [_ledger_row(m, turns, ledger) for m in ms]
     notes: Dict[str, Tuple[str, str, Dict[str, Any]]] = {}
     for where, d in (("delivered", rd / "inbox" / "consumed"), ("waiting", rd / "inbox")):
         for p in sorted(d.glob("*.json")) if d.is_dir() else []:
@@ -625,7 +687,7 @@ def _relays(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -
             if isinstance(x, dict) and x.get("from") and not x.get("kind"):
                 notes[str(x.get("message", "")).strip()] = (p.name, where, x)
     if not notes:
-        return {}
+        return out_l
     taken: Dict[str, str] = {}  # inbox file -> when a turn picked it up
     for ln in _lines(rd / "events.jsonl"):
         if '"human_messages"' not in ln:
@@ -636,9 +698,9 @@ def _relays(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -
             continue
         for f in ev.get("files") or []:
             taken.setdefault(f, ev.get("ts") or "")
-    out: Dict[str, List[Dict[str, Any]]] = {}
+    out: Dict[str, List[Dict[str, Any]]] = dict(out_l)
     for c in chat:
-        if c.get("role") not in ("manager", "agent") or c.get("status") != "ok":
+        if c.get("role") not in ("manager", "agent") or c.get("status") != "ok" or c.get("id") in out_l:
             continue
         for i, (_attrs, body) in enumerate(T.blocks(c.get("text") or "", "message")):
             hit = notes.get((body or "").strip())
@@ -657,31 +719,19 @@ def _relays(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -
     return out
 
 
-def _flat(text: str) -> str:
-    """Text for matching: lower case, whitespace collapsed."""
-    return re.sub(r"\s+", " ", text or "").strip().lower()
-
-
-def _carries(hay: str, body: str) -> bool:
-    """Does `hay` (flattened) carry the message `body`? orch may wrap a message, or drop its headings and checklist
-    before passing it on, so it counts when most of its substantial lines are there (or, for a short message, all
-    of it)."""
-    lines = [_flat(ln.strip().lstrip("-*•>").strip()) for ln in (body or "").splitlines()]
-    lines = [ln for ln in lines if len(ln) >= 12 and not ln.startswith("#")]
-    if not lines:
-        whole = _flat(body)
-        return bool(whole) and whole in hay
-    return sum(ln in hay for ln in lines) >= max(1, -(-len(lines) * 3 // 5))
+_flat, _carries = RT.flat, RT.carries  # text matching, shared with the run's delivery check
 
 
 def _routes(rd: Path, turns: List[Dict[str, Any]], seen: Dict[str, Any], agents: List[Dict[str, Any]],
-            worker_messages: List[Dict[str, Any]]) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+            worker_messages: List[Dict[str, Any]], ledger: Optional[List[Dict[str, Any]]] = None
+            ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
     """What became of each <message to="…"> block in a turn's reply, judged from what the recipient was given:
     `read` (the first later turn of the recipient whose prompt, or a note cut into it, carries the message; or a
     live update the backend accepted), `waiting` (the recipient has had no turn since), `unseen` (it has had turns,
     but none carried the message), `unknown` (sent to a running turn, not confirmed) or `failed` (orch could not
-    send it, with the reason). Returns ({source turn: [one row per block, in order]}, {recipient turn: [where each
-    message it got came from]})."""
+    send it, with the reason). Where the run's ledger records the block (orch/routing.py), its status is taken from
+    there instead: it was checked against the recipient's actual prompt. Returns ({source turn: [one row per block,
+    in order]}, {recipient turn: [where each message it got came from]})."""
     from types import SimpleNamespace
     from . import tags as T
     people = [SimpleNamespace(name=a.get("name"), called=a.get("display_name") or a.get("name"), role=a.get("role"))
@@ -706,6 +756,8 @@ def _routes(rd: Path, turns: List[Dict[str, Any]], seen: Dict[str, Any], agents:
         by_agent.setdefault(t.get("agent") or "", []).append(t)
     out: Dict[str, List[Dict[str, Any]]] = {}
     received: Dict[str, List[Dict[str, Any]]] = {}
+    ledger = ledger or []
+    known = {(m.get("source"), m.get("i")): m for m in ledger if m.get("i") is not None and not m.get("by_design")}
     for t in turns:
         sv = seen.get(t["turn_id"]) or {}
         if t.get("status") == "running" or not sv.get("blocks"):
@@ -720,6 +772,17 @@ def _routes(rd: Path, turns: List[Dict[str, Any]], seen: Dict[str, Any], agents:
             row: Dict[str, Any] = {"i": i, "to": to, "urgent": T.urgent(attrs),
                                    "preview": re.sub(r"\s+", " ", re.sub(r"[#*`>|_]+", "", body or "")).strip()[:160]}
             rows.append(row)
+            lm = known.get((t["turn_id"], i))
+            if lm is not None:  # the ledger: checked against the recipient's prompt
+                lr = _ledger_row(lm, turns, ledger)
+                lr.update(status="read" if lr["status"] == "delivered" else lr["status"], i=i, preview=row["preview"])
+                if lr["status"] == "held" and not lm.get("carrier"):  # an address it may not use
+                    lr.update(status="failed", problem=lm.get("reason"))
+                row.clear()
+                row.update(lr)
+                if lr["status"] == "read" and lr.get("turn"):
+                    received.setdefault(lr["turn"], []).append({"from": t.get("agent"), "turn": t["turn_id"], "i": i})
+                continue
             if T._norm(to) == "you":
                 row["status"] = "you"
                 continue

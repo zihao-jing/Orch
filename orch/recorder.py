@@ -335,7 +335,8 @@ class Recorder:
             out.append({"to": [to] if isinstance(to, str) else to})
         return out
 
-    def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause", "night")) -> List[Dict[str, Any]]:
+    def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause", "night", "reply", "correction",
+                                           "terminal")) -> List[Dict[str, Any]]:
         """Consume answer / approval files from inbox/ (oldest first)."""
         inbox = self.run_dir / "inbox"
         out: List[Dict[str, Any]] = []
@@ -361,6 +362,19 @@ class Recorder:
 
     def agent_lock(self, agent: str):
         return agent_lock(self.run_dir, agent)
+
+    def agent_busy(self, agent: str) -> bool:
+        """Is a turn of this agent running now (in this process or another, e.g. a board chat)?"""
+        import fcntl
+        d = self.run_dir / "locks"
+        d.mkdir(exist_ok=True)
+        with open(d / f"{agent}.lock", "w") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            return False
 
     def claim(self) -> Optional[str]:
         """Take the run lock: one controller per run, also across processes. Returns None when taken, else a

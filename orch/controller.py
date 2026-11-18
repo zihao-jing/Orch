@@ -687,6 +687,12 @@ class MonitorRunner:
         """The prompt with the reminders due this turn at its end, and their ids. None outside managed mode."""
         return prompt, []
 
+    def before_inbox(self, agent: AgentConfig) -> None:
+        """Called before a turn takes the agent's notes from inbox/ (managed mode records them first)."""
+
+    def on_prompt(self, agent: AgentConfig, turn_id: str, text: str, how: str) -> None:
+        """Called with what an agent was actually given (its prompt, or a note cut into its turn)."""
+
     # ------------------------------------------------------------------ turns
 
     def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str,
@@ -698,6 +704,7 @@ class MonitorRunner:
         updates = rec.pending_worker_messages(agent.name) if agent.role == "worker" else []
         if updates:
             prompt = "\n\n".join(m["message"] for m in updates) + "\n\n" + prompt
+        self.before_inbox(agent)
         human = self.human_text(agent.name, rec.take_inbox(agent.name, broadcast=self.inbox_broadcast(agent)))
         if human:  # queued with the relayed messages, so a restart mid-turn re-sends it instead of losing it
             self.st.setdefault("fwd", {}).setdefault(agent.name, []).append(human)
@@ -725,6 +732,7 @@ class MonitorRunner:
             **(extra or {}),
         }
         rec.write_turn(record)  # relayed messages stay queued until the turn ends, so a restart re-sends them
+        self.on_prompt(agent, record["turn_id"], prompt, "prompt")
         for m in updates:
             rec.worker_message_status(m["id"], "in_prompt", delivery_turn=record["turn_id"], via="prompt")
 
@@ -803,6 +811,7 @@ class MonitorRunner:
             last_pe = pe
             if res.status == "stopped" and hit and not self.should_stop():
                 if hit[0] == "resume":  # the message is for this agent: it continues, with the message first
+                    self.before_inbox(agent)
                     note = self.human_text(agent.name, rec.take_inbox(agent.name, broadcast=self.inbox_broadcast(agent)))
                     sid = res.session_id or self._live_session(record["turn_id"]) or sid
                     if note:  # queued like any message until the turn ends, so a restart re-sends it
@@ -811,6 +820,8 @@ class MonitorRunner:
                         prompt = f"{note}\n\n{prompt}"  # what a correction or a fresh session re-sends
                     urgent_send = self.tpl("urgent_resume", note=note or "(no text)") if sid else prompt
                     record.setdefault("interruptions", []).append({"at": now_iso(), "message": note})
+                    if note:
+                        self.on_prompt(agent, record["turn_id"], note, "cut in")
                     record["session_id"] = sid
                     rec.write_turn(record)
                     rec.event("urgent", turn=record["turn_id"], how="resume")

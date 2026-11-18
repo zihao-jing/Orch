@@ -140,7 +140,9 @@ class TestRoleViews(unittest.TestCase):
         req, row = self._chat(rec, mon, "writer", "What did you do?", 'Edited.\n<message to="Jordan">ping</message>')
         self.assertRegex(req.prompt, r"Answer my message")
         self.assertNotRegex(req.prompt, r"(?i)\b(board|user|manager|critic|orch|Alex|Jordan)\b|<message")
-        self.assertEqual(set(inbox.glob("*.json")) - before, set())  # a worker addresses no one
+        notes = [json.loads(p.read_text()) for p in set(inbox.glob("*.json")) - before]
+        self.assertEqual([x for x in notes if not x.get("kind")], [])  # a worker addresses no one
+        self.assertEqual([x.get("kind") for x in notes], ["correction"])  # corrected at its next turn
         self.assertTrue(row.get("problems"))
 
     def test_the_managers_chat_with_me_passes_only_its_message_to_the_critic(self):

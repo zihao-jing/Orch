@@ -6,12 +6,13 @@ import argparse
 import dataclasses
 import json
 import re
+import shlex
 import signal
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .config import Config, ConfigError, is_config, load_config, validate
@@ -586,6 +587,44 @@ def cmd_tell(a: argparse.Namespace) -> int:
     return status
 
 
+def hook_settings(python: str = "python3") -> Dict[str, Any]:
+    """The Claude Code hook configuration for orch/hooks/terminal_relay.py (to merge into a settings file)."""
+    script = str(Path(__file__).resolve().parent / "hooks" / "terminal_relay.py")
+    entry = [{"hooks": [{"type": "command", "command": f"{python} {script}", "timeout": 10}]}]
+    return {"hooks": {ev: entry for ev in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")}}
+
+
+def cmd_terminal(a: argparse.Namespace) -> int:
+    """Open an agent's session (the manager's by default) in a terminal without two writers: prints the command
+    that resumes it with the environment the relay hook reads, or (--hooks) the hook configuration to install.
+    Nothing is written to any settings file."""
+    if a.hooks:
+        print("# Merge into .claude/settings.local.json of the project (or ~/.claude/settings.json). orch does not")
+        print("# write it for you. The hook does nothing outside an orch run, nor in the turns orch runs itself.")
+        print(json.dumps(hook_settings(), indent=2))
+        return 0
+    runs = resolve_runs(a.target, a.monitor)
+    if not runs:
+        print("no runs found")
+        return 1
+    run = runs[0]
+    st = read_json(run / "state.json", {}) or {}
+    sessions = st.get("sessions") or {}
+    name = a.agent or next((n for n, x in sessions.items() if (x or {}).get("role") == "manager"), None)
+    sid = ((sessions.get(name) or {}) if name else {}).get("session_id")
+    if not sid:
+        print(f"{run}: {name or 'the manager'} has no session yet")
+        return 1
+    cfg = read_json(run / "config.json", {}) or {}
+    ag = next((x for x in cfg.get("agents", []) if isinstance(x, dict) and x.get("name") == name), {})
+    cwd = ag.get("working_dir") or cfg.get("working_dir") or "."
+    print(f"cd {shlex.quote(str(cwd))} && ORCH_RUN_DIR={shlex.quote(str(run))} ORCH_AGENT={shlex.quote(name)} "
+          f"claude --resume {shlex.quote(sid)}")
+    print("# with the relay hook installed (`orch terminal --hooks`), orch holds this agent's turns while the session "
+          "is open and routes its <message> tags.")
+    return 0
+
+
 def cmd_report(a: argparse.Namespace) -> int:
     runs = resolve_runs(a.target, a.monitor)
     roots = set()
@@ -707,6 +746,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rounds", help="N or A-B (default: the last audit_every rounds)")
     p.add_argument("--digest", action="store_true", help="print the digest the auditor would read; no model call")
     p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser("terminal", help="managed mode: the command that opens an agent's session in a terminal "
+                                        "(its messages are routed), or --hooks: the relay hook settings to install")
+    p.add_argument("target", nargs="?", default=".")
+    p.add_argument("agent", nargs="?", default=None, help="agent name (default: the manager)")
+    p.add_argument("--monitor", action="append")
+    p.add_argument("--hooks", action="store_true", help="print the Claude Code hook settings (writes nothing)")
+    p.set_defaults(func=cmd_terminal)
 
     p = sub.add_parser("report", help="regenerate HTML reports")
     p.add_argument("target")
