@@ -135,7 +135,8 @@ def render_board(par: Dict[str, Any], called: Dict[str, str], ck: Dict[str, Any]
         if s.get("status") == WORKING and s.get("round"):
             status += f" (round {s['round']})"
         cell = lambda v: str(v or "—").replace("|", "/").replace("\n", " ")  # noqa: E731
-        rows.append(f"| {cell(called.get(name, name))} (`{name}`) | {cell(title)} | {cell(status)} | {cell(s.get('out'))} | "
+        who = called.get(name, name)
+        rows.append(f"| {cell(who) + ' ' if who != name else ''}(`{name}`) | {cell(title)} | {cell(status)} | {cell(s.get('out'))} | "
                     f"{cell(s.get('workspace'))} | {s.get('turns', 0)} | {cell(s.get('check'))} |")
     lines = [BOARD_HEAD, "\n".join(rows), ""]
     queue = par.get("queue") or []

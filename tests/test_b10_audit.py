@@ -68,7 +68,7 @@ class TestDigestTimes(unittest.TestCase):
         c = self.stats["ledger"]
         self.assertEqual((c["held by design"], c["superseded"], c["delivered"]), (1, 1, 2))
         self.assertEqual(c["delivered_share"], 1.0)
-        self.assertIn("Delivered share of those meant to arrive (not held by design, not superseded): 100%", self.md)
+        self.assertIn("Delivered share of those meant to arrive (not held by design, not superseded, not dropped): 100%", self.md)
 
     def test_questions_opened_and_closed(self):
         self.assertIn("Q1: wk → crit opened 10:45:00, answered by crit 10:55:00 (open 10 min)", self.md)

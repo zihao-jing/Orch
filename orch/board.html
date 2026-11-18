@@ -196,7 +196,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
 .tm{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mute)}
 .ktag{font-size:10px;padding:0 5px;border-radius:4px;background:var(--code);color:var(--ink2);text-transform:uppercase;letter-spacing:.03em}
 .ktag.warning{background:var(--warn-bg);color:var(--warn-ink)}.ktag.question,.ktag.gate{background:var(--you-bg);color:var(--you)}
-.st{font-size:11px;color:var(--mute)}.st.delivered,.st.answered{color:var(--good-ink)}.st.sent,.st.open,.st.held,.st.superseded{color:var(--warn-ink)}
+.st{font-size:11px;color:var(--mute)}.st.delivered,.st.answered{color:var(--good-ink)}.st.sent,.st.open,.st.held,.st.superseded{color:var(--warn-ink)}.st.dropped{color:var(--mute)}
 .st.running{color:var(--s1)}.st.failed,.st.error,.st.unseen,.st.unknown,.st.timeout{color:var(--crit-ink)}
 .lmore{font-size:12px;color:var(--mute);padding:2px 4px}
 @media (max-width:600px){.wrap{padding:12px 16px 40px}.tile .v{font-size:18px}.blocks{padding:6px 6px 8px}details.ln>summary .to{display:none}}
@@ -643,7 +643,7 @@ async function loadMsg(id){
   finally { msgPending.delete(id); }
   renderTimeline(); renderSearch();
 }
-const ST_LABEL = {delivered:'✓ delivered', sent:'→ sent', held:'⏸ held', superseded:'↷ superseded', running:'● running', open:'? open',
+const ST_LABEL = {delivered:'✓ delivered', sent:'→ sent', held:'⏸ held', superseded:'↷ superseded', dropped:'⊘ dropped', running:'● running', open:'? open',
   answered:'✓ answered', passed_up:'↑ passed up', night:'🌙 decided', failed:'⚠ not delivered', unseen:'? unseen', unknown:'⚠ unconfirmed', error:'✕ error', timeout:'✕ timeout'};
 function itemBody(it){
   if (it.status === 'running' && it.tid) return `<div data-live="${esc(it.tid)}"></div>`;
@@ -677,7 +677,8 @@ function lineHTML(it, where){  // one message: time, sender → recipient, statu
 function laneHTML(lane, rows){  // B11: one worker's lane in the critic ↔ worker block
   const mg = D.managed || {}, par = (mg.par && mg.par.slots) ? mg.par : (mg.par_last || {}), s = (par.slots || {})[lane] || {};
   const head = [s.step ? 'step ' + s.step : '', s.status || '', s.check ? 'monitor: ' + s.check : ''].filter(Boolean).map(esc).join(' · ');
-  return `<div class="lane"><b>${esc(called(lane))}</b> <span class="mute">${esc(lane)}</span>${head ? ' — ' + head : ''}</div>` + rows.map(it => lineHTML(it)).join('');
+  const nm = called(lane);  // a copy without a name of its own is called by its id: shown once
+  return `<div class="lane"><b>${esc(nm)}</b>${nm !== lane ? ` <span class="mute">${esc(lane)}</span>` : ''}${head ? ' — ' + head : ''}</div>` + rows.map(it => lineHTML(it)).join('');
 }
 function groupName(ms, step){ return (ms < 0 ? 'plan' : 'M' + (ms + 1)) + (step ? ' · step ' + step : ''); }
 function blocksHTML(items){  // one block per level of communication, messages in order
@@ -930,6 +931,7 @@ function routeStatus(r){  // what became of one passed-on message, as a line of 
     case 'waiting': return ['wait', r.urgent ? `⚡ waiting: urgent, cuts into ${to}'s running turn` : `⏳ waiting for ${to}'s next turn`];
     case 'unseen': return ['bad', `? not found in the prompts of ${to}'s ${r.later} later turn${r.later === 1 ? '' : 's'}`];
     case 'superseded': return ['wait', `↷ superseded: ${esc(r.reason || 'a later message replaced it')}${r.turn ? ' (' + link(r.turn) + ')' : ''}`];
+    case 'dropped': return ['', `⊘ dropped: ${esc(r.reason || 'nothing will carry it any more')}`];
     case 'held': return [r.by_design ? 'ok' : 'wait', `${r.by_design ? '⊘' : '⏸'} held: ${esc(r.reason || '')}`];
     case 'unknown': return ['bad', `⚠ sent into ${to}'s running turn${r.turn ? ' ' + link(r.turn) : ''}, not confirmed`];
     case 'failed': return ['bad', `⚠ not delivered: ${esc(r.problem || '')}`];
@@ -997,6 +999,7 @@ function relayLine(id){  // what became of the messages this reply passed on
       ? `✓ passed to ${to}${r.at ? ' at ' + tm(r.at) : ''}${r.turn ? ` · read in ${esc(r.turn)} (${esc(r.purpose || '')}${r.turn_status === 'running' ? ', running now' : ''})` : ''}`
       : r.status === 'held' ? `⏸ held for ${to}: ${esc(r.reason || '')}`
       : r.status === 'superseded' ? `↷ superseded: ${esc(r.reason || 'a later message replaced it')}`
+      : r.status === 'dropped' ? `⊘ dropped: ${esc(r.reason || 'nothing will carry it any more')}`
       : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}: it is answered as soon as it is idle`);
     return `<div class="w">${s}</div>`; }).join('');
 }

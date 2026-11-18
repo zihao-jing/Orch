@@ -714,12 +714,23 @@ class Board:
                                         **({"problems": problems} if problems else {}), **tag})
             if settle and status == "ok" and text.strip():  # the agreed answer goes to the run like any answer
                 self.control({"kind": "answer", "qid": qid, "message": text.strip(), "via": "conversation"})
+            elif status == "ok" and T.bodies(text or "", "question"):  # a new question for me: registered by the run
+                self.control({"kind": "chat_question", "agent": mgr.name, "text": text, "source": cid})
             pause = manager_pause(text) if status == "ok" else ""
             if pause:  # the manager stops the run from the chat
                 self.control({"kind": "pause", "message": pause})
 
         threading.Thread(target=work, daemon=True).start()
         return {"id": cid}
+
+    def chat_question_pending(self) -> bool:
+        """A question the manager asked in a board chat that the run has not registered yet (it is open)."""
+        rd = self.run_dir
+        for p in sorted((rd / "inbox").glob("*.json")) if rd else []:
+            d = read_json(p) or {}
+            if isinstance(d, dict) and d.get("kind") == "chat_question":
+                return True
+        return False
 
     @staticmethod
     def discussion_on(rd: Path) -> bool:
@@ -981,6 +992,8 @@ def _ledger_row(m: Dict[str, Any], turns: List[Dict[str, Any]], ledger: List[Dic
         by = next((x for x in ledger if x.get("id") == m.get("by")), None) or {}
         src = by.get("source") or m.get("by_turn") or ""
         row.update(status="superseded", reason=m.get("reason"), turn=src if re.match(r"r\d+-t\d+-", src) else None)
+    elif st == "dropped":
+        row.update(status="dropped", reason=m.get("reason"), at=m.get("dropped_at"))
     else:
         row["status"] = "waiting"
     return row
@@ -1290,7 +1303,8 @@ def _handler(boards: Dict[str, Board]):
                 b.control({"kind": "answer", "qid": body.get("qid"), "message": msg})
             elif u.path == "/api/night":
                 st = read_json(b.run_dir / "state.json", {}) or {}
-                if any(q.get("to") == "human" and q.get("status") == "open" for q in st.get("questions") or []):
+                if any(q.get("to") == "human" and q.get("status") == "open" for q in st.get("questions") or []) \
+                        or b.chat_question_pending():
                     return self.js({"error": "A question for you is open: night mode can switch once it is answered."},
                                    409)
                 b.control({"kind": "night", "on": bool(body.get("on"))})

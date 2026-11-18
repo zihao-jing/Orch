@@ -382,7 +382,7 @@ class Recorder:
 
     def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause", "night", "reply", "correction",
                                            "terminal", "discussion", "milestone", "review",
-                                           "review_comments")) -> List[Dict[str, Any]]:
+                                           "review_comments", "chat_question")) -> List[Dict[str, Any]]:
         """Consume answer / approval files from inbox/ (oldest first)."""
         inbox = self.run_dir / "inbox"
         out: List[Dict[str, Any]] = []

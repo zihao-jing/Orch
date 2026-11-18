@@ -33,7 +33,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import audit as _audit
 from . import boards as B
@@ -906,6 +906,8 @@ class ManagedRunner(MonitorRunner):
         if not text:
             text = self.for_worker(body) if target.role == "worker" and sender.role == "verifier" else \
                 (self.mtpl("relay_note", note=body).strip() or body)
+        if target.role == "worker":
+            text = self.par_leaks(target, text, "message")
         if sender.role == "manager" and self.discussion_on():  # B6: nothing goes down while I discuss with it
             m = L.add(sender.name, target.name, body, text, source=source, i=i, via=via, purpose=purpose, hops=hops,
                       urgent=urgent, additive=additive, status="held", reason=RT.DISCUSSION,
@@ -976,6 +978,24 @@ class ManagedRunner(MonitorRunner):
             if m.get("source") == turn and m["to"] == to and m["status"] == "sent" and "phase" in (m.get("carrier") or {}):
                 self.ledger.mark(m, "superseded", reason=reason, **({"by_turn": by} if by else {}))
 
+    def drop_waiting(self, rows: List[Dict[str, Any]], reason: str) -> List[Dict[str, Any]]:
+        """Close messages still "sent" that nothing will carry any more as "dropped" (routing.py), with the reason;
+        a queued update to a worker goes with them."""
+        out = []
+        for m in rows:
+            if m.get("status") != "sent":
+                continue
+            self.ledger.drop(m, reason)
+            wm = (m.get("carrier") or {}).get("wm")
+            if wm and any(x["id"] == wm for x in self.rec.pending_worker_messages(m["to"])):
+                self.rec.worker_message_status(wm, RT.DROPPED, reason=reason)
+            out.append(m)
+        if out:
+            self.rec.event("message_dropped", msgs=[m["id"] for m in out], to=sorted({m["to"] for m in out}),
+                           reason=reason)
+            self.rec.progress(f"⊘ {', '.join(m['id'] for m in out)} closed undelivered: {reason}")
+        return out
+
     def scan_inbox(self, only: Optional[str] = None) -> None:
         """Record the notes waiting in inbox/ (board chat replies, the terminal, my own notes). A note from the
         critic or the manager to a worker becomes an update for the worker, like a check-in's."""
@@ -1034,7 +1054,7 @@ class ManagedRunner(MonitorRunner):
                     L.mark(m, "held", reason=RT.NEXT_TURN, next_turn=True, activate=False)
                 if sender is not None and sender.role in ("verifier", "manager") and tgt.role == "worker" \
                         and not m["urgent"] and len(names) == 1:
-                    text_w = self.for_worker(msg) if sender.role == "verifier" else msg
+                    text_w = self.par_leaks(tgt, self.for_worker(msg) if sender.role == "verifier" else msg, "message")
                     (inbox / "consumed").mkdir(exist_ok=True)
                     os.replace(p, inbox / "consumed" / p.name)
                     wm = self.rec.queue_worker_message(name, text_w, m["source"], frm)
@@ -1139,7 +1159,8 @@ class ManagedRunner(MonitorRunner):
         self.rec.save()
 
     # board controls that act at once, also while a turn runs or the run waits (the others wait for check_control)
-    AT_ONCE = ("reply", "correction", "terminal", "discussion", "milestone", "review", "review_comments")
+    AT_ONCE = ("reply", "correction", "terminal", "discussion", "milestone", "review", "review_comments",
+               "chat_question")
 
     def take_messages(self) -> None:
         """Replies from a terminal, address corrections from board chats, and the switches that act at once."""
@@ -1160,6 +1181,13 @@ class ManagedRunner(MonitorRunner):
             return self.review_comments(str(d.get("path") or ""))
         a = next((x for x in self.mon.agents if x.name == d.get("agent")), None)
         if a is None:
+            return
+        if kind == "chat_question":  # a <question> the manager wrote in a board chat reply: like a round question's
+            if a.role == "manager":
+                qs = self.manager_questions(str(d.get("text") or ""), str(d.get("source") or ""))
+                if qs:
+                    self.rec.event("chat_question", agent=a.name, source=d.get("source"), qids=[q["id"] for q in qs])
+                    self.rec.save()
             return
         if kind == "correction":
             self.correct(a, [str(b) for b in d.get("bad") or []])
@@ -1198,6 +1226,7 @@ class ManagedRunner(MonitorRunner):
                             source=source, via=via)
         self.correct(a, bad)
         if a.role == "manager":
+            self.manager_questions(text, source)  # its questions for me count as a round turn's do
             pause = manager_pause(text)
             if pause:
                 self.mg["pause_req"] = {"text": pause, "turn": source}
@@ -2128,18 +2157,7 @@ class ManagedRunner(MonitorRunner):
         """Record the manager's questions for me (one per <question>, non-blocking), pass on its messages (unless the
         caller takes the message for the critic itself) and note a pause it calls; return its whole reply."""
         text = r.get("output") or ""
-        mine = truncate(self.for_me(text), 1500)
-        for attrs, q in T.blocks(text, "question"):
-            if not (q or "").strip():
-                continue
-            nq = self.new_question(self.manager, "human", q, r["turn_id"], parent, assumption=mine)
-            # B9: the work that depends on it waits for my answer, unless the manager says it can go on meanwhile
-            nq["blocking"] = T._norm(attrs.get("blocking", "")) not in ("no", "false", "0")
-            if self.st.get("night"):  # nobody is watching: the manager's choice stands until I say otherwise
-                nq.update(status="night", answered_by=self.manager.name, answer=mine, answer_turn=r["turn_id"],
-                          answered_at=now_iso())
-                self.decide(f"{self.short_question(q)}: {mine or '(see the manager turn)'}", "manager (night mode)",
-                            nq["id"])
+        self.manager_questions(text, r["turn_id"], parent)
         if relay:  # its message to the critic as a note; a message to the worker is routed after the turn (route_reply)
             for i, (attrs, body) in enumerate(T.blocks(text, "message")):
                 a = self.find_agent(attrs.get("to", ""))
@@ -2163,6 +2181,28 @@ class ManagedRunner(MonitorRunner):
         if pause:
             self.mg["pause_req"] = {"text": pause, "turn": r["turn_id"]}
         return text
+
+    def manager_questions(self, text: str, turn: str, parent: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Each <question> of a manager reply is a question for me (a round turn, a board chat reply, the terminal):
+        blocking unless it says blocking="no"; in night mode its own recommendation stands and is recorded."""
+        if turn and any(q.get("turn") == turn and q.get("from") == self.manager.name
+                        for q in self.st.get("questions") or []):
+            return []  # handed over twice
+        mine = truncate(self.for_me(text), 1500)
+        out = []
+        for attrs, q in T.blocks(text, "question"):
+            if not (q or "").strip():
+                continue
+            nq = self.new_question(self.manager, "human", q, turn, parent, assumption=mine)
+            # B9: the work that depends on it waits for my answer, unless the manager says it can go on meanwhile
+            nq["blocking"] = T._norm(attrs.get("blocking", "")) not in ("no", "false", "0")
+            if self.st.get("night"):  # nobody is watching: the manager's choice stands until I say otherwise
+                nq.update(status="night", answered_by=self.manager.name, answer=mine, answer_turn=turn,
+                          answered_at=now_iso())
+                self.decide(f"{self.short_question(q)}: {mine or '(see the manager turn)'}", "manager (night mode)",
+                            nq["id"])
+            out.append(nq)
+        return out
 
     def find_agent(self, who: str) -> Optional[AgentConfig]:
         w = re.sub(r"^the\s+", "", who.lower().strip())
@@ -2951,15 +2991,16 @@ class ManagedRunner(MonitorRunner):
         if lines.pop(w.name, None) is not None:
             self.rec.save()
 
-    def progress_tick(self) -> None:
-        """Run the checks that are due (called from the loops that wait on a worker's turn or job)."""
+    def progress_tick(self, run: Optional[Callable[[Dict[str, Any]], Any]] = None) -> None:
+        """Run the checks that are due (called from the loops that wait on a worker's turn or job). `run` starts one
+        check (default: here and now; B11: on the checks' own threads, par_checks)."""
         if self.should_stop():
             return
         now = self.clock()
         for name, watch in list((getattr(self, "_watches", None) or {}).items()):
             if now >= watch["next"]:
                 watch["next"] = now + watch["every"]
-                self.quick_check(watch)
+                (run or self.quick_check)(watch)
         if getattr(self, "_watches", None) and getattr(self, "_mgr_next", None) and self.clock() >= self._mgr_next:
             me = self.manager.check_every
             self._mgr_next = self.clock() + (MANAGER_CHECK_EVERY if me is None else float(me)) * 60.0
@@ -3076,7 +3117,8 @@ class ManagedRunner(MonitorRunner):
                               f"reads it: {'; '.join(flags[:3])}")
         problem = P.is_problem(status)
         summary = phrase + ("" if status == P.OK else f"; check: {status}")
-        self.status_line(w, watch, {"status": status, "summary": summary})
+        if (getattr(self, "_watches", None) or {}).get(w.name) is watch:  # not a turn or job that ended meanwhile
+            self.status_line(w, watch, {"status": status, "summary": summary})
         slot = self.par_slot(w.name)
         if slot is not None:  # B11: the lane and the work board show each worker's latest check
             first = next((ln.strip() for ln in report.splitlines() if ln.strip()), "")
@@ -3283,7 +3325,8 @@ class ManagedRunner(MonitorRunner):
         if base.state_file:
             p = Path(base.state_file)
             sf = str(p.parent.parent / name / p.name)
-        a = dataclasses.replace(base, name=name, display_name=f"{base.display_name}-{k}" if base.display_name else "",
+        # without a name of its own a copy is called by its id ("writer-2"), not "the writer-2" (AgentConfig.called)
+        a = dataclasses.replace(base, name=name, display_name=f"{base.display_name}-{k}" if base.display_name else name,
                                 state_file=sf, prompt_vars=dict(base.prompt_vars or {}),
                                 working_dir=wt["cwd"] if wt else base.working_dir)
         self.mon.agents.append(a)
@@ -3297,7 +3340,7 @@ class ManagedRunner(MonitorRunner):
         name = f"{m.name}-{k}"
         if not self.has_agent(name):
             sf = str(Path(m.state_file).parent.parent / name / Path(m.state_file).name) if m.state_file else ""
-            a = dataclasses.replace(m, name=name, display_name=f"{m.display_name}-{k}" if m.display_name else "",
+            a = dataclasses.replace(m, name=name, display_name=f"{m.display_name}-{k}" if m.display_name else name,
                                     state_file=sf, prompt_vars={**(m.prompt_vars or {}), "worker": w.called})
             self.mon.agents.append(a)
             self.clones[name] = m.name
@@ -3408,6 +3451,7 @@ class ManagedRunner(MonitorRunner):
         self.__dict__.setdefault("_par_rounds", {})
         self.__dict__.setdefault("_par_procs", {})
         ex = ThreadPoolExecutor(max_workers=max(1, len(par["slots"])), thread_name_prefix="worker")
+        checks = self.par_checks(len(par["slots"]))  # B5: each worker's monitor checks its turn or job, on its own
         ok = False
         try:
             while True:
@@ -3436,7 +3480,6 @@ class ManagedRunner(MonitorRunner):
                 if not busy and not ready:
                     break
                 self.urgent_checkin()
-                self.progress_tick()  # B5: each worker's monitor checks its turn or job
                 self.activate("stage")  # the manager and critic answer their messages meanwhile
                 self.rec.save()
                 with self.unlocked():
@@ -3447,10 +3490,49 @@ class ManagedRunner(MonitorRunner):
             ok = True
         finally:
             with self.unlocked():
+                checks()
                 ex.shutdown(wait=True)
             if not ok and not self.should_stop():  # failed: the section ends here
                 self.par_end(mg)
         return self.par_finish(mg)
+
+    def par_checks(self, n: int) -> Callable[[], None]:
+        """The progress checks of a parallel section, on threads of their own: a long critic turn on the main thread
+        (a review of one worker's step) never holds up the checks of the others. A check needs none of the critic's
+        turns; its report waits in the critic's queue (report_check) and a problem starts a critic turn once the
+        critic is free. Returns the function that stops them (it waits for a check still running)."""
+        stop = threading.Event()
+        pool = ThreadPoolExecutor(max_workers=max(1, n), thread_name_prefix="check")
+        running: Dict[str, Any] = {}
+
+        def one(watch: Dict[str, Any]) -> None:
+            with self.rec.lock:
+                try:
+                    self.quick_check(watch)
+                except StopRequested:
+                    pass
+                except Exception as e:  # a check never stops the work
+                    self.rec.event("check_error", agent=watch.get("agent"), error=f"{type(e).__name__}: {e}")
+
+        def start(watch: Dict[str, Any]) -> None:
+            f = running.get(watch["agent"])
+            if f is None or f.done():  # one check at a time per worker
+                running[watch["agent"]] = pool.submit(one, watch)
+
+        def loop() -> None:
+            while not stop.is_set() and not self.should_stop():
+                with self.rec.lock:
+                    self.progress_tick(start)
+                stop.wait(0.05)
+
+        th = threading.Thread(target=loop, name="checks", daemon=True)
+        th.start()
+
+        def end() -> None:
+            stop.set()
+            th.join()
+            pool.shutdown(wait=True)
+        return end
 
     def par_dispatch(self, ex: ThreadPoolExecutor, name: str) -> Any:
         mg, par, c = self.mg, self.par, self.mon.controller
@@ -3470,7 +3552,9 @@ class ManagedRunner(MonitorRunner):
             else:
                 prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
             s["prompt"] = prompt  # kept until the turn ends: a restart runs it again
-        self.par_leaks(w, prompt)
+        prompt = s["prompt"] = self.par_leaks(w, prompt)
+        for m in self.ledger.waiting(name):  # as it will be found in the prompt
+            m["text"] = self.scrub_others(w, m.get("text") or "")[0]
         if c.job_wait > 0:
             self._par_procs[name] = _jobs.snapshot()
         s.update(status=PW.WORKING, round=rnd, turns=s.get("turns", 0) + 1, step_turns=s.get("step_turns", 0) + 1)
@@ -3494,14 +3578,39 @@ class ManagedRunner(MonitorRunner):
             self.after_state_turn(w, r)
             return r
 
-    def par_leaks(self, w: AgentConfig, prompt: str) -> None:
-        """Flag (never cut) a worker's prompt that names another worker: they must not know about each other."""
-        others = [a for a in self.all_workers if a.name != w.name]
-        hit = sorted({x for a in others for x in (a.name, a.display_name) if x and re.search(
-            rf"(?<![\w-]){re.escape(x)}(?![\w-])", prompt)})
+    OTHER_TASK = "another task"  # what a worker reads where the critic named another worker
+
+    def scrub_others(self, w: AgentConfig, text: str) -> Tuple[str, List[str]]:
+        """B11: the ids and names of the other workers in text for worker `w` (they must not know about each other):
+        (the text with each copy's id or name replaced by "another task", every name found). A copy's id ("writer-3",
+        "Sam-3") can't be an ordinary word, so it is replaced; the first worker's own name ("writer", "Sam") may be
+        one, so it is replaced only in backticks and otherwise just reported."""
+        if not text or not self.clones:  # only a parallel section has copies that must not know each other
+            return text, []
+        hit: List[str] = []
+        for a in self.all_workers:
+            if a.name == w.name:
+                continue
+            for x in {a.name, a.display_name} - {""}:
+                pat = re.compile(rf"(?<![\w-]){re.escape(x)}(?![\w-])", re.I)
+                if not pat.search(text):
+                    continue
+                hit.append(x)
+                safe = a.name in self.clones
+                sub = (rf"(?i)(?:\bthe\s+)?`?(?<![\w-]){re.escape(x)}(?![\w-])`?" if safe
+                       else rf"`{re.escape(x)}`")
+                text = re.sub(sub, self.OTHER_TASK, text)
+        return text, sorted(set(hit))
+
+    def par_leaks(self, w: AgentConfig, text: str, what: str = "prompt") -> str:
+        """Text for a worker without the other workers' ids (scrub_others); a hit is flagged on the board."""
+        out, hit = self.scrub_others(w, text)
         if hit:
-            self.rec.event("role_leak", agent=w.name, names=hit)
-            self.rec.progress(f"⚠ the prompt for `{w.name}` names another worker ({', '.join(hit)}); sent as written")
+            cut = out != text
+            self.rec.event("role_leak", agent=w.name, names=hit, what=what, replaced=cut)
+            self.rec.progress(f"⚠ the {what} for `{w.name}` named another worker ({', '.join(hit)}); "
+                              + (f"replaced with \"{self.OTHER_TASK}\"" if cut else "sent as written"))
+        return out
 
     def par_after_turn(self, name: str, r: Dict[str, Any]) -> None:
         par, c, m = self.par, self.mon.controller, self.mon
@@ -3634,7 +3743,8 @@ class ManagedRunner(MonitorRunner):
         """The critic hands out steps to the workers without one (one turn, one <to> section each)."""
         par, c = self.par, self.critic
         par["assign_due"] = False
-        ids = ", ".join(f"`{n}` ({self.mon.agent(n).called})" for n in par["slots"])
+        ids = ", ".join(f"`{n}`" + (f" ({self.mon.agent(n).called})" if self.mon.agent(n).called != n else "")
+                        for n in par["slots"])
         base = self.workers[0]
         try:
             ck = self.checklist_board()
@@ -3740,9 +3850,9 @@ class ManagedRunner(MonitorRunner):
             decision = f"{name}: feedback → {name}"
         summary["verdicts"] = {v.name: vd}
         if not s.get("instr"):  # its message rode on the review, and no further turn carries it
-            for m in self.ledger.waiting(name):
-                if m.get("source") == r.get("turn_id") and "phase" in (m.get("carrier") or {}):
-                    self.ledger.mark(m, "superseded", reason="the step passed; nothing more goes to them for it")
+            self.drop_waiting([m for m in self.ledger.waiting(name) if m.get("source") == r.get("turn_id")
+                               and "phase" in (m.get("carrier") or {})],
+                              "the step passed; nothing more goes to them for it")
         if others:
             self.par_give(others, r["turn_id"])
         self.par_questions_up(r)
@@ -3757,10 +3867,9 @@ class ManagedRunner(MonitorRunner):
         self.write_work_board()
         why = "the parallel section ended: they work no more"
         for n in [n for n in par.get("slots", {}) if n in self.clones]:  # nothing reaches a copy that has stopped
-            for m in self.ledger.waiting(n):
-                self.ledger.mark(m, "superseded", reason=why)
+            self.drop_waiting(self.ledger.waiting(n), why)
             for wm in self.rec.pending_worker_messages(n):
-                self.rec.worker_message_status(wm["id"], "superseded", reason=why)
+                self.rec.worker_message_status(wm["id"], RT.DROPPED, reason=why)
         self.par_drop_clones()
         par["active"] = False
         par["ended_at"] = now_iso()
@@ -3849,6 +3958,10 @@ class ManagedRunner(MonitorRunner):
         passed = vd == "PASS"
         if not passed:
             self.worker_feedback(self.clean_critic(r["output"]))
+        else:  # the review's own messages to the workers: no turn of theirs follows in this milestone to carry them
+            self.drop_waiting([m for m in self.ledger.rows if m.get("source") == r.get("turn_id")
+                               and self.roles().get(m["to"]) == "worker" and "phase" in (m.get("carrier") or {})],
+                              "the review passed the work: no turn of theirs follows to carry it")
         wait = [] if passed else T.bodies(r.get("output") or "", "pause")
         nxt = "report" if passed else ("pause" if wait else "work")  # a proposed pause goes to the manager
         if wait:
@@ -4090,9 +4203,13 @@ class ManagedRunner(MonitorRunner):
         ms = self.cur()
         ms.update(status="done", ended_at=now_iso(), ended_round=int(self.st.get("round", 0)))
         self.rec.progress(f"🏁 **Milestone {mg['ms'] + 1} done:** {ms['title']}")
+        roles = self.roles()
+        self.drop_waiting([m for m in self.ledger.rows if roles.get(m["to"]) == "worker"  # the phases that carried them are over
+                           and "phase" in (m.get("carrier") or {})], f"milestone {mg['ms'] + 1} ended before it reached them")
         mg["ms"] += 1
         mg["phase"] = "kickoff" if mg["ms"] < len(mg["milestones"]) else "done"
         if mg["phase"] == "done":
+            self.drop_waiting(list(self.ledger.rows), "the run ended before it was delivered")
             self.st["final_report"] = "\n\n".join(x for x in (ms.get("gate_summary"), ms.get("summary")) if x)
         return None
 

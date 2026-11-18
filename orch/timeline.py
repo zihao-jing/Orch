@@ -35,7 +35,8 @@ _LEVEL = {"manager": "user", "verifier": "mc", "worker": "cw", "monitor": "mon",
 _DEFAULT_TO = {"manager": "verifier", "verifier": "worker", "worker": "verifier", "monitor": "verifier",
                "auditor": "human"}
 _ROUTE_STATUS = {"read": "delivered", "delivered": "delivered", "waiting": "sent", "held": "held",
-                 "superseded": "superseded", "failed": "failed", "unseen": "unseen", "unknown": "unknown"}
+                 "superseded": "superseded", "dropped": "dropped", "failed": "failed", "unseen": "unseen",
+                 "unknown": "unknown"}
 
 
 def block_of(a: str, b: str) -> str:

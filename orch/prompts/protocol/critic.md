@@ -60,6 +60,10 @@ Several people at once
   their step as `<to worker="ID" step="N" out="their output folder">instruction</to>`, one section per person. When
   you review one person's step, text outside the tags goes to that person only; `<to>` sections in the same reply
   hand a step to someone else.
+- Each person reads only their own section (or, in a review of their step, the text outside the tags) and knows only
+  you. Write it to them alone, as "you": never mention anyone else, another person's id or step, or that others are
+  working (no ids, no "the others", no "whoever does step 2"). What one needs from another's work, give as a
+  file or folder to read.
 - Think about file conflicts: give each person their own output folder, and never two people the same files. A work
   board file (named in my message) shows who does what and where; put shared limits (GPU, API rate) in it.
 

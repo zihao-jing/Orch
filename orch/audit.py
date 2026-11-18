@@ -222,6 +222,9 @@ def ledger(run_dir: Path, lo_ts: float, hi_ts: float) -> Tuple[List[str], Dict[s
                 notable.add(m["id"])
         elif st == "superseded":
             line = f"{head}, superseded {_hms(m.get('updated_at'))} by {m.get('by', '?')} before delivery"
+        elif st == "dropped":  # nothing would ever carry it (its recipient stopped, its review or milestone is over)
+            line = f"{head}, dropped {_hms(m.get('dropped_at') or m.get('updated_at'))}: {m.get('reason') or '?'} " \
+                   "(closed, not waiting)"
         else:
             line = f"{head}, still waiting after {_mins(made, hi_ts)}"
             if made is not None and (hi_ts - made) / 60 >= WAIT_MIN:
@@ -235,7 +238,7 @@ def ledger(run_dir: Path, lo_ts: float, hi_ts: float) -> Tuple[List[str], Dict[s
     shown = [ln for mid, ln in lines if (mid, ln) in keep]
     if len(lines) > len(shown):
         shown.append(f"- … and {len(lines) - len(shown)} more, all delivered or held by design")
-    meant = len(picked) - counts.get("held by design", 0) - counts.get("superseded", 0)
+    meant = len(picked) - counts.get("held by design", 0) - counts.get("superseded", 0) - counts.get("dropped", 0)
     counts["delivered_share"] = counts.get("delivered", 0) / meant if meant else None
     return shown, counts, flags
 
@@ -328,6 +331,42 @@ def relay_coverage(tr: Dict[str, Any], turns_by_id: Dict[str, Dict[str, Any]]) -
     return out
 
 
+CUT = ("interrupted", "stopped")  # a turn a restart cut off (the run stopped or crashed mid-turn)
+
+
+def resumes(run_dir: Path) -> List[float]:
+    """When the run was resumed after a restart (`run_resumed` events)."""
+    out = []
+    p = run_dir / "events.jsonl"
+    for line in p.read_text(encoding="utf-8").splitlines() if p.is_file() else []:
+        if '"run_resumed"' not in line:
+            continue
+        try:
+            ts = _ts(json.loads(line).get("ts"))
+        except ValueError:
+            continue
+        if ts is not None:
+            out.append(ts)
+    return out
+
+
+def redos(turns: List[Dict[str, Any]], resumed: List[float]) -> Dict[str, str]:
+    """{turn id: the turn it redoes} for turns run again after a restart: the same agent's previous turn had the same
+    purpose and was cut off (interrupted or stopped), or the run was resumed between the two and they belong to the
+    same round. Their input repeats the earlier turn's by design."""
+    out: Dict[str, str] = {}
+    last: Dict[str, Dict[str, Any]] = {}
+    for t in turns:
+        u = last.get(t["agent"])
+        last[t["agent"]] = t
+        if u is None or u.get("purpose") != t.get("purpose"):
+            continue
+        a, b = _ts(u.get("started_at")) or 0.0, _ts(t.get("started_at")) or 0.0
+        if u.get("status") in CUT or (u.get("round") == t.get("round") and any(a <= x <= b for x in resumed)):
+            out[t["turn_id"]] = u["turn_id"]
+    return out
+
+
 def _agent_of(t: Dict[str, Any]) -> str:
     return ROLE.get(t.get("role"), t.get("role") or t.get("agent", "?"))
 
@@ -350,6 +389,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
 
     rows, origin, relays = [], {}, []
     roles = {t["agent"]: _agent_of(t) for t in allt}
+    redo = redos(allt, resumes(run_dir))  # turns run again after a restart: not duplicates
+    redone = {v: k for k, v in redo.items()}
     prev = None
     burst: List[Dict[str, Any]] = []
     for x in win:
@@ -368,8 +409,10 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
         est = turn_cost_basis(t) == "estimate"
         sess = f"resumed #{t.get('session_turn')}" if t.get("resumed_session") else "new"
         rem = f" (↺ {', '.join(t['reminders'])})" if t.get("reminders") else ""  # reminders sent at its end
+        mark = (f" · redo of {redo[t['turn_id']]} after a restart" if t["turn_id"] in redo else
+                f" · cut off by a restart, redone in {redone[t['turn_id']]}" if t["turn_id"] in redone else "")
         rows.append(f"| {t['turn_id']} | {_hms(t.get('started_at'))}–{_hms(t.get('ended_at'))} | "
-                    f"{t.get('purpose', '')}{rem} | {t.get('status', '')} | {sess} | "
+                    f"{t.get('purpose', '')}{rem} | {t.get('status', '')}{mark} | {sess} | "
                     f"{turn_model(t) or '?'} | {len(inp)} | {rep} | "
                     f"{len(out)} | {int(t.get('duration_s') or 0)} | {'~' if est else ''}{cost:.2f} | "
                     + ", ".join(f"{k} {v}" for k, v in sorted(mix.items(), key=lambda kv: -kv[1])) + " |")
@@ -382,7 +425,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
                           "line": f"{t['turn_id']} ({t.get('purpose')}) replied {len(out.strip())} chars, status "
                                   f"{t.get('status')}", "excerpt": f"Asked (end of message): {clip(asked[-EXCERPT:])}\n"
                                                                    f"Reply: {clip(out) or '(empty)'}"})
-        if rep >= REPEAT_MIN and rep >= REPEAT_SHARE * max(len(inp), 1):
+        if rep >= REPEAT_MIN and rep >= REPEAT_SHARE * max(len(inp), 1) and t["turn_id"] not in redo:
             first = next(p for p in paras if p["repeat"])
             flags.append({"kind": "repeated content", "weight": 3, "turn": t["turn_id"],
                           "line": f"{t['turn_id']}: {rep} of {len(inp)} chars were already in {t['agent']}'s "
@@ -409,8 +452,10 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
                 f"{rc['source']} {rc['share']:.0%} of {rc['source_chars']}"
                 + (" (withheld by design: " + ", ".join(f"{k} {v}" for k, v in rc["withheld"].items()) + ")"
                    if rc["withheld"] else "") for rc in rel))
-        # bursts: 3+ turns of one agent in a row within 10 minutes, mostly short
-        if prev is not None and prev["agent"] == t["agent"] and \
+        # bursts: 3+ turns of one agent in a row within 10 minutes, mostly short (a redo replaces its cut-off turn)
+        if t["turn_id"] in redo and burst and burst[-1]["turn_id"] == redo[t["turn_id"]]:
+            burst[-1] = t
+        elif prev is not None and prev["agent"] == t["agent"] and \
                 (_ts(t.get("started_at")) or 0) - (_ts(prev.get("ended_at")) or 0) < 600:
             burst.append(t)
         else:
@@ -472,6 +517,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           f"text (templates, handovers). *↺ ids*: short reminders orch adds at the end of a message at intervals, by "
           f"design; they are left out of the origins and repeats. *session*: *resumed #n* continues the agent's session at its n-th "
           f"turn, so the agent still has everything said before in it: a short message there is not a lost task. "
+          f"*redo of X after a restart* (status column): the run was restarted while turn X ran, so this turn runs X "
+          f"again; its message repeats X's by design and the pair is not a duplicate. "
           f"*$*: the backend's figure; *~* marks Claude Code's own estimate for a model on another provider, priced "
           f"at Claude rates, which is not what the provider charged — don't judge spend on it. Times are HH:MM:SS; "
           f"*in* is the message without orch's reminders.",
@@ -491,7 +538,9 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
         md += ["", "## Messages (orch's routing ledger: what each recipient was actually given)", "",
                f"{c['messages']} messages: " + ", ".join(f"{k} {v}" for k, v in c.items()
                                                        if k not in ("messages", "delivered_share")) +
-               f". Delivered share of those meant to arrive (not held by design, not superseded): {share}. A message "
+               f". Delivered share of those meant to arrive (not held by design, not superseded, not dropped): {share}. "
+               f"*dropped*: closed undelivered because nothing would carry it any more (its recipient stopped, or "
+               f"its review, milestone or run was over); it is not a wait. A message "
                f"counts as delivered only when it was found in the recipient's actual prompt.", "", *led]
     md += ["", "## Relays (share of what orch passes on that reached the recipient, in chars; tags such as the "
                "critic's plan and checklist, and messages for someone else, are withheld by design and listed apart)", "",

@@ -36,6 +36,9 @@ orch's design. These are intended; do not report them as faults (report only whe
   message when the discussion closes replaces them.
 - The golden board (standing rules) reaches each agent on a schedule, when it changes, and when a session is new;
   short reminders at intervals are orch's (stripped from the digest).
+- Restarts: when the run is restarted mid-turn, the cut-off turn is run again after the resume. The turn table marks
+  it "redo of <turn> after a restart" (and the cut-off one "cut off by a restart"); its message repeats the cut-off
+  turn's by design. Don't report such a pair as a duplicate or a repeated message.
 - Sessions reset at milestones and are compacted between steps, so a handover after a reset repeats what the new
   session lacks. A failed turn is retried on the same model with backoff, then on a backup model.
 

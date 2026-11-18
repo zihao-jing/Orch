@@ -13,6 +13,9 @@ The ledger (`state["messages"]`) holds one entry per message:
                 no turn and is delivered in the manager's next regular turn)
     delivered   seen in the recipient's actual prompt (`turn`, `how`: prompt / cut in / live)
     superseded  replaced by a newer message from the same sender before it was delivered (`by`)
+    dropped     closed undelivered because nothing will ever carry it (`reason`): its recipient stopped (a worker
+                copy whose parallel section ended), or the review, milestone or run it belonged to is over. Not a
+                wait and not a loss: it counts in neither the wait flags nor the delivered share
 
 Delivery is checked against the prompt the recipient was really given, never assumed from having queued it.
 
@@ -35,6 +38,7 @@ MAY_ADDRESS = {"manager": ("verifier", "worker"), "verifier": ("worker", "manage
 # sender role -> recipient roles it directs (its messages to them supersede its older waiting ones)
 DIRECTS = {"manager": ("verifier", "worker"), "verifier": ("worker",)}
 NEXT_TURN = "waits for next turn"
+DROPPED = "dropped"
 DISCUSSION = "discussion"  # the manager's messages while the user discusses with it: held until it closes (B6)  # a note up with nothing to decide: held until the manager's next regular turn
 MAX_HOPS = 2  # a message written in a turn that a message started counts one hop more; past this it waits
 
@@ -127,6 +131,10 @@ class Ledger:
 
     def mark(self, m: Dict[str, Any], status: str, **kw: Any) -> None:
         m.update(status=status, updated_at=now_iso(), **kw)
+
+    def drop(self, m: Dict[str, Any], reason: str) -> None:
+        """Close a waiting message that nothing will carry any more (see `dropped` above)."""
+        self.mark(m, DROPPED, reason=reason, dropped_at=now_iso())
 
     def waiting(self, to: str) -> List[Dict[str, Any]]:
         return [m for m in self.rows if m["to"] == to and m["status"] == "sent"]
