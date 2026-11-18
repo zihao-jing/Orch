@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import uuid
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -605,6 +606,8 @@ class MockBackend(Backend):
       fail_turns:   list of per-session turn numbers (1-based) that return an error
       error_text:   the reply text of a failed turn (e.g. a provider's message)
       write_file:   workers append a line to this file (relative to cwd) each turn
+      files:        managed dry runs: {"purpose": [{path: text, ...}, ...]}: the k-th turn of that purpose writes these
+                    files (relative to cwd; "" deletes one), as an agent editing a file in place would
     """
 
     name = "mock"
@@ -631,6 +634,17 @@ class MockBackend(Backend):
         script = o.get("script")
         if o.get("spawn") and purpose == "work" and n == 1:  # tests: leave a detached job running in the workspace
             subprocess.run(["sh", "-c", f"nohup {o['spawn']} >/dev/null 2>&1 &"], cwd=req.cwd or None)
+        edits = (o.get("files") or {}).get(purpose)  # managed dry runs: files the agent edits in this turn
+        if edits:
+            k = self._counts.setdefault(f"{sid}:files:{purpose}", 0) + 1
+            self._counts[f"{sid}:files:{purpose}"] = k
+            for path, text in (edits[k - 1] if k <= len(edits) else {}).items():
+                fp = Path(req.cwd or ".") / path
+                if text == "":
+                    fp.unlink(missing_ok=True)
+                else:
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+                    fp.write_text(str(text), encoding="utf-8")
         by_purpose = (o.get("replies") or {}).get(purpose)  # managed dry runs: {"purpose": [reply, ...]}
         if by_purpose:
             k = self._counts.setdefault(f"{sid}:{purpose}", 0) + 1

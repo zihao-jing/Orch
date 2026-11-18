@@ -229,6 +229,10 @@ class ControllerConfig:
     # managed mode: an agent's session open in a terminal (orch/hooks/terminal_relay.py) holds its turns; a mark
     # with no activity for this many seconds is stale (a crashed terminal) and orch continues the session
     terminal_busy_timeout: float = 3600.0
+    # managed mode: the golden board (orch/boards.py): rules, preferences and key decisions every agent reads; the
+    # manager owns it. "" = `.orch/golden.md` in a project folder, else golden.md beside the monitor's runs
+    golden_board: str = ""
+    golden_limit: int = 8000  # characters; above it the board warns and the manager is asked once to prune
 
 
 @dataclass
@@ -413,7 +417,7 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
              "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "reminders", "audit_every", "audit_points",
-             "terminal_busy_timeout")
+             "terminal_busy_timeout", "golden_board", "golden_limit")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -538,7 +542,8 @@ def load_config(path: str) -> Config:
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
                       "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
-                      "reminders", "audit_every", "audit_points", "terminal_busy_timeout"}
+                      "reminders", "audit_every", "audit_points", "terminal_busy_timeout", "golden_board",
+                      "golden_limit"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
@@ -578,6 +583,9 @@ def load_config(path: str) -> Config:
             audit_every=int(craw.get("audit_every", ControllerConfig.audit_every) or 0),
             audit_points=int(craw.get("audit_points", ControllerConfig.audit_points) or 5),
             terminal_busy_timeout=float(craw.get("terminal_busy_timeout", ControllerConfig.terminal_busy_timeout) or 0),
+            golden_board=(_expand(craw["golden_board"], base) if craw.get("golden_board")
+                          else str(proj / "golden.md") if proj else ""),
+            golden_limit=int(craw.get("golden_limit", ControllerConfig.golden_limit) or 0),
             **{k: str(craw[k]) for k in ("question_pattern", "note_pattern", "accept_pattern", "revise_pattern")
                if craw.get(k)},
         )

@@ -303,7 +303,9 @@ def _checklist_html(rdirs: List[Path]) -> str:
     for rdir in rdirs:
         rs = read_json(rdir / "round.json", {}) or {}
         for t in _turns_for_round(rdir):
-            items = checklist_items(review_checklist(t.get("output") or "")) if t.get("role") == "verifier" else []
+            snap = t.get("checklist_file") or {}  # the critic's checklist file after the turn (B3); older runs: the reply
+            text = snap.get("checklist", "") if snap else review_checklist(t.get("output") or "")
+            items = checklist_items(text) if t.get("role") == "verifier" and (not snap or t.get("purpose") == "verify") else []
             if not items:
                 continue
             ci = len(cols)

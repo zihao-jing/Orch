@@ -453,7 +453,8 @@ class TestManaged(unittest.TestCase):
                 self.assertNotIn("milestone", t["input"].lower(), t["turn_id"])
                 self.assertNotIn("score", t["input"].lower(), t["turn_id"])
         brief = next(t for t in ts if t["purpose"] == "brief")
-        self.assertIn("Please break this into a short `<plan>` of steps, then give Sam the first step only", brief["input"])
+        self.assertIn("Please break this into a few steps in your checklist file", brief["input"])
+        self.assertIn("then give Sam the first step\nonly", brief["input"])
         self.assertTrue(all(t.get("milestone") is not None for t in ts if t["purpose"] != "plan"))
 
     def test_revise_passes_only_the_part_for_the_critic(self):
@@ -1516,10 +1517,10 @@ class TestManaged(unittest.TestCase):
         self.assertTrue((rec.run_dir / "decisions.md").read_text().startswith("# Decisions"))
         ts = turns(rec)
         briefs = [t for t in ts if t["purpose"] == "brief"]
+        # the register is a record: what holds reaches the agents on the golden board (B3), not in their briefs
         self.assertNotIn("Decisions so far", briefs[0]["input"])
-        self.assertIn("Decisions so far", briefs[1]["input"])  # milestone 2 starts with the whole register
-        self.assertIn("- **S1** — Should the tables use percentages?: Go with the simpler option", briefs[1]["input"])
-        self.assertNotIn("(you,", briefs[1]["input"])  # the critic gets decisions without attribution
+        self.assertNotIn("Decisions so far", briefs[1]["input"])
+        self.assertNotIn("decisions.md", briefs[1]["input"])
         w2 = [t for t in ts if t["agent"] == "writer" and t.get("milestone") == 1]
         self.assertFalse(w2[0]["resumed_session"])  # a fresh worker session for the new milestone
         self.assertIn("fresh conversation", w2[0]["input"])
@@ -1808,9 +1809,8 @@ class TestManaged(unittest.TestCase):
             self.assertTrue(st["sessions"][a]["reset_at"])
             self.assertEqual(len(st["sessions"][a]["previous"]) >= 1, True)
             self.assertIn("fresh conversation", st["fwd"][a][0])
-        for a in ("boss", "critic"):
-            self.assertIn("British spelling", st["fwd"][a][0])
-        self.assertNotIn("British spelling", st["fwd"]["writer"][0])  # the critic passes on what the work must keep to
+        for a in ("boss", "critic", "writer"):  # the register is a record; what holds is on the golden board (B3)
+            self.assertNotIn("British spelling", st["fwd"][a][0])
         self.assertIn("Your plan and rubric", st["fwd"]["boss"][0])
         self.assertIn("| 2 | Part 2 | done |", st["fwd"]["boss"][0])
         self.assertIn("Your latest review", st["fwd"]["critic"][0])
@@ -1890,9 +1890,9 @@ class TestManaged(unittest.TestCase):
         self.assertIn("latest message (report", h)  # the newest message, also when turns start in the same second
         self.assertNotIn("Not yet.", h)
         r.decide("Round to one decimal.", "you", "note")
-        h = r.handover(r.manager)
-        self.assertIn("Decided since those notes were last written", h)
-        self.assertIn("Round to one decimal.", h)
+        h = r.handover(r.manager)  # the register is a record, not handed over (the golden board is, B3)
+        self.assertNotIn("Decided since those notes were last written", h)
+        self.assertNotIn("Round to one decimal.", h)
         # my edit reaches the manager and the critic's file
         p = sdir / "boss" / "state.md"
         p.write_text(p.read_text().replace("percentages", "fractions"))
@@ -2493,7 +2493,7 @@ class TestCriticPlan(unittest.TestCase):
                 self.assertNotIn("<plan>", t["input"])
                 self.assertNotIn("protected files unchanged", t["input"])
         nudged = verifies[4]["input"]
-        self.assertIn("plan still has open steps", nudged)
+        self.assertIn("checklist file still has open steps", nudged)
         self.assertIn("STEP-GAMMA", nudged)
         review = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "review")
         self.assertIn("3 of 3 steps done", review["input"])

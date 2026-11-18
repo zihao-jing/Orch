@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import audit as _audit
+from . import boards as B
 from . import jobs as _jobs
 from . import reminders as R
 from . import routing as RT
@@ -44,7 +45,7 @@ from .config import AgentConfig
 from .controller import MonitorRunner, checklist_state, parse_options, relayed, resolve_choice, strip_checklist, truncate
 from .report import CHECKBOX
 from .templates import render
-from .recorder import now_iso
+from .recorder import now_iso, write_json
 
 def manager_pause(text: str) -> str:
     """A pause the manager calls: its <pause> block(s), or, with <decision>PAUSE</decision>, the reply outside the
@@ -233,6 +234,9 @@ class ManagedRunner(MonitorRunner):
     def mtpl(self, name: str, **values: Any) -> str:
         values.setdefault("instructions", self.mon.controller.instructions or "")
         values.setdefault("decisions", "")
+        if "checklist_path" not in values:
+            p = self.checklist_path()
+            values["checklist_path"] = str(p) if p else "your checklist file"
         return self.tpl(name, **{**self.names(), **values})
 
     def has_session(self, a: AgentConfig) -> bool:
@@ -248,8 +252,11 @@ class ManagedRunner(MonitorRunner):
         """One turn; the reminders due are added at the end of its message (add_reminders). It waits while the
         agent's session is open in a terminal, and every <message> of its reply is routed (route_reply)."""
         self.hold_while_busy(agent)
+        self.board_vars()
+        before = (self.st.get("golden") or {}).get("hash")
         r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
         if r.get("status") == "ok":
+            self.golden_after_turn(agent, r, before)
             self.check_addresses(agent, r.get("output") or "")
             self.check_tooling(agent, r)
             self.route_reply(agent, r)
@@ -288,11 +295,20 @@ class ManagedRunner(MonitorRunner):
         if (role == "critic" and purpose not in ("checkin", "report") and self.mon.controller.protocol
                 and any((self.st.get("fwd") or {}).get(agent.name) or [])):
             add("reply_routing", self.mtpl("critic_reply_routing"))
+        g = self.check_golden()
+        if role == "manager" and g.get("prune_due"):  # once each time the board grows past its limit
+            add(R.GOLDEN_PRUNE, self.mtpl("golden_prune", chars=f"{g.get('chars', 0):,}",
+                                          limit=f"{g.get('limit', 0):,}", path=str(self.golden_path())))
+            g["prune_due"] = False
         counters = self.st.setdefault("reminders", {}).setdefault(agent.name, {})
         for rem in self.mon.controller.reminders:
             text = R.text_for(rem, role)
-            if rem["id"] == R.GOLDEN_BOARD and not text:
-                text = self.golden_board_reminder()
+            if rem["id"] == R.GOLDEN_BOARD:
+                if R.applies(rem, purpose) and R.targets(rem, agent.name, role):
+                    gb = self.golden_board_reminder(agent, role, text, R.due(counters, rem))
+                    if gb:
+                        add(R.GOLDEN_BOARD, gb)
+                continue
             if not text or not R.applies(rem, purpose) or not R.targets(rem, agent.name, role):
                 continue
             if rem["id"] == "protocol" and not self.mon.controller.protocol:  # no tag protocol to remind of
@@ -301,9 +317,102 @@ class ManagedRunner(MonitorRunner):
                 add(rem["id"], render(text, **self.names()))
         return prompt, sent
 
-    def golden_board_reminder(self) -> str:
-        """Hook for the golden board (batch B3): the text of its periodic reminder. Nothing until it exists."""
-        return ""
+    # ------------------------------------------------------------------ the golden board (orch/boards.py)
+    # One project file of rules, preferences and key decisions; the manager owns it and edits it in place. Every agent
+    # gets it at the end of a message: once whenever it changed or the agent's session is new, and on the reminder's
+    # schedule. The critic and the worker read it as their own user's standing rules; a board that names a layer above
+    # one of them is held from it (and the manager is told) until it is rewritten.
+
+    def golden_path(self) -> Path:
+        c = self.mon.controller.golden_board
+        return Path(c) if c else self.rec.run_dir.parent / "golden.md"
+
+    def golden_body(self) -> str:
+        return B.golden_body(B.read(self.golden_path()))
+
+    def board_vars(self) -> None:
+        """The paths the manager's protocol names (fixed for a project, so its system prompt stays the same)."""
+        self.manager.prompt_vars["golden_board"] = str(self.golden_path())
+
+    def setup_boards(self) -> None:
+        if B.ensure_golden(self.golden_path()):
+            self.rec.event("golden_created", path=str(self.golden_path()))
+        self.board_vars()
+        self.check_golden()
+
+    def golden_leaks(self, body: str) -> Dict[str, List[str]]:
+        """{role: [words]}: what in the board names a layer above the critic or the worker (design principle 3)."""
+        above = {"verifier": ("manager",), "worker": ("manager", "verifier")}
+        words = {"verifier": ["manager", "orch", "real user"], "worker": ["manager", "orch", "real user", "critic"]}
+        out: Dict[str, List[str]] = {}
+        for role, roles in above.items():
+            names = list(words[role])
+            for a in self.mon.agents:
+                if a.role in roles:
+                    names += [n for n in (a.display_name, a.name) if n and len(n) > 2 and n.lower() != "the"]
+            found = sorted({w for w in names if re.search(rf"(?i)(?<![\w.-]){re.escape(w)}(?![\w-])", body or "")})
+            if found:
+                out[role] = found
+        return out
+
+    def check_golden(self) -> Dict[str, Any]:
+        """Read the board: note a change, a name it must not carry, and its size (a warning, and the manager asked
+        once to prune; again only after it grows again). Never cut."""
+        g = self.st.setdefault("golden", {})
+        body = self.golden_body()
+        h = B.digest(body)
+        limit = int(self.mon.controller.golden_limit or 0)
+        g.update(path=str(self.golden_path()), limit=limit)
+        if g.get("hash") != h:
+            first = "hash" not in g
+            g.update(hash=h, chars=len(body), changed_at=now_iso())
+            if not first:
+                self.rec.event("golden_changed", chars=len(body))
+                self.rec.progress(f"📋 the golden board changed ({len(body):,} characters); every agent gets it once")
+            leaks = self.golden_leaks(body)
+            g["leaks"] = leaks
+            if leaks:
+                what = ", ".join(sorted({w for ws in leaks.values() for w in ws}))
+                self.rec.progress(f"⚠ the golden board names {what}; held from the agents it would reveal that to")
+                self.rec.event("board_warning", what="golden_leak", problem=f"the golden board names {what}")
+                self.forward(self.manager, self.mtpl("golden_leak", words=what).strip())
+        n = len(body)
+        g["over"] = bool(limit) and n > limit
+        if g["over"]:
+            if g.get("prune_at") is None or n > g["prune_at"]:
+                g.update(prune_at=n, prune_due=True)
+                self.rec.progress(f"⚠ the golden board is {n:,} characters, over its {limit:,}: the manager is asked "
+                                  "to prune it")
+                self.rec.event("board_warning", what="golden_size", chars=n, limit=limit,
+                               problem=f"the golden board is {n:,} characters (limit {limit:,})")
+            elif n < g["prune_at"]:
+                g["prune_at"] = n  # pruned but still over: the next growth asks again
+        else:
+            g.pop("prune_at", None)
+            g["prune_due"] = False
+        return g
+
+    def golden_board_reminder(self, agent: AgentConfig, role: str, intro: str, due: bool) -> str:
+        """The board for this agent's message, or '': when it changed since the agent last got it, when the
+        agent's session is new, or when the reminder is due. Nothing while the board is empty."""
+        body = self.golden_body()
+        g = self.st.get("golden") or {}
+        if not body or (role != "manager" and agent.role in (g.get("leaks") or {})):
+            return ""
+        seen = (self.st.get("golden_seen") or {}).get(agent.name) or {}
+        sid = (self.st["sessions"].get(agent.name) or {}).get("session_id")
+        if not (due or not sid or seen.get("hash") != g.get("hash") or seen.get("session") != sid):
+            return ""
+        head = render(intro or "", **self.names(), golden_board=str(self.golden_path())).strip()
+        return f"{head}\n\n{body}" if head else body
+
+    def golden_after_turn(self, agent: AgentConfig, r: Dict[str, Any], before: Optional[str]) -> None:
+        """After a turn: the agent has the board it was sent; a board the manager changed in its own turn counts as
+        seen by it (it wrote it)."""
+        g = self.check_golden() if agent.role == "manager" else (self.st.get("golden") or {})
+        sent = R.GOLDEN_BOARD in (r.get("reminders") or [])
+        if sent or (agent.role == "manager" and before is not None and g.get("hash") != before):
+            self.st.setdefault("golden_seen", {})[agent.name] = {"hash": g.get("hash"), "session": r.get("session_id")}
 
     MAY_ADDRESS = RT.MAY_ADDRESS  # whom each role may write to with <message to="…"> (besides to="you", its own user)
 
@@ -433,6 +542,9 @@ class ManagedRunner(MonitorRunner):
         parts = []
         if mine:
             parts.append(self.mtpl("critic_state_instruction", state=mine).strip())
+        p = self.checklist_path()
+        if p is not None and p.exists():
+            parts.append(f"## Your checklist file\n\n`{p}`: your steps and their items; edit it there.")
         if plan:
             parts.append("## Your plan\n\n" + plan)
         if ck:
@@ -450,13 +562,29 @@ class ManagedRunner(MonitorRunner):
             if bodies:
                 self.write_state(a, bodies[-1], a.called)
                 self.write_critic_state()
+            else:
+                self.adopt_own_state(a)
             self.apply_preferences(a, out)
         elif a.role == "verifier":
+            self.sync_checklist(r)
             self.note_plan(r)
-            if checklist_text(out) or plan_text(out):
-                self.write_critic_state()
+            self.write_critic_state()
         elif a.role == "worker":
             self.write_state(a, T.outside(out), "orch, from the latest report")
+
+    def adopt_own_state(self, a: AgentConfig) -> None:
+        """The manager may edit its state file in place instead of writing `<state>`: a change made during its own
+        turn is its own (taken in silently, and carried into the critic's standing instruction)."""
+        try:
+            text = self.state_path(a).read_text(encoding="utf-8")
+        except OSError:
+            return
+        h = hashlib.sha1(text.encode()).hexdigest()
+        known = (self.st.get("state_hash") or {}).get(a.name)
+        if h != known:
+            self.st.setdefault("state_hash", {})[a.name] = h
+            self.rec.event("state_written", agent=a.name, by=a.called)
+            self.write_critic_state()
 
     def apply_preferences(self, manager: AgentConfig, out: str) -> None:
         """The manager's <preference to="critic|worker">…</preference> tags: one line each in that agent's preference.md."""
@@ -1124,22 +1252,129 @@ class ManagedRunner(MonitorRunner):
                 self.decide(x["message"], "you", "note to " + ", ".join(x["to"] or ["all"]))
         return MonitorRunner.human_text(agent, msgs, annotate)
 
+    # ------------------------------------------------------------------ the step checklist (orch/boards.py)
+    # One file per milestone in the critic's folder, holding its steps and their items; the critic edits it in place.
+    # PASS and the plan's progress are read from it. A reply that still carries a <plan> or <checklist> block (the
+    # older protocol) is written into the file, unless the critic edited the file in that turn: then the file holds.
+
+    def agent_dir(self, a: AgentConfig) -> Path:
+        return Path(a.state_file).parent if a.state_file else self.rec.run_dir.parent / "agents" / a.name
+
+    def checklist_key(self) -> Optional[str]:
+        return f"m{self.mg.get('ms', 0) + 1}" if self.mg.get("milestones") else None
+
+    def checklist_path(self) -> Optional[Path]:
+        key = self.checklist_key()
+        return self.agent_dir(self.critic) / f"checklist-{key}.md" if key else None
+
+    def ck_rec(self, start: bool = False) -> Optional[Dict[str, Any]]:
+        """This milestone's checklist record in the run state ({hash, path}); made the first time it is needed. A
+        file already there from an earlier run (any file, when the milestone starts) is moved aside; a run from
+        before checklist files is seeded from the critic's latest blocks."""
+        key, p = self.checklist_key(), self.checklist_path()
+        if key is None or p is None:
+            return None
+        recs = self.st.setdefault("checklists", {})
+        r = recs.get(key)
+        if r is not None:
+            return r
+        if p.exists() and (start or self._older_than_milestone(p)):
+            old = p.with_name(f"{p.stem}.earlier-{time.strftime('%Y%m%d-%H%M%S')}.md")
+            p.replace(old)
+            self.rec.event("checklist_moved", path=str(p), to=str(old))
+            self.log(f"an earlier checklist file moved to {old}")
+        if not p.exists():
+            seed = None if start else B.merge_blocks(None, self._legacy_plan(), self._legacy_checklist())
+            text = B.render_checklist(seed) if seed and seed.get("steps") else (B.CHECKLIST_HEAD if start else "")
+            if text:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(text, encoding="utf-8")
+        r = recs[key] = {"path": str(p), "hash": B.digest(B.read(p))}
+        self.rec.save()
+        return r
+
+    def _older_than_milestone(self, p: Path) -> bool:
+        started = (self.cur() or {}).get("started_at")
+        if not started:
+            return False
+        try:
+            import datetime as _dt
+            return p.stat().st_mtime < _dt.datetime.fromisoformat(started).timestamp()
+        except (OSError, ValueError):
+            return False
+
+    def checklist_board(self) -> Dict[str, Any]:
+        """The parsed checklist file of the current milestone (empty without one)."""
+        if self.ck_rec() is None:
+            return {"steps": [], "standing": []}
+        return B.parse_checklist(B.read(self.checklist_path()))
+
     def latest_checklist(self) -> str:
-        """The critic's newest checklist (from a review, or an amended review), '' if it has none yet."""
+        """The checklist that gates the current step (standing rules and the step's items), from the file."""
+        return B.current_list(self.checklist_board())
+
+    def latest_plan(self) -> str:
+        """The critic's steps for the current milestone as plan lines, from the file ('' without steps)."""
+        return B.plan_lines(self.checklist_board())
+
+    def sync_checklist(self, r: Dict[str, Any]) -> None:
+        """After a critic turn: take in an older-protocol block (unless the file was edited in this turn), note the
+        file's state in the turn record (for the board), and ask once to merge when the list grows past the cap."""
+        rec = self.ck_rec()
+        if rec is None:
+            return
+        p, out = self.checklist_path(), r.get("output") or ""
+        text = B.read(p)
+        plan, ck = plan_text(out), "\n".join(T.bodies(out, "checklist"))
+        if plan.strip() or ck.strip():
+            if B.digest(text) != rec.get("hash"):
+                self.rec.event("checklist_block_ignored", turn=r.get("turn_id"))
+                self.rec.progress(f"ⓘ {self.critic.called} edited its checklist file; the list in its reply is not used")
+            else:
+                text = B.render_checklist(B.merge_blocks(B.parse_checklist(text) if text.strip() else None, plan, ck))
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(text, encoding="utf-8")
+                self.rec.event("checklist_from_reply", turn=r.get("turn_id"))
+        rec["hash"] = B.digest(text)
+        board = B.parse_checklist(text)
+        cur = B.current_list(board)
+        r["checklist_file"] = {"path": str(p), "checklist": cur, "plan": B.plan_lines(board)}
+        if r.get("turn_id") and r.get("round") is not None and r.get("seq") is not None:
+            with self.rec.lock:
+                write_json(self.rec.round_dir(r["round"]) / f"t{r['seq']:02d}-{r['agent']}.json", r)
+        n = sum(checklist_state(cur))
+        if n > B.CHECKLIST_CAP:
+            if rec.get("cap_at") is None or n > rec["cap_at"]:
+                rec["cap_at"] = n
+                self.forward(self.critic, self.mtpl("checklist_cap", n=n, cap=B.CHECKLIST_CAP).strip())
+                self.rec.progress(f"⚠ {self.critic.called}'s checklist for the current step has {n} items (about "
+                                  f"{B.CHECKLIST_CAP} at most); asked to merge")
+                self.rec.event("board_warning", what="checklist_size", items=n,
+                               problem=f"the current step's checklist has {n} items")
+        else:
+            rec.pop("cap_at", None)
+        self.rec.save()
+
+    def _legacy_checklist(self) -> str:
+        """The critic's newest <checklist> block in this milestone's turns (runs from before checklist files)."""
+        ms = self.mg.get("ms", 0) if self.mg.get("milestones") else None
         for p in sorted((self.rec.run_dir / "rounds").glob("r*/t*.json"), reverse=True):
             try:
                 t = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if t.get("agent") == self.critic.name and t.get("purpose") in ("verify", "amend", "guidance"):
-                ck = checklist_text(t.get("output") or "")
+            if t.get("agent") != self.critic.name:
+                continue
+            if ms is not None and t.get("milestone") is not None and t.get("milestone") != ms:
+                return ""
+            if t.get("purpose") in ("verify", "amend", "guidance", "brief"):
+                ck = "\n".join(T.bodies(t.get("output") or "", "checklist"))
                 if ck:
                     return ck
         return ""
 
-    def latest_plan(self) -> str:
-        """The critic's newest plan for the current milestone ('' if it has none): a plan belongs to the work it was
-        made for, so a new milestone starts without one."""
+    def _legacy_plan(self) -> str:
+        """The critic's newest <plan> block in this milestone's turns (runs from before checklist files)."""
         ms = self.mg.get("ms", 0) if self.mg.get("milestones") else None
         for p in sorted((self.rec.run_dir / "rounds").glob("r*/t*.json"), reverse=True):
             try:
@@ -1187,8 +1422,8 @@ class ManagedRunner(MonitorRunner):
         return f"round limit reached ({mg.get('ms_round')} rounds)"
 
     def note_plan(self, r: Dict[str, Any]) -> None:
-        """After a critic turn: a step ticked in its plan is progress, so the stall count starts again."""
-        plan = plan_text(r.get("output") or "")
+        """After a critic turn: a step finished in its checklist file is progress, so the stall count starts again."""
+        plan = self.latest_plan()
         if not plan:
             return
         mg = self.mg
@@ -1233,7 +1468,7 @@ class ManagedRunner(MonitorRunner):
         and what happened since it was written. Without a state file yet (a run from before them), from the run's
         records instead.
         - manager: the goal, its plan and rubric, the milestone table, its state, the critic's newest message, open
-          questions, and the decisions made since its state was written.
+          questions (what holds is on the golden board, sent with the first message of the new session).
         - critic: its state (my standing instruction and its checklist) and its latest review in short; in a
           top-down restart only its checklist, since my new instruction comes next.
         - worker: that this is a fresh conversation, plus its state (its latest report) outside a top-down restart;
@@ -1253,7 +1488,6 @@ class ManagedRunner(MonitorRunner):
         if mg.get("phase") == "wait" or (mg.get("gate") or {}).get("kind") == "wait":
             parts.append("The whole run is paused until I act on this:\n\n" + (w.get("text") or ""))
         mine, mine_at = self.read_state(self.manager)  # the standing instruction and what holds, and since when
-        since = mine_at
         if a.role == "manager":
             parts.append("The goal:\n\n" + (self.mon.goal or "").strip())
             if mg.get("plan_text"):
@@ -1279,6 +1513,9 @@ class ManagedRunner(MonitorRunner):
         elif a.role == "verifier":
             body, _at = self.read_state(a)
             ck, plan = self.latest_checklist(), self.latest_plan()
+            p = self.checklist_path()
+            if p is not None and p.exists():
+                parts.append(f"Your steps and checklist are in `{p}`; edit them there.")
             if top_down:  # where the work stands carries over; the checklist is rebuilt from the new instruction
                 if plan:
                     parts.append("Your plan so far (steps marked [x] are done; revise it to fit my new instruction):"
@@ -1307,17 +1544,8 @@ class ManagedRunner(MonitorRunner):
         qs = [q for q in self.st.get("questions") or [] if q.get("status") == "open" and q.get("to") == "human"]
         if qs and a.role == "manager":  # the manager's questions to me: never shown below it
             parts.append("Questions still open with me: " + "; ".join(f"{q['id']} {self.short_question(q['text'])}" for q in qs))
-        if top_down and a.role == "verifier":  # the manager's new instruction carries what matters now
-            parts.append(self.mtpl("decisions_pointer", path=str(self.rec.run_dir / "decisions.md")).strip())
-        elif since:  # the state holds what was decided before it; only what came after
-            dec = self.decisions_text(a, after=since)
-            if dec:
-                parts.append(dec)
-            parts.append(self.mtpl("decisions_pointer", path=str(self.rec.run_dir / "decisions.md")).strip())
-        else:
-            dec = self.decisions_text(a)
-            if dec:
-                parts.append(dec)
+        # what holds (rules, preferences, key decisions) is on the golden board, which a new session gets with this
+        # message; the decisions register stays a record and is not handed over
         return self.mtpl("session_reset", state="\n\n".join(parts)).strip()
 
     def clean_report(self, text: str) -> str:
@@ -1667,6 +1895,7 @@ class ManagedRunner(MonitorRunner):
         mg = self.mg
         self._main_ident = threading.get_ident()
         self.adopt_state_files()
+        self.setup_boards()
         while True:
             self.check_control()
             if mg.get("phase", "plan") != "done":
@@ -1775,10 +2004,10 @@ class ManagedRunner(MonitorRunner):
     def ph_kickoff(self, mg: Dict[str, Any]) -> Optional[str]:
         ms = self.cur()
         ms.update(status="active", started_at=now_iso(), started_round=int(self.st.get("round", 0)) + 1)
+        self.ck_rec(start=True)  # the critic's checklist file for this milestone
         self.fresh_sessions()
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
-                                             milestone=ms["text"], human_messages="",
-                                             decisions=self.decisions_text()), "kickoff")
+                                             milestone=ms["text"], human_messages=""), "kickoff")
         self.after_manager(r, relay=False)
         mg.update(note=self.critic_message(r, "kickoff"), note_at=now_iso(), ms_round=0, stall=0,
                   limit=False, phase="brief", plan_done=None, plan_total=None, step_round=None)
@@ -1787,7 +2016,6 @@ class ManagedRunner(MonitorRunner):
     def ph_brief(self, mg: Dict[str, Any]) -> Optional[str]:
         v = self.critic
         r = self.say(v, self.mtpl("critic_brief", note=mg.get("note", ""), human_messages="", cwd=v.working_dir,
-                                  decisions=self.decisions_text(v),
                                   instructions=self.mon.controller.instructions if not self.has_session(v) else ""), "brief")
         self.worker_feedback(self.clean_critic(r["output"]))
         mg["phase"] = "work"
@@ -2038,19 +2266,20 @@ class ManagedRunner(MonitorRunner):
         if vd in ("ERROR", "UNKNOWN") and c.stop_on_error:
             self.end_round(summary, "critic error / no verdict → stop", verdicts={v.name: vd})
             return "failed"
-        if vd == "PASS" and c.checklist:
-            done, open_ = checklist_of(r.get("output") or "")
+        if vd == "PASS" and c.checklist:  # read from the checklist file, never from a list in the reply
+            done, open_ = checklist_state(self.latest_checklist())
             if open_ or not done:
                 vd = "FAIL"
                 summary["checklist_overruled"] = [v.name]
-                self.rec.progress(f"{v.name} said PASS but its checklist has {open_} open / {done} done items → FAIL")
-                self.rec.set(nudge={v.name: c.checklist_nudge})
+                self.rec.progress(f"{v.name} said PASS but its checklist file has {open_} open / {done} done items "
+                                  "→ FAIL")
+                self.rec.set(nudge={v.name: self.checklist_nudge(open_)})
             else:
                 self.rec.set(nudge=None)
         elif c.checklist:
             self.rec.set(nudge=None)
         if vd == "PASS":
-            pd, pt, cur = plan_status(plan_text(r.get("output") or "") or self.latest_plan())
+            pd, pt, cur = plan_status(self.latest_plan())
             if pt and pd < pt:  # a finished step is not the finished work: the next step goes to the worker
                 vd = "FAIL"
                 summary["plan_open"] = pt - pd
@@ -2074,6 +2303,13 @@ class ManagedRunner(MonitorRunner):
                        + (" · question for the manager" if asked else ""))
         mg["asks"] = 0
         return None
+
+    def checklist_nudge(self, open_: int) -> str:
+        """Said to the critic when its PASS was overruled: about the file (a nudge set in the config wins)."""
+        c = self.mon.controller
+        if c.checklist_nudge != type(c).checklist_nudge:
+            return c.checklist_nudge
+        return self.mtpl("checklist_file_nudge", open=open_).strip()
 
     def ph_pause(self, mg: Dict[str, Any]) -> Optional[str]:
         """The critic proposes stopping the whole run until a person acts; the manager decides."""
@@ -2167,8 +2403,8 @@ class ManagedRunner(MonitorRunner):
         if after == "report" and vd == "FAIL":
             after = "work"
         elif after == "work" and vd == "PASS":
-            done, open_ = checklist_of(r.get("output") or "")
-            pd, pt, _cur = plan_status(plan_text(r.get("output") or "") or self.latest_plan())
+            done, open_ = checklist_state(self.latest_checklist())
+            pd, pt, _cur = plan_status(self.latest_plan())
             if (not self.mon.controller.checklist or (done and not open_)) and not (pt and pd < pt):
                 after = "report"
         if after == "work":

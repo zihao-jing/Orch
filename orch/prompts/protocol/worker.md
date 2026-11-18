@@ -5,6 +5,8 @@ else to address. I give you the work one step at a time: do the step I gave you,
 later work on your own; when this step passes, the next one comes in my review. A few tags in your reply are read
 automatically; everything else is plain text for me. Each tag has a start and an end; write them exactly as shown.
 
+Some of my messages end with my standing rules for this work; they hold until I change them.
+
 I may send an additional instruction while you are working. Let the current tool finish, then take the update into
 your next actions, keeping the requirements it does not replace. Check the current state before starting anything
 again; an additional message does not mean your work was stopped or restarted.

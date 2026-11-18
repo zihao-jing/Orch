@@ -218,8 +218,9 @@ Please score it against your rubric: a small table with a score out of 5 for eac
 score as `<score>x</score>` (out of 5). If the milestone is done, write me a short summary (tables welcome) and end
 with `<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
 `<message to="{{critic}}">…</message>`, in terms of the work and at a high level (only that is passed on, so leave
-out milestones and scores), and end with `<decision>REVISE</decision>`. Either way, update your `<state>`: on
-ACCEPT fold in what this milestone settled, on REVISE what still has to happen.
+out milestones and scores), and end with `<decision>REVISE</decision>`. If your working state changes, update your
+`<state>`: on ACCEPT fold in what this milestone settled, on REVISE what still has to happen. Anything settled that
+should hold beyond this milestone goes on the golden board.
 """,
     "manager_feedback": """\
 I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
@@ -229,7 +230,7 @@ I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
 {{unsent}}
 
 Please write what {{critic}} should do next, at a high level and in terms of the work (no milestones or scores),
-inside `<message to="{{critic}}">…</message>`, and update your `<state>` with it.
+inside `<message to="{{critic}}">…</message>`, and update your `<state>` if it changes.
 """,
     "unsent_message": """Your last message to {{critic}} was held when the milestone came to me, and it has not been sent:
 
@@ -248,9 +249,10 @@ Your new message replaces it, so carry over whatever in it still applies.
 
 {{note}}
 
-Please break this into a short `<plan>` of steps, then give {{worker}} the first step only: what to do, how
-you will check it, and whatever settled matters the work must keep to ({{worker}} hears about them only from you).
-Your `<checklist>` covers that step and the standing rules. The repository is at `{{cwd}}`.
+Please break this into a few steps in your checklist file `{{checklist_path}}` (one `## Step N: …` section each,
+the first step's items under it, standing rules under `## Standing rules`), then give {{worker}} the first step
+only: what to do, how you will check it, and whatever settled matters the work must keep to. The repository is at
+`{{cwd}}`.
 """,
     "critic_review": """\
 {{human_messages}}
@@ -259,19 +261,19 @@ Your `<checklist>` covers that step and the standing rules. The repository is at
 
 {{worker_report}}
 
-Please take a look at the changes. If the current step is done, tick it in your plan and give {{worker}} the next
-step in this same reply, with a new checklist for it. If everything that can be done here is done and the rest
-waits on a person, don't tell {{worker}} to hold: propose a pause in `<pause>…</pause>` instead. End with your
-`<plan>`, your `<checklist>` and `<verdict>PASS</verdict>` (only when every step is done) or
-`<verdict>FAIL</verdict>`.
+Please take a look at the changes and update your checklist file `{{checklist_path}}` in place (tick what holds
+now). If the current step is done, add the next step's items there and give {{worker}} that step in this same
+reply. If everything that can be done here is done and the rest waits on a person, don't tell {{worker}} to hold:
+propose a pause in `<pause>…</pause>` instead. End with `<verdict>PASS</verdict>` (only when every item of every
+step in the file is `[x]`) or `<verdict>FAIL</verdict>`.
 """,
     "critic_answer": """\
 About your question:
 
 {{answer}}
 
-If this changes what {{worker}} should do, say what (and update your `<plan>` if it changes the steps). If it
-changes your verdict, end with a new `<verdict>`.
+If this changes what {{worker}} should do, say what (and edit your checklist file if it changes the steps or
+items). If it changes your verdict, end with a new `<verdict>`.
 """,
     # added to critic_answer while the critic's last review has not reached the worker yet
     "critic_answer_pending": "{{worker}} has not received your last review yet. If this changes what they should do, "
@@ -319,7 +321,7 @@ The work was paused while waiting for this:
 
 That is done now. My message: {{message}}
 
-Please check where things stand, update your `<plan>` if needed, and give {{worker}} the next step.
+Please check where things stand, update your checklist file if needed, and give {{worker}} the next step.
 """,
     "critic_guidance": """\
 {{human_messages}}
@@ -328,8 +330,8 @@ I read your report, and more is needed:
 
 {{guidance}}
 
-Please add what is needed to your `<plan>` (new steps, or a step reopened) and give {{worker}} the next step,
-with your `<checklist>` for it.
+Please add what is needed to your checklist file `{{checklist_path}}` (new steps, or a step reopened, with their
+items) and give {{worker}} the next step.
 """,
     "critic_checkin": """\
 {{human_messages}}
@@ -409,10 +411,10 @@ no longer does.
 
 {{instruction}}
 
-Please make your `<plan>` for this (keep the steps that are already done as done) and give {{worker}} the next
-step only: what to do, concretely, and what you will check. {{worker}} also starts a fresh conversation and knows
-only what you tell it, so include whatever settled matters the work must keep to. Your `<checklist>` covers that
-step and the standing rules. The repository is at `{{cwd}}`.
+Please update your steps in your checklist file `{{checklist_path}}` for this (keep the steps that are already
+done as done, and give the next step its items) and give {{worker}} the next step only: what to do, concretely,
+and what you will check. {{worker}} also starts a fresh conversation and knows only what you tell it, so include
+whatever settled matters the current step must keep to. The repository is at `{{cwd}}`.
 """,
     "state_edited": "I edited your working notes; they now read:\n\n{{state}}\n\nGo by them from now on.",
     "critic_state_instruction": "## My standing instruction\n\n{{state}}",
@@ -457,7 +459,7 @@ step and the standing rules. The repository is at `{{cwd}}`.
     "worker_after_cut": "I ended your last turn early to change course; anything it was running in the foreground was "
                         "ended. What to do now follows.",
     "night_manager": "Night mode is on: nobody is watching the run. Decide everything yourself, from my preferences and "
-                     "the decisions register, and keep the work moving until every milestone is done. Still write each "
+                     "the golden board, and keep the work moving until every milestone is done. Still write each "
                      "question for me in <question>, with the choice you made and why: it is recorded for me to review in "
                      "the morning, and I can still overrule it. Pause only if nothing at all can be done without me.",
     "session_reset": """\
@@ -469,9 +471,21 @@ is. Here is what you need from before.
 Read the files and logs you need before you act, and carry on from there.""",
     "report_checklist": "{{critic}}'s working checklist at its last review ({{done}} of {{total}} done):\n\n{{checklist}}",
     "report_plan": "{{critic}}'s plan ({{done}} of {{total}} steps done):\n\n{{plan}}",
-    "plan_nudge": "You said PASS, but your plan still has open steps. A finished step is not the finished work: tick "
-                  "it, give me the next step (now: {{step}}), and say PASS only when every step is done. If a step "
-                  "is no longer needed, drop it from the plan.",
+    "plan_nudge": "You said PASS, but your checklist file still has open steps. A finished step is not the finished "
+                  "work: give {{worker}} the next step (now: {{step}}) with its items in the file, and say PASS only "
+                  "when every step is done. If a step is no longer needed, delete it from the file.",
+    "checklist_file_nudge": "You said it is ready, but your checklist file `{{checklist_path}}` still has {{open}} open "
+                            "item(s), or none at all. Tick an item there only when it holds, and pass only once every "
+                            "item is [x].",
+    # the critic's list for one step grew past about 25 items (once each time it grows)
+    "checklist_cap": "Your checklist for the current step has {{n}} items; keep it to about {{cap}}: merge items that "
+                     "check the same thing, in the file.",
+    # the manager, once each time the golden board grows past its size limit
+    "golden_prune": "The golden board (`{{path}}`) is {{chars}} characters, over the {{limit}} it should stay under. "
+                    "Prune it in place: merge entries that overlap, remove what no longer holds.",
+    # the golden board names a layer above the critic or the worker: held from them until it is rewritten
+    "golden_leak": "The golden board names {{words}}. {{critic}} and {{worker}} read it as their own user's rules, so "
+                   "it is held from them until you rewrite those entries about the work alone.",
     "relay_note_up": "{{critic}} mentioned: {{note}}",
     # a <message to="…"> that names no one the sender may write to: one line back to the sender
     "address_correction_manager": "Not delivered: {{bad}}. You can write to {{critic}} (`<message to=\"{{critic}}\">`) "

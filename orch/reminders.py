@@ -33,8 +33,10 @@ from typing import Any, Dict, List, Optional
 ROLES = ("manager", "critic", "worker")
 ROLE_OF = {"manager": "manager", "verifier": "critic", "critic": "critic", "worker": "worker"}
 
-# the golden board (batch B3) will fill this reminder's text; while it is empty, nothing is sent
+# the golden board (orch/boards.py): its text is this reminder's intro, followed by the board itself. Besides its
+# schedule, it goes to an agent once whenever the board changed or the agent's session is new; nothing while it is empty
 GOLDEN_BOARD = "golden_board"
+GOLDEN_PRUNE = "golden_prune"  # the manager, once each time the board grows past its size limit (not in the registry)
 
 DEFAULTS: Dict[str, Dict[str, Any]] = {
     "concise": {
@@ -63,7 +65,14 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "text": {"manager": "In a message to {{critic}}, write as \"I\" and give everything as your own; keep me, "
                             "our conversation and your role out of it, and your reply to me outside that tag."},
     },
-    GOLDEN_BOARD: {"to": ["all"], "every": 10, "text": ""},  # placeholder until the golden board exists (B3)
+    GOLDEN_BOARD: {
+        "to": ["all"], "every": 10,
+        "text": {
+            "manager": "The golden board (`{{golden_board}}`) as it stands; every agent reads it:",
+            "critic": "My standing rules for this work; they hold until I change them:",
+            "worker": "My standing rules for this work; they hold until I change them:",
+        },
+    },
 }
 
 _BLOCK = re.compile(r"[ \t]*<system-reminder>.*?(?:</system-reminder>|\Z)[ \t]*\n?", re.S)

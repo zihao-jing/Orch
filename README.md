@@ -51,8 +51,9 @@ There is no separate project file: the team is the set of agent folders.
       system_prompt.md   this agent's prompt in this project (starts as a copy of the role's default)
       memory.md          your notes and preferences for it (also memory/*.md); added to its system prompt
       state.md           its working state in the current run, kept by orch (gitignored; you can edit it)
-    critic/   agent.yaml  system_prompt.md  memory.md  state.md
+    critic/   agent.yaml  system_prompt.md  memory.md  state.md  checklist-m<N>.md (its steps and checklist)
     worker/   agent.yaml  system_prompt.md  memory.md  state.md
+  golden.md              the golden board: rules, my preferences, key decisions; every agent reads it
   runs/                  run logs (gitignored)
 ```
 
@@ -63,13 +64,13 @@ of update for each piece:
 
 | file | holds | written |
 |---|---|---|
-| `manager/state.md` | the standing instruction for the critic and the decisions that still hold | by the manager, in a `<state>` tag, whenever it writes to the critic (a milestone starts or is sent back, an answer changes the work, a restart) |
-| `critic/state.md` | that standing instruction ("my standing instruction") and the critic's checklist | by orch, after every review and every change of the manager's state |
+| `manager/state.md` | the standing instruction for the critic and what still holds for the current work | by the manager, in a `<state>` tag (or by editing the file) only when it changes |
+| `critic/state.md` | that standing instruction ("my standing instruction"), the critic's steps and current checklist (from its checklist file) | by orch, after every critic turn and every change of the manager's state |
 | `worker/state.md` | the worker's latest report | by orch, after every worker turn |
 
 Whenever an agent starts a fresh session (`orch reset-sessions`, a changed backend, or `fresh_session: milestone`
-for the manager or critic), its notes are built from its `state.md` and what happened since it was written (for the
-manager: the decisions made since), at the moment its next turn starts. The agents are not asked to read the files
+for the manager or critic), its notes are built from its `state.md` and what happened since it was written, at the
+moment its next turn starts; the golden board comes with that first message. The agents are not asked to read the files
 themselves: orch puts what they need into the message. You can edit any of them between turns: orch notices, and the agent's
 next turn starts with "I edited your working notes; they now read: …" (an edit of the manager's also updates the
 critic's). Each file names its run; a new run moves the previous run's files into that run's folder
@@ -141,8 +142,8 @@ Three layers of review, so each layer above reads less. Agents: exactly one `rol
 |---|---|---|
 | plan | manager | splits the goal into a numbered milestone list + a scored rubric → **I approve** (`approve_plan`) |
 | kickoff | manager → critic | a high-level note for the milestone |
-| brief | critic → worker | the critic breaks the note into a `<plan>` of steps and gives the worker the first one, with a checklist for it |
-| rounds | worker ↔ critic | one step of the critic's `<plan>` at a time; each review ends with `<plan>` + `<checklist>` (current step) + `<verdict>`; up to `milestone_rounds` rounds without a step finishing |
+| brief | critic → worker | the critic writes its steps and the first step's checklist in its checklist file and gives the worker the first step |
+| rounds | worker ↔ critic | one step at a time; at each review the critic edits its checklist file in place and ends with `<verdict>`; up to `milestone_rounds` rounds without a step finishing |
 | report | critic → manager | milestone report (tables first) |
 | review | manager | scores per criterion + `<score>` + `<decision>ACCEPT/REVISE</decision>` (`min_score` optional); REVISE → guidance to the critic |
 | gate | me | the manager's summary → **I approve** or send it back (`approve_milestones`) |
@@ -171,9 +172,27 @@ board-chat response. Dedicated critic reports and check-ins still address the ma
 | `<message to="…">…</message>` | anyone | delivers the block to that agent only (the manager's instructions and answers to the critic, the critic's notes to the manager) |
 | `<question>…</question>` | worker → critic, critic → manager, manager → me | one decision per tag; recorded (Q1, Q2 …) and passed up one level; the run does not wait |
 | `<pause>…</pause>` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's stops the whole run until I continue it |
-| `<state>…</state>` | manager | saved as `manager/state.md` (and the critic's standing instruction); a fresh session starts from it |
-| `<plan>…</plan>` | critic | its steps for the current work, `- [x]` done / `- [ ]` not yet. The worker gets one step at a time and never sees the plan. A step ticked is progress: the `milestone_rounds` count starts again, the board shows "step k of n", and a check-in is one status line from the plan (no model turn). Kept across fresh sessions; a new milestone starts without one |
-| `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | the checklist covers the current step and standing rules; a PASS counts only when every item and every step of the plan is `[x]` (a PASS with steps open goes back with "hand out the next step"). The list is the critic's own: the worker never gets it (also when the critic forgets the tag), and the manager sees the latest plan and list with each milestone report |
+| `<state>…</state>` | manager | only when it changes: saved as `manager/state.md` (and the critic's standing instruction); a fresh session starts from it |
+| `<verdict>PASS\|FAIL</verdict>` | critic | checked against its checklist file: a PASS counts only when every item of every step is `[x]` (a PASS with steps open goes back with "hand out the next step") |
+| `<plan>`, `<checklist>` | critic (older protocol) | still accepted: written into the checklist file, unless the critic edited the file in that turn (then the file holds and the block is ignored) |
+
+**Step checklist.** The critic keeps its steps and checklist in one file per milestone,
+`agents/critic/checklist-m<N>.md`, and edits it in place (agents edit boards; they don't re-output them): one
+`## Step N: …` section per step with its `- [ ]` / `- [x]` items, and `## Standing rules` for items that hold for every
+step. A step is done when all its items are `[x]`; a finished step is progress (the `milestone_rounds` count starts
+again, the board shows "step k of n", a check-in is one status line from the steps, no model turn). The worker never
+sees the file; the manager sees the steps and the current list with each milestone report. Above about 25 items in
+the current step's list the critic is asked once to merge them. A file left from an earlier run is moved aside
+(`checklist-m1.earlier-<time>.md`) when the milestone starts.
+
+**Golden board.** `.orch/golden.md` (`golden_board:` to move it; golden.md beside the runs for a config file) holds
+the rules, my preferences and the key decisions. The manager owns it and edits it in place: it adds what I settle,
+merges and prunes. Every agent gets it at the end of a message (the `golden_board` reminder): once whenever it
+changed, with the first message of a new session, and every 10th turn; the manager's own edit is not sent back to
+it. The critic and the worker read it as their user's standing rules; a board that names a layer above one of them
+(the manager's or critic's name, "manager", "orch") is held from it, with a warning and a note to the manager. Above
+`golden_limit` (8000 characters) the board warns and the manager is asked once to prune; again only after it grows.
+The board page shows it in place of the decisions list.
 | `<score>x</score>` + `<decision>ACCEPT\|REVISE</decision>` | manager, milestone review | accepts the milestone or sends it back |
 | `<decision>PAUSE\|CONTINUE</decision>` | manager, on a proposed pause | stops the run, or sends the critic what to do meanwhile |
 | `<no-wait pid="…"/>` | worker | the review does not wait for that process (orch finds the worker's detached jobs itself) |
@@ -187,7 +206,7 @@ a job twice and never keeps its turn open to wait (orch waits for its jobs betwe
 (`orch/reminders.py`): `concise` (all, every 3–6 turns), `protocol` (whom the agent may address and the tag form; all,
 every 3–10 turns at random), `report_length` (worker, every 3rd turn), `chat_voice` (board chat with the manager:
 write to the critic as "I", keep the chat out of it; the first chat message of a session, then every 3rd);
-`golden_board` is a placeholder for the golden board. `only: [chat]` limits a reminder to board chat, where it counts
+`golden_board` (the golden board itself, see above; every 10 turns and on each change). `only: [chat]` limits a reminder to board chat, where it counts
 chat messages instead of turns. Change them under `reminders:` in any agent.yaml; edits apply from the next turn:
 
 ```yaml
@@ -207,23 +226,22 @@ without them.
 **Fresh sessions mid-run.** `orch reset-sessions <project> [--agent NAME]` (with the run stopped) clears the agents'
 conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. When the
 manager is reset in the middle of a milestone (the default, all three), the work restarts top-down: the manager gets
-the goal, its approved plan and rubric, the milestone table, its `state.md`, the critic's newest message and the
-decisions made since its state was written, and writes the critic a short instruction on what to continue with (and
-a fresh `<state>`); the critic, with its checklist and a pointer to the decisions file, turns that into concrete
+the goal, its approved plan and rubric, the milestone table, its `state.md` and the critic's newest message, and
+writes the critic a short instruction on what to continue with (and a fresh `<state>`); the critic, with its
+checklist file, turns that into concrete
 steps for the worker; the worker starts with only that. A cut-off turn is replaced by this, not sent again. Resetting one agent alone gives it
 a handover instead, from its `state.md`: the critic its standing instruction, checklist and latest review in short;
-the worker its latest report in short. The worker never gets the decisions list or anything about the people above the critic:
+the worker its latest report in short. The worker never gets anything about the people above the critic:
 what the work must keep to reaches it in the critic's instructions. The notes are written when each agent's next turn starts, not at the reset, so they show where the run is then; until that turn, the agent's queue in `state.json` (`fwd`) holds a placeholder. The manager's notes include the critic's newest message of any kind with its checklist count, not just its last report. The board chat follows the new session.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
 answers and notes, messages I add at a gate, and the manager's answers to the critic, each with who decided and
-when (S1, S2 …; where two say different things, the later one holds). The manager's kickoff, the critic's brief
-and a fresh worker session get the whole list at the start of every milestone, so decisions don't have to survive
-a chain of relayed notes. The board shows it under **Decisions**. A run started before the register existed has it
-rebuilt from its history on resume.
+when (S1, S2 …; where two say different things, the later one holds). It is a record: the agents read the golden
+board instead, which the manager keeps. The board shows it folded under the golden board. A run started before the
+register existed has it rebuilt from its history on resume.
 
 **Fresh worker sessions.** `fresh_session: milestone` on an agent starts it in a new session when each milestone
-starts; its work is in the files, and the critic's brief plus the register tell it what it needs. A long session
+starts; its work is in the files, and the critic's brief plus the golden board tell it what it needs. A long session
 re-reads its whole history on every step, so this keeps worker turns from getting slower and dearer as a run goes
 on. The manager and critic are best left in one session: they are cheap, and they need to remember the decisions.
 

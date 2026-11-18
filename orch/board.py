@@ -227,6 +227,7 @@ class Board:
             "started_at": st.get("started_at"), "error": st.get("error"),
             "managed": st.get("managed") or {}, "night": bool(st.get("night")), "night_pending": night_pending, "questions": st.get("questions") or [],
             "decisions": st.get("decisions") or [],
+            "golden": _golden(st),
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
             "chat": chat, "chat_more": chat_more, "relays": relays, "routes": routes, "received": received, "held": held,
             "terminal": _terminal(rd), "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
@@ -312,9 +313,10 @@ class Board:
             item = None
             if t.get("role") == "verifier":
                 from . import tags as T
-                body = review_checklist(out)  # older runs: the list lines anywhere in the reply, outside the plan
+                snap = t.get("checklist_file") or {}  # the critic's checklist file after this turn (B3)
+                body = snap.get("checklist", "") if snap else review_checklist(out)  # older runs: from the reply
                 items = checklist_items(body)
-                plan = T.bodies(out, "plan")
+                plan = ([snap["plan"]] if snap.get("plan") else []) if snap else T.bodies(out, "plan")
                 steps = checklist_items(plan[-1]) if plan else []
                 if steps:  # the critic's steps: where the work stands
                     row["plan"] = [sum(1 for d, _ in steps if d), len(steps)]
@@ -548,6 +550,18 @@ def _turn_env(a: Any, rd: Path) -> Dict[str, str]:
     those, and the job finder knows whose processes they are)."""
     from . import jobs as _jobs
     return {**(a.env or {}), _jobs.TAG_VAR: _jobs.tag_for(rd.name, a.name)}
+
+
+def _golden(st: Dict[str, Any]) -> Dict[str, Any]:
+    """The golden board as the page shows it (B3): its text, size and warnings, read from the file the run uses."""
+    g = st.get("golden") or {}
+    if not g.get("path"):
+        return {}
+    from . import boards as B
+    body = B.golden_body(B.read(Path(g["path"])))
+    limit = int(g.get("limit") or 0)
+    return {"path": g["path"], "text": body, "chars": len(body), "limit": limit,
+            "over": bool(limit) and len(body) > limit, "leaks": g.get("leaks") or {}}
 
 
 def _terminal(rd: Path) -> Dict[str, Dict[str, Any]]:
