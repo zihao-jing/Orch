@@ -869,6 +869,11 @@ class ManagedRunner(MonitorRunner):
         """While the agent's session is open in a terminal, its turn waits (two writers would split the history);
         meanwhile the terminal's messages are routed and the other agents answer theirs."""
         if not self.terminal_busy(a):
+            if threading.get_ident() == getattr(self, "_main_ident", None):
+                # a terminal that just closed: read its "end" note first, so this turn continues the session the
+                # terminal ended in (the mark is gone before orch reads the note)
+                for d in self.rec.take_control(("terminal",)):
+                    self.message_control(d)
             return
         self.rec.progress(f"⏸ {a.called}'s session is open in a terminal; its turn waits until the terminal closes")
         self.rec.event("terminal_hold", agent=a.name)
@@ -1377,10 +1382,17 @@ class ManagedRunner(MonitorRunner):
                 self.decide(f"{self.short_question(q)}: {mine or '(see the manager turn)'}", "manager (night mode)",
                             nq["id"])
         if relay:  # its message to the critic as a note; a message to the worker is routed after the turn (route_reply)
-            for attrs, body in T.blocks(text, "message"):
+            for i, (attrs, body) in enumerate(T.blocks(text, "message")):
                 a = self.find_agent(attrs.get("to", ""))
                 if a and a.role == "verifier" and body:
-                    self.forward(a, self.mtpl("relay_note", note=body).strip())
+                    note = self.mtpl("relay_note", note=body).strip()
+                    self.forward(a, note)
+                    # now a waiting note: a newer message to the critic (e.g. the kickoff's instruction after one
+                    # written with the plan) replaces it instead of both being delivered (routing.py)
+                    for m in self.ledger.rows:
+                        if m.get("source") == r.get("turn_id") and m["to"] == a.name and m.get("i") == i \
+                                and m["status"] == "sent":
+                            m.update(text=note, carrier={**(m.get("carrier") or {}), "fwd": True})
         pause = manager_pause(text) if r.get("purpose") != "pause" else ""  # it stops the run itself
         if pause:
             self.mg["pause_req"] = {"text": pause, "turn": r["turn_id"]}

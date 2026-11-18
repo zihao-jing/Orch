@@ -202,6 +202,23 @@ class TestRouting(unittest.TestCase):
         r.route_text(critic, '<message to="Alex">two</message>', "c2", "terminal")
         self.assertEqual([m["status"] for m in r.ledger.rows if m["source"] in ("c1", "c2")], ["sent", "sent"])
 
+    def test_the_kickoff_instruction_supersedes_a_message_written_with_the_plan(self):
+        # live run: the manager put an instruction for the critic in its plan reply, then wrote the real one at
+        # kickoff ("This replaces my earlier message"); the critic's brief carried both
+        plan = ("1. Part 1 — the part is done\n\n| criterion | what a 5 looks like |\n|---|---|\n| c | ok |\n\n"
+                '<message to="Jordan">Plan-time draft: write the module first.</message>')
+        kick = '<message to="Jordan">This replaces my earlier message. Final brief: write the module and its tests.</message>'
+        rec, mon = self._done_run(mgr={"replies": {"plan": [plan], "kickoff": [kick]}})
+        brief = next(t for t in turns(rec) if t["purpose"] == "brief")
+        self.assertIn("Final brief: write the module and its tests.", brief["input"])
+        self.assertNotIn("Plan-time draft", brief["input"])
+        L = {m["source"]: m for m in _ledger(rec) if m["from"] == "boss" and m["to"] == "critic"}
+        plan_turn = next(t["turn_id"] for t in turns(rec) if t["purpose"] == "plan")
+        kick_turn = next(t["turn_id"] for t in turns(rec) if t["purpose"] == "kickoff")
+        self.assertEqual(L[plan_turn]["status"], "superseded")
+        self.assertEqual(L[plan_turn]["by"], L[kick_turn]["id"])
+        self.assertEqual((L[kick_turn]["status"], L[kick_turn]["turn"]), ("delivered", brief["turn_id"]))
+
     def test_a_superseded_inbox_note_is_never_delivered(self):
         rec, mon = self._done_run()
         _b, c1 = self._chat(rec, mon, None, '<message to="Jordan" urgent="yes">Drop table 3.</message>')
@@ -316,6 +333,27 @@ class TestRouting(unittest.TestCase):
         self.assertEqual(done["r"]["status"], "ok")
         self.assertGreaterEqual(done["t"], released)
         self.assertGreater(len(turns(rec)), n + 1)
+
+    def test_a_turn_right_after_the_terminal_closes_continues_the_terminals_session(self):
+        # live run: SessionEnd removed the mark while orch was in another agent's turn; the manager's next turn
+        # started before the "end" note was read, so a session the terminal moved to (/clear) would be missed
+        rec, mon = self._done_run()
+        rd = rec.run_dir
+        old = rec.state["sessions"]["boss"]["session_id"]
+        self._hook(rd, "SessionStart", old)
+        self._hook(rd, "SessionEnd", "terminal-new-session")
+        r = _runner(mon, rec)
+        seen = {}
+        real = MockBackend.run
+
+        def spy(backend, req, should_stop):
+            seen.setdefault(req.agent, req.session_id)
+            return real(backend, req, should_stop)
+        with mock.patch.object(MockBackend, "run", spy):
+            res = r.turn(mon.agent("boss"), "Anything new?", 9, "ack")
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(seen["boss"], "terminal-new-session")
+        self.assertFalse(list((rd / "inbox").glob("*-terminal-end.json")))
 
     def test_a_stale_terminal_mark_does_not_hold_the_run(self):
         rec, mon = self._done_run()
