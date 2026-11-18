@@ -28,22 +28,24 @@ import json
 import os
 import re
 import sys
+import contextlib
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import audit as _audit
 from . import boards as B
 from . import jobs as _jobs
+from . import parallel as PW
 from . import progress as P
 from . import reminders as R
 from . import routing as RT
 from . import tags as T
 
 from .backends import StopRequested, TurnRequest, TurnResult, get_backend
-from .config import CHECK_EVERY, MANAGER_CHECK_EVERY, PROMPTS_DIR, AgentConfig
+from .config import CHECK_EVERY, HOT_AGENT_FIELDS, MANAGER_CHECK_EVERY, PROMPTS_DIR, AgentConfig
 from .controller import MonitorRunner, checklist_state, parse_options, relayed, resolve_choice, strip_checklist, truncate
 from .report import CHECKBOX
 from .templates import render
@@ -79,11 +81,12 @@ SELF_DELIVERED = ("incoming", "ack", "discussion", "review_file")  # turns whose
 # B6: phases that send the manager's words to the critic; they wait while I discuss with the manager
 DISCUSSION_WAITS = ("kickoff", "answer", "pause", "mreview", "restart")
 # B9: phases that go on while a blocking question waits for me (the gates are mine; a job is only watched)
-QUESTION_GOES_ON = ("plan_gate", "gate", "wait", "job", "done")
+QUESTION_GOES_ON = ("plan_gate", "gate", "wait", "job", "done", "workers_gate", "parallel")
 CRITIC_TO_WORKER_PHASES = ("verify", "brief", "guidance", "amend")
 BY_DESIGN = {"checklist": "the critic's own checklist; the worker never sees it",
              "plan": "the critic's own plan; the worker gets one step at a time",
-             "verdict": "the critic's verdict is for orch's gate, not for the worker"}
+             "verdict": "the critic's verdict is for orch's gate, not for the worker",
+             "workers": "the critic's proposal of several workers, for its user to decide"}
 
 
 def checklist_text(text: str) -> str:
@@ -250,7 +253,17 @@ class ManagedRunner(MonitorRunner):
 
     @property
     def workers(self) -> List[AgentConfig]:
+        """The configured workers (B11: the extra copies of a parallel section are not among them)."""
+        return [a for a in self.mon.by_role("worker") if a.name not in self.clones]
+
+    @property
+    def all_workers(self) -> List[AgentConfig]:
         return self.mon.by_role("worker")
+
+    @property
+    def clones(self) -> Dict[str, str]:
+        """B11: the copies of the worker (and its monitor) a parallel section added: name -> the agent copied."""
+        return self.__dict__.setdefault("_clones", {})
 
     def inbox_broadcast(self, agent: AgentConfig) -> bool:
         return agent.role == "manager"  # notes to nobody in particular are for the manager
@@ -306,6 +319,8 @@ class ManagedRunner(MonitorRunner):
             self.route_reply(agent, r)
             if agent.role == "manager":
                 self.take_rubric(r)
+            if agent.role in ("manager", "verifier"):
+                self.take_workers(agent, r)
             self.rec.save()
         if (r.get("meta") or {}).get("compacted"):  # the CLI compacted the session during the turn
             self.after_compact(agent, "auto-compact")
@@ -597,16 +612,17 @@ class ManagedRunner(MonitorRunner):
             if note not in ((self.st.get("fwd") or {}).get(agent.name) or []):
                 self.forward(agent, note)
 
-    def say(self, agent: AgentConfig, prompt: str, purpose: str) -> Dict[str, Any]:
+    def say(self, agent: AgentConfig, prompt: str, purpose: str, rnd: Optional[int] = None,
+            extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """One turn of one agent, tagged with the milestone it belongs to."""
         mg = self.mg
         self.sync_state(agent)
         self.write_handover(agent)
         if agent.role == "manager":
             self.sync_chat_session(agent)
-        r = self.turn(agent, prompt, int(self.st.get("round", 0)), purpose,
+        r = self.turn(agent, prompt, int(self.st.get("round", 0)) if rnd is None else rnd, purpose,
                       extra={"milestone": mg.get("ms", 0) if mg.get("milestones") else None,
-                             "milestone_round": mg.get("ms_round", 0)})
+                             "milestone_round": mg.get("ms_round", 0), **(extra or {})})
         self.after_state_turn(agent, r)
         if r["status"] != "ok":
             if self.mon.controller.stop_on_error:
@@ -2071,7 +2087,7 @@ class ManagedRunner(MonitorRunner):
             "session_id": sid, "resumed_session": True, "status": "running", "started_at": now_iso(),
             "input": "/compact", "output": "", "milestone": mg.get("ms", 0) if mg.get("milestones") else None}
         t0 = time.monotonic()
-        with self.rec.agent_lock(agent.name):
+        with self.unlocked(), self.rec.agent_lock(agent.name):
             try:
                 res = backend.compact(req, self.should_stop)
             except Exception as e:
@@ -2248,7 +2264,7 @@ class ManagedRunner(MonitorRunner):
     def for_worker(self, text: str) -> str:
         """The critic's words as the worker should get them: without the checklist (also when the critic forgot the
         tag) and without headings that name the worker or anyone else ("## Updated instruction for the worker")."""
-        names = "|".join(re.escape(n) for w in self.workers for n in {w.called, w.name, "worker"} if n)
+        names = "|".join(re.escape(n) for w in self.all_workers for n in {w.called, w.name, "worker"} if n)
         others = "|".join(re.escape(n) for n in {self.manager.called, self.manager.name, "manager", "lead"} if n)
         role_head = re.compile(r"^\s*(?:#+\s*|\*\*)?\s*(?:(?:updated|revised|new|next|my)\s+)*"
                                r"(?:instructions?|feedback|notes?|steps|tasks?|message|review)\s+(?:for|to)\s+(?:the\s+)?"
@@ -2369,6 +2385,8 @@ class ManagedRunner(MonitorRunner):
                     d = queue_.pop(0)
                     if not d.get("gate") or d["gate"] == gate["key"]:  # stale clicks for an older gate are dropped
                         decision = d
+                if decision is None and self.st.get("night") and gate["kind"] == "workers":
+                    decision = {"decision": "approve", "message": "", "night": True}  # clipped to the hard cap
                 if decision is None and self.st.get("night") and gate["kind"] in ("plan", "milestone"):
                     ok = gate["kind"] == "plan" or self.cur() is None or self.cur().get("accepted", True)
                     decision = {"decision": "approve" if ok else "revise", "message": "", "night": True}
@@ -2414,6 +2432,7 @@ class ManagedRunner(MonitorRunner):
             self.rec.save()
         self.adopt_state_files()
         self.setup_boards()
+        self.par_restore()  # B11: a parallel section a restart cut off gets its workers back
         while True:
             self.check_control()
             if mg.get("phase", "plan") != "done":
@@ -2554,6 +2573,14 @@ class ManagedRunner(MonitorRunner):
         if int(self.st.get("round", 0)) >= m.max_rounds:
             return "max_rounds_reached"
         redo = bool(mg.get("in_work"))  # a round cut off by a restart is redone before any limit or check-in
+        req = mg.get("par_req") or {}
+        if not redo and req.get("status") == "gate":  # B11: more workers than the manager may approve: I decide
+            mg["phase"] = "workers_gate"
+            return None
+        if not redo and req.get("status") == "approved":  # B11: the approved workers take the independent steps
+            self.par_start(req)
+            mg["phase"] = "parallel"
+            return None
         # milestone_rounds counts rounds without progress: a step of the critic's plan finishing starts it again
         # (without a plan, every round of the milestone counts, as before)
         if not redo and self.stalled() >= c.milestone_rounds:
@@ -2854,19 +2881,30 @@ class ManagedRunner(MonitorRunner):
     def refresh_agent(self, agent: AgentConfig) -> None:
         if agent.role == "monitor" and agent.name not in {a.name for a in self.mon.agents}:
             return  # the critic's side session for checks: built from the critic's settings at each check
+        base = self.clones.get(agent.name)
+        if base:  # B11: a copy takes the hot settings of the agent it copies, re-read from the config
+            orig = next((a for a in self.mon.agents if a.name == base), None)
+            if orig is not None:
+                super().refresh_agent(orig)
+                for f in HOT_AGENT_FIELDS:
+                    setattr(agent, f, getattr(orig, f))
+            return
         super().refresh_agent(agent)
 
-    def checker(self) -> Tuple[AgentConfig, str]:
+    def checker(self, w: Optional[AgentConfig] = None) -> Tuple[AgentConfig, str]:
         """Who runs a check and where: (agent, "own" | "side"). The monitor (own session unless its check_session
-        says side); without one, the critic: a side session by default (its own conversation is left alone)."""
+        says side); without one, the critic: a side session by default (its own conversation is left alone).
+        B11: each extra worker of a parallel section has its own copy of the monitor (or its own side session)."""
+        slot = self.par_slot(w.name) if w is not None else None
         m = self.monitor_agent
         if m is not None:
-            return m, m.check_session or "own"
+            mine = next((a for a in self.mon.agents if slot and a.name == slot.get("monitor")), m)
+            return mine, mine.check_session or "own"
         c = self.critic
-        if (c.check_session or "side") == "own":
+        if (c.check_session or "side") == "own" and not (slot and w.name in self.clones):
             return c, "own"
         side = dataclasses.replace(
-            c, name=f"{c.name}-check", role="monitor", display_name="", description="", task="", system_prompt="",
+            c, name=f"{c.name}-check" + (f"-{w.name}" if slot and w.name in self.clones else ""), role="monitor", display_name="", description="", task="", system_prompt="",
             system_prompt_path=str(PROMPTS_DIR / "monitor.md"), memory_files=[], state_file="", fresh_session="",
             protocol_path=str(PROMPTS_DIR / "protocol" / "monitor.md") if self.mon.controller.protocol else "")
         return side, "side"
@@ -2914,12 +2952,19 @@ class ManagedRunner(MonitorRunner):
             return f"{w.called}'s background job ({'; '.join(watch['jobs']) or 'a job'})"
         return f"{w.called}'s current turn"
 
-    def step_items(self) -> Tuple[str, str]:
-        """(label for the status line, e.g. "step 3"; the current step's items for the check prompt)."""
+    def step_items(self, w: Optional[AgentConfig] = None) -> Tuple[str, str]:
+        """(label for the status line, e.g. "step 3"; the current step's items for the check prompt). B11: in a
+        parallel section, the step that worker was given."""
         try:
             ck = self.checklist_board()
         except Exception:
             return "", ""
+        slot = self.par_slot(w.name) if w is not None else None
+        if slot and slot.get("step"):
+            s, title = PW.step_title(ck, slot["step"])
+            items = "\n".join(f"- [{'x' if d else ' '}] {t}"
+                              for d, t in list(ck.get("standing") or []) + list((s or {}).get("items") or []))
+            return f"step {slot['step']}", (f"What to look for, {title}:\n{items}" if items else "")
         steps = ck.get("steps") or []
         i = B.current_index(ck)
         if i < 0 or not steps:
@@ -2952,7 +2997,7 @@ class ManagedRunner(MonitorRunner):
     def status_line(self, w: AgentConfig, watch: Dict[str, Any], check: Optional[Dict[str, Any]]) -> None:
         """The board's live line for a working agent: "Sam: step 3, running 14 min — log active"."""
         now = self.clock()
-        label, _items = self.step_items()
+        label, _items = self.step_items(w)
         mins = P.minutes(now - watch["since"])
         summary = (check or {}).get("summary") or "no check yet"
         doing = "job running" if watch["kind"] == "job" else "running"
@@ -2968,7 +3013,7 @@ class ManagedRunner(MonitorRunner):
         """One quick check of a running worker turn or job: the checker looks and reports evidence; the report goes
         to the critic (problem: now; all fine: at its next turn); the status line is updated."""
         w = self.mon.agent(watch["agent"])
-        checker, where = self.checker()
+        checker, where = self.checker(w)
         if self.rec.agent_busy(checker.name):  # e.g. a board chat with it: try again shortly
             watch["next"] = self.clock() + min(60.0, watch["every"])
             return
@@ -2976,7 +3021,7 @@ class ManagedRunner(MonitorRunner):
         mins = P.minutes(now - watch["since"])
         what = self.what_runs(w, watch)
         act, phrase, quiet = self.activity_text(w, watch, now)
-        _label, step = self.step_items()
+        _label, step = self.step_items(w)
         own_critic = checker.role == "verifier"
         tpl = "critic_quick_check" if own_critic else "monitor_check"
         prompt = self.mtpl(tpl, what=what, minutes=mins, cwd=w.working_dir or self.mon.working_dir, activity=act,
@@ -3014,6 +3059,11 @@ class ManagedRunner(MonitorRunner):
         problem = P.is_problem(status)
         summary = phrase + ("" if status == P.OK else f"; check: {status}")
         self.status_line(w, watch, {"status": status, "summary": summary})
+        slot = self.par_slot(w.name)
+        if slot is not None:  # B11: the lane and the work board show each worker's latest check
+            first = next((ln.strip() for ln in report.splitlines() if ln.strip()), "")
+            slot["check"] = f"{status}: {_clip(first, 120)}" if first else status
+            self.write_work_board()
         self.rec.progress(f"🔎 progress check of {w.called} ({mins} min): {status}"
                           + (" → the critic is told now" if problem and not own_critic else ""))
         if not own_critic and report:
@@ -3026,14 +3076,16 @@ class ManagedRunner(MonitorRunner):
         All fine: held for the critic's next turn. A problem: it starts a short critic turn now (activate)."""
         L, critic = self.ledger, self.critic
         text = self.mtpl("progress_check_report", minutes=mins, what=self.what_runs(w, watch), report=report).strip()
-        for old in L.rows:
-            if old.get("kind") == "progress_check" and old["to"] == critic.name and old["status"] in ("sent", "held"):
+        for old in L.rows:  # B11: only an older report on the same worker
+            if old.get("kind") == "progress_check" and old["to"] == critic.name and old["status"] in ("sent", "held") \
+                    and old.get("worker", w.name) == w.name:
                 q = (self.st.get("fwd") or {}).get(critic.name) or []
                 if old["text"] in q:
                     q.remove(old["text"])
                 L.mark(old, "superseded", reason="replaced by a newer progress check", by=turn_id)
         m = L.add(checker.name, critic.name, report, text, source=turn_id, via="check", purpose="check",
-                  kind="progress_check", check_status=status, activate=bool(problem), carrier={"fwd": True})
+                  kind="progress_check", check_status=status, activate=bool(problem), carrier={"fwd": True},
+                  worker=w.name)
         if not problem:
             L.mark(m, "held", reason=RT.NEXT_TURN, next_turn=True)
         self.forward(critic, text)
@@ -3055,13 +3107,665 @@ class ManagedRunner(MonitorRunner):
         self.rec.progress(f"ⓘ status for the manager: {line}")
         self.rec.save()
 
+    # ------------------------------------------------------------------ B11: parallel workers (orch/parallel.py)
+    # The critic (or the manager) proposes several workers for independent steps with <workers n=… steps=…>; the
+    # manager approves within the budget (max_workers, rounds left, parallel_turns); above it I decide at a gate (in
+    # night mode the manager's number stands up to workers_hard_cap). Approved, the worker gets copies (worker-2..N:
+    # same settings, own session, lane, job tag, state file and monitor). The critic hands out steps with
+    # <to worker="ID" step="N" out="folder">; their turns run at the same time; each finished step is reviewed on its
+    # own, one critic turn at a time. orch keeps the work board (work-m<N>.md in the critic's folder) up to date.
+    #
+    # Concurrency: the main thread holds the recorder's lock for the whole section and lets it go only while it
+    # waits; a worker's thread holds it for everything in its turn except the backend's run itself (run_backend).
+    # So all run state is changed by one thread at a time, while the agents themselves work at the same time.
+
+    @contextlib.contextmanager
+    def unlocked(self) -> Any:
+        """Let go of the run state for a wait (all levels this thread holds), and take it back afterwards."""
+        lock, n = self.rec.lock, 0
+        while True:
+            try:
+                lock.release()
+            except RuntimeError:
+                break
+            n += 1
+        try:
+            yield
+        finally:
+            for _ in range(n):
+                lock.acquire()
+
+    def run_backend(self, backend: Any, req: TurnRequest, cancel: Any) -> TurnResult:
+        with self.unlocked():
+            return backend.run(req, cancel)
+
+    def enter_agent_lock(self, lock: Any) -> None:
+        with self.unlocked():
+            lock.__enter__()
+
+    def pause(self, secs: float) -> None:
+        with self.unlocked():
+            super().pause(secs)
+
+    @property
+    def par(self) -> Dict[str, Any]:
+        """The running parallel section ({} when none)."""
+        p = self.mg.get("par") or {}
+        return p if p.get("active") else {}
+
+    def par_slot(self, name: str) -> Optional[Dict[str, Any]]:
+        return (self.par.get("slots") or {}).get(name)
+
+    def work_board_path(self) -> Path:
+        return self.agent_dir(self.critic) / f"work-m{self.mg.get('ms', 0) or 1}.md"
+
+    def write_work_board(self) -> None:
+        par = self.mg.get("par") or {}
+        if not par.get("slots"):
+            return
+        p = self.work_board_path()
+        try:
+            ck = self.checklist_board()
+        except Exception:
+            ck = {}
+        try:
+            old = p.read_text(encoding="utf-8") if p.exists() else ""
+            called = {n: self.mon.agent(n).called for n in par["slots"] if self.has_agent(n)}
+            body = PW.render_board(par, called, ck, old)
+            if body != old:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+        except OSError as e:
+            self.rec.event("work_board_error", error=str(e))
+
+    def has_agent(self, name: str) -> bool:
+        return any(a.name == name for a in self.mon.agents)
+
+    def take_workers(self, agent: AgentConfig, r: Dict[str, Any]) -> None:
+        """A <workers> tag: the critic's proposal goes to the manager as a note that wakes it; the manager's is its
+        decision (or its own proposal), checked against the budget."""
+        if r.get("status") != "ok":
+            return
+        tag = PW.workers_tag(r.get("output") or "")
+        if not tag:
+            return
+        mg = self.mg
+        if self.par:
+            self.rec.progress(f"ⓘ {agent.called} asked for {tag['n']} people while several already work: not acted on")
+            return
+        if len(self.workers) != 1:
+            self.rec.progress(f"ⓘ {agent.called} proposed several workers; this run has {len(self.workers)} "
+                              "configured workers, so parallel copies are not made")
+            return
+        req = mg.get("par_req") or {}
+        if agent.role == "verifier":
+            mg["par_req"] = {"status": "proposed", "n": tag["n"], "steps": tag["steps"], "reason": tag["reason"],
+                             "by": agent.name, "turn": r.get("turn_id")}
+            self.rec.event("workers_proposed", agent=agent.name, n=tag["n"], steps=tag["steps"])
+            self.rec.progress(f"👥 {agent.called} proposes {tag['n']} workers at once"
+                              + (f" for steps {', '.join(map(str, tag['steps']))}" if tag["steps"] else ""))
+            steps = ", ".join(map(str, tag["steps"])) or "(not named)"
+            self.deliver(agent, self.manager, tag["reason"] or f"{tag['n']} people at once",
+                         self.mtpl("workers_proposal", n=tag["n"], steps=steps, reason=tag["reason"] or "-",
+                               max=self.mon.controller.max_workers).strip(),
+                         source=r.get("turn_id") or "", purpose=r.get("purpose") or "", wake=True, activate=True)
+            return
+        proposed = req.get("status") == "proposed"
+        steps = (req.get("steps") or tag["steps"]) if proposed else tag["steps"]
+        self.decide_workers(tag["n"], steps, by=agent.name, reason=tag["reason"] or req.get("reason", ""),
+                            turn=r.get("turn_id") or "", proposed_by=req.get("by") if proposed else agent.name)
+
+    def decide_workers(self, n: int, steps: List[int], by: str, reason: str, turn: str, proposed_by: str) -> str:
+        c = self.mon.controller
+        left = self.mon.max_rounds - int(self.st.get("round", 0))
+        status, k, why = PW.decide(n, steps, c.max_workers, c.workers_hard_cap, left, c.parallel_turns,
+                                   bool(self.st.get("night")))
+        self.mg["par_req"] = {"status": status, "n": k, "asked": n, "steps": list(steps), "reason": reason,
+                              "by": proposed_by, "decided_by": by, "turn": turn, "why": why}
+        self.rec.event("workers_decision", status=status, n=k, asked=n, by=by, why=why)
+        if status == "declined":
+            self.rec.progress(f"👥 one worker stays ({why})")
+            if proposed_by == self.critic.name:
+                self.forward(self.critic, self.mtpl("workers_declined").strip())
+        elif status == "approved":
+            self.rec.progress(f"👥 {k} workers approved ({why}); they start with the next round")
+        else:
+            self.rec.progress(f"👥 {n} workers asked for: {why}; I decide at a gate")
+        self.rec.save()
+        return status
+
+    def ph_workers_gate(self, mg: Dict[str, Any]) -> Optional[str]:
+        req = mg.get("par_req") or {}
+        n, c = int(req.get("n") or 2), self.mon.controller
+        steps = ", ".join(map(str, req.get("steps") or [])) or "not named"
+        text = (f"{n} workers at the same time on steps {steps} (the manager may approve up to {c.max_workers} "
+                f"alone; night mode allows up to {c.workers_hard_cap}).\n\nWhy: {req.get('reason') or '-'}\n\n"
+                "Approve to start them; send it back to keep one worker.")
+        d = self.wait_gate({"kind": "workers", "title": f"{n} workers at once", "text": text,
+                            "milestone": mg.get("ms", 0)})
+        if d["decision"] == "approve":
+            k = min(n, c.workers_hard_cap) if d.get("night") else n
+            req.update(status="approved", n=k, decided_by="night mode" if d.get("night") else "me")
+            self.rec.progress(f"👥 {k} workers approved at the gate")
+        else:
+            req.update(status="declined", n=1, decided_by="me")
+            note = d.get("message") or ""
+            self.forward(self.manager, f"About {n} workers at once: I keep one worker." + (f" {note}" if note else ""))
+            if req.get("by") == self.critic.name:
+                self.forward(self.critic, self.mtpl("workers_declined").strip())
+        mg["par_req"] = req
+        mg["phase"] = "work"
+        return None
+
+    # ---- the copies
+
+    def par_clone(self, base: AgentConfig, k: int, wt: Optional[Dict[str, str]]) -> AgentConfig:
+        name = f"{base.name}-{k}"
+        sf = ""
+        if base.state_file:
+            p = Path(base.state_file)
+            sf = str(p.parent.parent / name / p.name)
+        a = dataclasses.replace(base, name=name, display_name=f"{base.display_name}-{k}" if base.display_name else "",
+                                state_file=sf, prompt_vars=dict(base.prompt_vars or {}),
+                                working_dir=wt["cwd"] if wt else base.working_dir)
+        self.mon.agents.append(a)
+        self.clones[name] = base.name
+        return a
+
+    def par_monitor(self, w: AgentConfig, k: int) -> str:
+        m = self.monitor_agent
+        if m is None:
+            return ""
+        name = f"{m.name}-{k}"
+        if not self.has_agent(name):
+            sf = str(Path(m.state_file).parent.parent / name / Path(m.state_file).name) if m.state_file else ""
+            a = dataclasses.replace(m, name=name, display_name=f"{m.display_name}-{k}" if m.display_name else "",
+                                    state_file=sf, prompt_vars={**(m.prompt_vars or {}), "worker": w.called})
+            self.mon.agents.append(a)
+            self.clones[name] = m.name
+        return name
+
+    def par_agents_extra(self) -> None:
+        """The copies, for the board (kept after the section ends: its turns stay in their lanes)."""
+        old = [x for x in self.st.get("agents_extra") or [] if x.get("name") not in self.clones]
+        self.st["agents_extra"] = old + [{"name": a.name, "role": a.role, "display_name": a.display_name,
+                                    "copy_of": self.clones[a.name], "backend": a.backend,
+                                    "model": (a.backend_options or {}).get("model")}
+                                   for a in self.mon.agents if a.name in self.clones]
+
+    def par_start(self, req: Dict[str, Any]) -> None:
+        c, mg = self.mon.controller, self.mg
+        base = self.workers[0]
+        n = max(2, int(req.get("n") or 2))
+        steps = [int(x) for x in req.get("steps") or []]
+        req["status"] = "started"
+        par = {"active": True, "n": n, "steps": steps, "queue": list(steps), "reason": req.get("reason", ""),
+               "slots": {}, "reviews": [], "turns": 0, "worktrees": False, "ms": mg.get("ms", 0),
+               "assign_due": True, "started_at": now_iso()}
+        mg["par"] = par
+        warned = False
+        for k in range(1, n + 1):
+            wt = None
+            if k > 1 and c.worker_worktrees:
+                wt = PW.worktree_add(base.working_dir or self.mon.working_dir, f"{base.name}-{k}", self.rec.run_dir.name)
+                if wt is None and not warned:
+                    warned = True
+                    self.rec.progress("⚠ worker_worktrees is on but the workspace is not a git repository (or git "
+                                      "refused): every worker works in the same folder")
+            w = base if k == 1 else self.par_clone(base, k, wt)
+            mon = (self.monitor_agent.name if self.monitor_agent else "") if k == 1 else self.par_monitor(w, k)
+            par["slots"][w.name] = {"status": PW.IDLE, "step": None, "out": "", "turns": 0, "step_turns": 0,
+                                    "done_steps": [], "workspace": w.working_dir or self.mon.working_dir,
+                                    "monitor": mon, "k": k}
+            if wt:
+                par["worktrees"] = True
+                par["slots"][w.name].update(branch=wt["branch"], worktree=wt)
+        mg["feedback"] = {}  # the critic hands out the steps afresh
+        self.par_agents_extra()
+        self.rec.event("parallel_start", n=n, steps=steps, workers=list(par["slots"]))
+        self.rec.progress(f"👥 **{n} workers at once:** {', '.join(par['slots'])}"
+                          + (f" on steps {', '.join(map(str, steps))}" if steps else ""))
+        self.write_work_board()
+        self.rec.save()
+
+    def par_restore(self) -> None:
+        """After a restart in the middle of a parallel section: its copies come back; a turn that was cut off runs
+        again (with the prompt it had)."""
+        par = self.mg.get("par") or {}
+        if not par.get("active"):
+            return
+        base = self.workers[0]
+        for name, s in par.get("slots", {}).items():
+            if name == base.name or self.has_agent(name):
+                continue
+            w = self.par_clone(base, int(s.get("k") or 2), s.get("worktree"))
+            if s.get("monitor"):
+                self.par_monitor(w, int(s.get("k") or 2))
+            if s.get("status") == PW.WORKING:
+                s["status"] = PW.READY
+        if base.name in par.get("slots", {}) and par["slots"][base.name].get("status") == PW.WORKING:
+            par["slots"][base.name]["status"] = PW.READY
+        for s in par.get("slots", {}).values():
+            if s.get("status") == PW.JOB:  # its job is looked at again by the worker
+                s.update(status=PW.READY, instr=s.get("instr") or "Please check where your background job stands.")
+        self.par_agents_extra()
+        self.rec.progress("↻ the parallel section goes on after the restart")
+
+    def par_drop_clones(self) -> None:
+        par = self.mg.get("par") or {}
+        for s in par.get("slots", {}).values():
+            wt = s.get("worktree")
+            if wt:
+                ok, why = PW.worktree_remove(wt)
+                s["worktree_kept"] = not ok
+                self.rec.progress(f"🌿 worktree {wt['path']}: " + ("removed" if ok else f"kept ({why})"))
+                self.rec.event("worktree_end", path=wt["path"], removed=ok, why=why)
+        for name in list(self.clones):
+            self.end_watch(self.mon.agent(name)) if self.has_agent(name) else None
+        self.mon.agents[:] = [a for a in self.mon.agents if a.name not in self.clones]
+        self.clones.clear()
+
+    # ---- the section
+
+    def ph_parallel(self, mg: Dict[str, Any]) -> Optional[str]:
+        with self.rec.lock:  # see the note at the top of this section
+            return self._par_run(mg)
+
+    def par_can_turn(self) -> bool:
+        par, c = self.par, self.mon.controller
+        if int(self.st.get("round", 0)) >= self.mon.max_rounds:
+            par["max_rounds"] = True
+            return False
+        if c.parallel_turns and par.get("turns", 0) >= c.parallel_turns:
+            par["cap"] = True
+            return False
+        return True
+
+    def _par_run(self, mg: Dict[str, Any]) -> Optional[str]:
+        par = mg["par"]
+        futs: Dict[Any, str] = {}
+        self.__dict__.setdefault("_par_rounds", {})
+        self.__dict__.setdefault("_par_procs", {})
+        ex = ThreadPoolExecutor(max_workers=max(1, len(par["slots"])), thread_name_prefix="worker")
+        ok = False
+        try:
+            while True:
+                if self.should_stop():
+                    raise StopRequested()
+                self.check_control()
+                for f in [f for f in list(futs) if f.done()]:
+                    self.par_after_turn(futs.pop(f), f.result())
+                self.par_poll_jobs()
+                if par["reviews"]:  # one review at a time, in the order the steps finished
+                    self.par_review(par["reviews"].pop(0))
+                    continue
+                slots = par["slots"]
+                idle = [n for n, s in slots.items() if s["status"] == PW.IDLE]
+                if idle and par.get("assign_due"):
+                    self.par_assign(idle)
+                    continue
+                for n in idle:  # not given a step: it stops (no idle turns)
+                    slots[n]["status"] = PW.DONE
+                running = set(futs.values())
+                for n, s in slots.items():
+                    if s["status"] == PW.READY and n not in running and self.par_can_turn():
+                        futs[self.par_dispatch(ex, n)] = n
+                busy = futs or any(s["status"] in (PW.WORKING, PW.JOB, PW.REVIEW) for s in slots.values())
+                ready = any(s["status"] == PW.READY for s in slots.values()) and self.par_can_turn()
+                if not busy and not ready:
+                    break
+                self.urgent_checkin()
+                self.progress_tick()  # B5: each worker's monitor checks its turn or job
+                self.activate("stage")  # the manager and critic answer their messages meanwhile
+                self.rec.save()
+                with self.unlocked():
+                    if futs:
+                        wait(list(futs), timeout=0.2, return_when=FIRST_COMPLETED)
+                    else:
+                        time.sleep(0.05)
+            ok = True
+        finally:
+            with self.unlocked():
+                ex.shutdown(wait=True)
+            if not ok and not self.should_stop():  # failed: the section ends here
+                self.par_end(mg)
+        return self.par_finish(mg)
+
+    def par_dispatch(self, ex: ThreadPoolExecutor, name: str) -> Any:
+        mg, par, c = self.mg, self.par, self.mon.controller
+        s, w = par["slots"][name], self.mon.agent(name)
+        rnd = int(self.st.get("round", 0)) + 1
+        summary = self.begin_round(rnd)
+        summary["worker"] = name
+        self._par_rounds[name] = summary
+        mg["ms_round"] = mg.get("ms_round", 0) + 1
+        self.cur()["rounds"] = mg["ms_round"]
+        prompt = s.get("prompt")
+        if not prompt:
+            fb = self.for_worker(s.pop("instr", "") or "") or "Please carry on."
+            if not self.has_session(w):
+                prompt = self.mtpl("worker_start", task=w.task or "", feedback=fb, human_messages="",
+                                   cwd=w.working_dir, decisions="")
+            else:
+                prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
+            s["prompt"] = prompt  # kept until the turn ends: a restart runs it again
+        self.par_leaks(w, prompt)
+        if c.job_wait > 0:
+            self._par_procs[name] = _jobs.snapshot()
+        s.update(status=PW.WORKING, round=rnd, turns=s.get("turns", 0) + 1, step_turns=s.get("step_turns", 0) + 1)
+        par["turns"] = par.get("turns", 0) + 1
+        extra = {"milestone": mg.get("ms", 0), "milestone_round": mg["ms_round"], "par_worker": name,
+                 "par_step": s.get("step")}
+        self.rec.progress(f"▶ {w.called} (`{name}`) works on step {s.get('step') or '?'} (round {rnd})")
+        self.write_work_board()
+        self.rec.save()
+        return ex.submit(self._par_turn, w, prompt, rnd, extra)
+
+    def _par_turn(self, w: AgentConfig, prompt: str, rnd: int, extra: Dict[str, Any]) -> Dict[str, Any]:
+        """One worker's turn, on its own thread (the backend runs without the run-state lock)."""
+        with self.rec.lock:
+            watched = self.start_watch(w, "turn")
+            try:
+                r = self.say(w, prompt, "work", rnd=rnd, extra=extra)
+            finally:
+                if watched:
+                    self.end_watch(w)
+            self.after_state_turn(w, r)
+            return r
+
+    def par_leaks(self, w: AgentConfig, prompt: str) -> None:
+        """Flag (never cut) a worker's prompt that names another worker: they must not know about each other."""
+        others = [a for a in self.all_workers if a.name != w.name]
+        hit = sorted({x for a in others for x in (a.name, a.display_name) if x and re.search(
+            rf"(?<![\w-]){re.escape(x)}(?![\w-])", prompt)})
+        if hit:
+            self.rec.event("role_leak", agent=w.name, names=hit)
+            self.rec.progress(f"⚠ the prompt for `{w.name}` names another worker ({', '.join(hit)}); sent as written")
+
+    def par_after_turn(self, name: str, r: Dict[str, Any]) -> None:
+        par, c, m = self.par, self.mon.controller, self.mon
+        s, w = par["slots"][name], m.agent(name)
+        summary = self._par_rounds.get(name) or {"round": s.get("round"), "turns": []}
+        summary["turns"] = (summary.get("turns") or []) + [r["turn_id"]]
+        if r["status"] == "stopped" or self.should_stop():
+            s["status"] = PW.READY  # its prompt is kept: `orch run --resume` runs it again
+            raise StopRequested()
+        s.pop("prompt", None)
+        s["turn_id"] = r["turn_id"]
+        out = r.get("output") or ""
+        block = self.ask_block(out, "worker")
+        if block:
+            self.new_question(w, self.critic.name, block, r["turn_id"])
+        if r["status"] == "timeout":
+            self.rec.progress(f"{name} ran past its safety limit; the turn was stopped; continuing")
+            self.rec.event("safety_timeout", agent=name, turn=r.get("turn_id"), limit=w.turn_limit(self.watched(w)))
+            self.forward(w, self.mtpl("worker_timeout").strip())
+        elif r["status"] != "ok" and c.stop_on_error:
+            self.end_round(summary, "worker error → stop", errors=[r["turn_id"]])
+            raise _Failed(f"{name}'s turn ended with status {r['status']}")
+        if r.get("cut_short"):
+            self.forward(w, self.mtpl("worker_after_cut").strip())
+        procs = self._par_procs.pop(name, None)
+        if c.job_wait > 0 and procs and not r.get("cut_short"):
+            skip = {int(a["pid"]) for a, _b in T.blocks(out, "no-wait") if str(a.get("pid", "")).isdigit()}
+            found = [j for j in _jobs.detect(procs, {w.working_dir or m.working_dir}, c.job_ignore,
+                                             tags=[_jobs.tag_for(self.rec.run_dir.name, name)]) if j["pid"] not in skip]
+            if found:
+                lines = [f"pid {j['pid']}: {_clip(str(j['command']), 160)}" for j in found]
+                s.update(status=PW.JOB, job={"pids": [j["pid"] for j in found], "lines": lines,
+                                             "cmds": {str(j["pid"]): j["command"] for j in found},
+                                             "since_ts": time.time()}, earlier=out)
+                self.start_watch(w, "job", jobs=lines)
+                self.rec.event("job_wait", agent=name, jobs="; ".join(lines)[:300])
+                self.rec.progress(f"⏳ waiting for {name}'s job ({', '.join(lines)}) before its review")
+                self.write_work_board()
+                return
+        if self.rec.pending_worker_messages(name):
+            s.update(status=PW.READY, instr="Please continue with the additional instructions and check the "
+                                            "resulting work.")
+            self.end_round(summary, f"additional instructions pending → {name}")
+            return
+        earlier = s.pop("earlier", "")
+        s["report"] = (earlier + "\n\n**Later, after the job it was waiting on:**\n\n" + out) if earlier else out
+        s["status"] = PW.REVIEW
+        par["reviews"].append(name)
+        self.write_work_board()
+
+    def par_poll_jobs(self) -> None:
+        par, mg = self.par, self.mg
+        release = mg.pop("job_release", False)
+        for name, s in par["slots"].items():
+            if s["status"] != PW.JOB:
+                continue
+            j, w = s.get("job") or {}, self.mon.agent(name)
+            alive = any(_jobs.alive(x, (j.get("cmds") or {}).get(str(x), "")) for x in j.get("pids") or [])
+            msg = self.rec.pending_worker_messages(name) or self.ledger.waiting(name)
+            if alive and not release and not msg:
+                continue
+            self.end_watch(w)
+            self.rec.event("job_end", agent=name, why="released" if release else "message" if alive else "finished")
+            if release:
+                s.pop("job", None)
+                s["report"], s["status"] = s.pop("earlier", ""), PW.REVIEW
+                par["reviews"].append(name)
+            elif alive:
+                s.update(status=PW.READY, prompt=self.mtpl("worker_job_message", jobs="; ".join(j["lines"]),
+                                                          human_messages=""))
+            else:
+                s.pop("job", None)
+                s.update(status=PW.READY, prompt=self.mtpl("worker_job_done", jobs="; ".join(j["lines"]),
+                                                          state="has finished", human_messages=""))
+            self.write_work_board()
+
+    def find_slot(self, who: str) -> Optional[str]:
+        w = re.sub(r"^the\s+", "", (who or "").strip().lower())
+        for name in self.par.get("slots", {}):
+            a = self.mon.agent(name)
+            if w in (name.lower(), re.sub(r"^the\s+", "", a.called.lower()), (a.display_name or "").lower()):
+                return name
+        return None
+
+    def par_give(self, sections: List[Dict[str, Any]], turn: str, reviewed: str = "") -> List[str]:
+        """Apply the <to> sections of a critic reply: a free worker gets the step; a busy one gets the text as a
+        message. Returns the workers given a step."""
+        par, given = self.par, []
+        for sec in sections:
+            name = self.find_slot(sec["worker"])
+            if not name:
+                self.rec.progress(f"⚠ <to worker=\"{sec['worker']}\"> names no worker of this section; not sent")
+                self.ledger.add(self.critic.name, sec["worker"], sec["text"], status="held", source=turn,
+                                reason="names no worker of the parallel section")
+                continue
+            s = par["slots"][name]
+            if s["status"] in (PW.IDLE, PW.DONE) or name == reviewed:
+                step = sec["step"] or (par["queue"][0] if par["queue"] else None)
+                if step in par["queue"]:
+                    par["queue"].remove(step)
+                s.update(status=PW.READY, step=step, out=sec["out"] or s.get("out", ""), instr=sec["text"],
+                         step_turns=0 if step != s.get("step") or name != reviewed else s.get("step_turns", 0))
+                s.pop("prompt", None)
+                self.ledger.add(self.critic.name, name, sec["text"], self.for_worker(sec["text"]), source=turn,
+                                status="delivered", via="parallel", purpose="par_assign", step=step)
+                given.append(name)
+            else:
+                self.deliver(self.critic, self.mon.agent(name), sec["text"], source=turn, purpose="par_message",
+                             activate=False)
+        return given
+
+    def par_assign(self, idle: List[str]) -> None:
+        """The critic hands out steps to the workers without one (one turn, one <to> section each)."""
+        par, c = self.par, self.critic
+        par["assign_due"] = False
+        ids = ", ".join(f"`{n}` ({self.mon.agent(n).called})" for n in par["slots"])
+        base = self.workers[0]
+        try:
+            ck = self.checklist_board()
+        except Exception:
+            ck = {}
+        steps = ", ".join(PW.step_title(ck, k)[1] for k in par["queue"]) or "the next steps of your plan"
+        wt = "; each also has its own separate copy of the repository (a git worktree, shown on the board)" \
+            if par.get("worktrees") else ""
+        nudge = (self.st.get("nudge") or {}).get(c.name, "")
+        prompt = self.mtpl("critic_par_assign", human_messages=nudge, n=len(par["slots"]), ids=ids,
+                           first=f"`{base.name}`", fresh="" if base.name in idle and len(idle) == len(par["slots"])
+                           else "", steps=steps, who=", ".join(f"`{n}`" for n in idle), worktrees=wt,
+                           board=str(self.work_board_path()))
+        rnd = int(self.st.get("round", 0))
+        r = self.say(c, prompt, "par_assign", rnd=rnd)
+        if r["status"] != "ok":
+            raise _Failed(f"{c.name}'s assignment turn ended with status {r['status']}")
+        self.rec.set(nudge=None)
+        given = self.par_give(PW.to_sections(r.get("output") or ""), r["turn_id"])
+        self.par_questions_up(r)
+        left = [n for n in idle if n not in given]
+        if left:
+            self.rec.progress(f"ⓘ no step for {', '.join(left)}: they stop here")
+        self.write_work_board()
+
+    def par_questions_up(self, r: Dict[str, Any]) -> None:
+        """A question the critic asks in a parallel section goes up as a note that wakes the manager; the work goes
+        on (no phase change)."""
+        block = self.ask_block(r.get("output") or "", "verifier")
+        if block:
+            self.new_question(self.critic, self.manager.name, block, r["turn_id"])
+            self.deliver(self.critic, self.manager, block, self.mtpl("relay_note_up", note=block).strip(),
+                         source=r["turn_id"], purpose=r.get("purpose") or "", wake=True, activate=True)
+
+    def par_review(self, name: str) -> None:
+        """One review of one worker's step (main thread; one at a time)."""
+        par, c, v = self.par, self.mon.controller, self.critic
+        s, w = par["slots"][name], self.mon.agent(name)
+        summary = self._par_rounds.pop(name, None) or {"round": s.get("round") or self.st.get("round", 0),
+                                                       "turns": [x for x in [s.get("turn_id")] if x]}
+        try:
+            ck = self.checklist_board()
+        except Exception:
+            ck = {}
+        _st, title = PW.step_title(ck, s.get("step"))
+        title = title or "their step"
+        nxt = par["queue"][0] if par["queue"] else None
+        tail = (self.mtpl("critic_par_next", next_step=PW.step_title(ck, nxt)[1], who=f"`{name}`") if nxt
+                else self.mtpl("critic_par_last", who=f"`{name}`"))
+        nudge = (self.st.get("nudge") or {}).get(v.name, "")
+        report = self.report_text({"output": s.pop("report", ""), "status": "ok"})
+        prompt = self.mtpl("critic_par_review", human_messages=nudge, who=w.called, id=name, step=title,
+                           report=report, next=tail.strip() and " " + tail.strip(), board=str(self.work_board_path()))
+        r = self.say(v, prompt, "par_review", rnd=int(summary.get("round") or 0), extra={"par_worker": name})
+        summary["turns"] = (summary.get("turns") or []) + [r["turn_id"]]
+        vd = self.verdict(r)
+        if vd in ("ERROR", "UNKNOWN") and c.stop_on_error and r["status"] != "ok":
+            self.end_round(summary, "critic error → stop", verdicts={v.name: vd})
+            raise _Failed(f"{v.name}'s review of {name} ended with status {r['status']}")
+        self.rec.set(nudge=None)
+        out = r.get("output") or ""
+        if vd == "PASS" and c.checklist:  # the step's items in the checklist file decide, never the reply
+            try:
+                st_, _t = PW.step_title(self.checklist_board(), s.get("step"))
+            except Exception:
+                st_ = None
+            items = (st_ or {}).get("items") or []
+            if st_ is not None and (not items or not all(d for d, _x in items)):
+                vd = "FAIL"
+                summary["checklist_overruled"] = [v.name]
+                self.rec.progress(f"{v.name} passed {title} for {name} but its items are not all ticked → FAIL")
+                self.rec.set(nudge={v.name: self.mtpl("par_checklist_nudge", step=title, who=f"`{name}`").strip()})
+        for q in self.open_qs(name):  # the critic saw the worker's question in the report
+            self.settle(q, v.name, "", r["turn_id"])
+        sections = PW.to_sections(out)
+        mine = [x for x in sections if self.find_slot(x["worker"]) == name]
+        others = [x for x in sections if self.find_slot(x["worker"]) != name]
+        feedback = self.clean_critic(out)
+        if vd == "PASS":
+            if s.get("step") is not None:
+                s.setdefault("done_steps", []).append(s["step"])
+            s.update(step=None, step_turns=0, status=PW.IDLE)
+            if mine:
+                self.par_give(mine, r["turn_id"], reviewed=name)
+                if feedback:
+                    s["instr"] = (feedback + "\n\n" + s.get("instr", "")).strip()
+            elif par["queue"]:
+                par["assign_due"] = True  # the critic hands the next step out in an assignment turn
+            else:
+                s["status"] = PW.DONE  # no step left for it: it stops (no idle turns)
+            decision = f"{name}: step passed"
+        else:
+            if mine:
+                self.par_give(mine, r["turn_id"], reviewed=name)
+                s["instr"] = "\n\n".join(x for x in [feedback, s.get("instr", "")] if x).strip()
+            else:
+                s.update(status=PW.READY, instr=feedback or "Please carry on.")
+            s.pop("prompt", None)
+            if s.get("step_turns", 0) >= c.milestone_rounds:
+                s["status"] = PW.STALLED
+                self.rec.progress(f"⚠ {name} spent {s['step_turns']} turns on one step: it stops; the critic takes "
+                                  "stock when the others are done")
+            decision = f"{name}: feedback → {name}"
+        summary["verdicts"] = {v.name: vd}
+        if others:
+            self.par_give(others, r["turn_id"])
+        self.par_questions_up(r)
+        self.end_round(summary, decision)
+        self.write_work_board()
+
+    def par_end(self, mg: Dict[str, Any]) -> None:
+        par = mg.get("par") or {}
+        for n in list(par.get("slots", {})):
+            if self.has_agent(n):
+                self.end_watch(self.mon.agent(n))
+        self.write_work_board()
+        self.par_drop_clones()
+        par["active"] = False
+        par["ended_at"] = now_iso()
+        mg["par_last"] = par
+        mg.pop("par", None)
+        mg.pop("par_req", None)
+        self._par_rounds, self._par_procs = {}, {}
+
+    def par_finish(self, mg: Dict[str, Any]) -> Optional[str]:
+        """The section is over: tidy up, then the critic takes stock in a review of the whole (as for one worker)."""
+        par = mg.get("par") or mg.get("par_last") or {}
+        if par.get("active"):
+            self.par_end(mg)
+        try:
+            ck = self.checklist_board()
+        except Exception:
+            ck = {}
+        lines = []
+        for n, s in par.get("slots", {}).items():
+            done = ", ".join(PW.step_title(ck, k)[1] for k in s.get("done_steps") or []) or "no step passed"
+            state = {PW.STALLED: f"; stopped on {PW.step_title(ck, s.get('step'))[1]} after too many turns"}.get(
+                s.get("status"), "")
+            kept = f"; its worktree is kept at {s['worktree']['path']} (branch {s['branch']})" \
+                if s.get("worktree_kept") else ""
+            lines.append(f"- `{n}`: {done}{state}{kept} (output: {s.get('out') or 'not named'})")
+        if par.get("queue"):
+            lines.append("- Not handed out: " + ", ".join(PW.step_title(ck, k)[1] for k in par["queue"]))
+        if par.get("cap"):
+            lines.append(f"- The turn budget for this section ({self.mon.controller.parallel_turns}) is used up.")
+        summary = "\n".join(lines)
+        self.rec.event("parallel_end", turns=par.get("turns", 0), max_rounds=bool(par.get("max_rounds")))
+        self.rec.progress(f"👥 parallel section ends after {par.get('turns', 0)} worker turns")
+        if par.get("max_rounds"):
+            return "max_rounds_reached"
+        if any(s.get("status") == PW.STALLED for s in par.get("slots", {}).values()):
+            mg.update(limit=True, phase="report")
+            return None
+        mg["review_prompt"] = self.mtpl("critic_par_done", human_messages="", summary=summary,
+                                        board=str(self.work_board_path()))
+        base = self.workers[0].name
+        mg["work"] = {base: {"turn_id": "", "status": "ok", "output": summary, "stderr": ""}}
+        mg["summary"] = self.begin_round(int(self.st.get("round", 0)) + 1)
+        mg["phase"] = "review"
+        return None
+
     def ph_review(self, mg: Dict[str, Any]) -> Optional[str]:
         c, v = self.mon.controller, self.critic
         work = mg.get("work") or {}
         reports = "\n\n".join((f"From {self.mon.agent(k).called}:\n" if len(work) > 1 else "") + self.report_text(x)
                               for k, x in work.items())
         nudge = (self.st.get("nudge") or {}).get(v.name, "")
-        r = self.say(v, self.mtpl("critic_review", worker_report=reports, human_messages=nudge), "verify")
+        prompt = mg.pop("review_prompt", "")  # B11: after a parallel section, the critic takes stock of it
+        r = self.say(v, prompt or self.mtpl("critic_review", worker_report=reports, human_messages=nudge), "verify")
         vd = self.verdict(r)
         summary = mg.get("summary") or {"round": self.st.get("round", 0), "turns": []}
         summary["turns"] = (summary.get("turns") or []) + [r["turn_id"]]

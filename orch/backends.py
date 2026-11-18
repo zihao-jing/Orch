@@ -680,6 +680,7 @@ class MockBackend(Backend):
 
     options:
       delay:        seconds to sleep per turn (default 0); delays: {"purpose": seconds} per purpose
+                    delay_for: {"agent": {"purpose": seconds}} per agent (tests of parallel workers)
       activity:     while sleeping, emit a stream event every 50 ms (a turn that is visibly working)
       script:       list of replies, used in order per agent session (placeholders {round} {agent})
       pass_after:   verifiers reply PASS from this round on (default 2)
@@ -688,7 +689,8 @@ class MockBackend(Backend):
       error_text:   the reply text of a failed turn (e.g. a provider's message)
       write_file:   workers append a line to this file (relative to cwd) each turn
       files:        managed dry runs: {"purpose": [{path: text, ...}, ...]}: the k-th turn of that purpose writes these
-                    files (relative to cwd; "" deletes one), as an agent editing a file in place would
+                    files (relative to cwd; "" deletes one; {agent} in a path or text is the agent's name), as an
+                    agent editing a file in place would
     """
 
     name = "mock"
@@ -741,6 +743,7 @@ class MockBackend(Backend):
         rnd = int(req.context.get("round", 1))
         purpose = str(req.context.get("purpose", ""))
         delay = float((o.get("delays") or {}).get(purpose, o.get("delay", 0)))
+        delay = float(((o.get("delay_for") or {}).get(req.agent) or {}).get(purpose, delay))  # tests: per agent
         t0 = time.monotonic()
         end = t0 + delay
         while time.monotonic() < end:
@@ -765,7 +768,8 @@ class MockBackend(Backend):
             k = self._counts.setdefault(f"{sid}:files:{purpose}", 0) + 1
             self._counts[f"{sid}:files:{purpose}"] = k
             for path, text in (edits[k - 1] if k <= len(edits) else {}).items():
-                fp = Path(req.cwd or ".") / path
+                fp = Path(req.cwd or ".") / str(path).replace("{agent}", req.agent)
+                text = str(text).replace("{agent}", req.agent) if text != "" else ""
                 if text == "":
                     fp.unlink(missing_ok=True)
                 else:

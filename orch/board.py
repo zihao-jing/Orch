@@ -50,6 +50,7 @@ _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
     "review": ("manager", "human"), "feedback": ("manager", "critic"), "brief": ("critic", "worker"),
     "verify": ("critic", "worker"), "amend": ("critic", "worker"), "guidance": ("critic", "worker"),
     "report": ("critic", "manager"), "work": ("worker", "critic"),
+    "par_assign": ("critic", "worker"), "par_review": ("critic", "worker"),
     "checkin": ("critic", "manager"), "ack": ("manager", "human"), "pause": ("manager", "human"),  # only its NOTE FOR <critic> part reaches the critic
 }
 
@@ -238,6 +239,10 @@ class Board:
         agents = [{"name": a["name"], "role": a["role"], "called": a.get("display_name") or a["name"],
                    "backend": a.get("backend"), "model": (a.get("backend_options") or {}).get("model")}
                   for a in cfg.get("agents") or []]
+        known = {a["name"] for a in agents}
+        agents += [{"name": a["name"], "role": a["role"], "called": a.get("display_name") or a["name"],  # B11 copies
+                    "backend": a.get("backend"), "model": a.get("model"), "copy_of": a.get("copy_of")}
+                   for a in st.get("agents_extra") or [] if isinstance(a, dict) and a.get("name") not in known]
         return {
             "monitor": st.get("monitor"), "run_id": st.get("run_id"), "status": st.get("status"),
             "mode": st.get("mode"), "goal": st.get("goal"), "round": st.get("round"), "max_rounds": st.get("max_rounds"),
@@ -326,7 +331,8 @@ class Board:
             out = t.get("output") or ""
             row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
                                          "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder", "reminders",
-                                         "cut_short", "interruptions", "continues", "model_change")}
+                                         "cut_short", "interruptions", "continues", "model_change", "par_worker",
+                                         "par_step")}
             row["session_reset"] = "; ".join(str(x.get("reason") or "") for x in t.get("session_reset") or []
                                              if isinstance(x, dict)) or None
             row["output"] = out[:PREVIEW_CHARS]

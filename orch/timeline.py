@@ -225,6 +225,8 @@ class Builder:
             elif purpose == "compact":
                 kind = "system"
             to = self.name_for(to_role)
+            if t.get("par_worker") and to_role == "worker":  # B11: a review of one of several workers: its lane
+                to = str(t["par_worker"])
             rows = routes.get(tid) or []
             run = t.get("status") == "running"
             if run:

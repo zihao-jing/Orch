@@ -674,13 +674,21 @@ function lineHTML(it, where){  // one message: time, sender → recipient, statu
   return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${extra}${wh}<span class="pv">${esc(it.line || '')}</span></summary>`
     + (open ? `<div class="fb">${itemBody(it)}</div>` : '') + '</details>';
 }
+function laneHTML(lane, rows){  // B11: one worker's lane in the critic ↔ worker block
+  const mg = D.managed || {}, par = (mg.par && mg.par.slots) ? mg.par : (mg.par_last || {}), s = (par.slots || {})[lane] || {};
+  const head = [s.step ? 'step ' + s.step : '', s.status || '', s.check ? 'monitor: ' + s.check : ''].filter(Boolean).map(esc).join(' · ');
+  return `<div class="lane"><b>${esc(called(lane))}</b> <span class="mute">${esc(lane)}</span>${head ? ' — ' + head : ''}</div>` + rows.map(it => lineHTML(it)).join('');
+}
 function groupName(ms, step){ return (ms < 0 ? 'plan' : 'M' + (ms + 1)) + (step ? ' · step ' + step : ''); }
 function blocksHTML(items){  // one block per level of communication, messages in order
   const by = {}; items.forEach(it => (by[it.block] = by[it.block] || []).push(it));
   return '<div class="blocks">' + BLOCKS.filter(([b]) => by[b]).map(([b, title]) => {
     const rows = by[b], n = rows.filter(it => !OTHER.has(it.kind)).length;
-    // critic ↔ worker: the data has a lane per worker (it.lane, B11); one lane is shown for now, with the worker named
-    return `<section class="blk b-${b}"><h3>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h3>${rows.map(it => lineHTML(it)).join('')}</section>`;
+    // critic ↔ worker: one lane per worker when several work at once (B11): status, step, the monitor's last report
+    const lanes = b === 'cw' ? [...new Set(rows.map(it => it.lane).filter(Boolean))] : [];
+    const body = lanes.length > 1 ? lanes.map(l => laneHTML(l, rows.filter(it => it.lane === l))).join('')
+      + rows.filter(it => !it.lane).map(it => lineHTML(it)).join('') : rows.map(it => lineHTML(it)).join('');
+    return `<section class="blk b-${b}"><h3>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h3>${body}</section>`;
   }).join('') + '</div>';
 }
 function groupBody(g){

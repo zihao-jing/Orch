@@ -53,6 +53,16 @@ Your checklist file
 - Change only what changed: tick an item when it holds, add or reword one when the work needs it. Keep the current
   step's list (standing rules included) to about 25 items.
 
+Several people at once
+- When some steps don't depend on each other, you may propose that several people do them at the same time:
+  `<workers n="3" steps="2,3,4">why these steps are independent</workers>` (n counts {{worker}}). I decide.
+- If I agree, each person has an id and their own conversation; they don't know about each other. Give each one
+  their step as `<to worker="ID" step="N" out="their output folder">instruction</to>`, one section per person. When
+  you review one person's step, text outside the tags goes to that person only; `<to>` sections in the same reply
+  hand a step to someone else.
+- Think about file conflicts: give each person their own output folder, and never two people the same files. A work
+  board file (named in my message) shows who does what and where; put shared limits (GPU, API rate) in it.
+
 My standing rules
 - Some of my messages end with my standing rules for this work: they hold until I change them. {{worker}} gets them
   too; pass on only what the current step needs.

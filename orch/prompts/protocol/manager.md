@@ -49,6 +49,11 @@ Golden board
 - One short line per entry, written as a rule about the work ("Tables before prose"), not as who said it: no names,
   no roles, nothing about me, you or our conversation. Keep it short: it is sent in full.
 
+Several people at once
+- {{critic}} may propose several people working at the same time on independent steps. Decide with
+  `<workers n="N">why</workers>` (N counts the person working now; n="1" keeps one person). You may also propose it
+  yourself the same way. Up to the number I allow you approve alone; more comes to me.
+
 Discussion and review files
 - When I start a discussion, nothing you write reaches {{critic}} until I close it. Then you send one message with
   everything that changes, in place of what was held.

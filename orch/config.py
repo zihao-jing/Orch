@@ -382,6 +382,14 @@ class ControllerConfig:
     golden_board: str = ""
     golden_limit: int = 8000  # characters; above it the board warns and the manager is asked once to prune
     large_text: int = 50000  # B8: characters; a larger reply, input or raw stream gets a board warning (never cut)
+    # B11 parallel workers (orch/parallel.py): the manager approves alone up to max_workers (the first worker counts);
+    # above it I decide at a gate; in night mode the manager's number stands up to workers_hard_cap. parallel_turns caps
+    # the worker turns of one parallel section (0 = only max_rounds). worker_worktrees: each extra worker gets its own
+    # git worktree beside the repository (the critic merges).
+    max_workers: int = 3
+    workers_hard_cap: int = 6
+    parallel_turns: int = 0
+    worker_worktrees: bool = False
 
 
 @dataclass
@@ -602,7 +610,8 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
              "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "reminders", "audit_every", "audit_points",
-             "terminal_busy_timeout", "golden_board", "golden_limit", "large_text")
+             "terminal_busy_timeout", "golden_board", "golden_limit", "large_text", "max_workers", "workers_hard_cap",
+             "parallel_turns", "worker_worktrees")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -752,7 +761,8 @@ def load_config(path: str) -> Config:
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
                       "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
                       "reminders", "audit_every", "audit_points", "terminal_busy_timeout", "golden_board",
-                      "golden_limit", "large_text"}
+                      "golden_limit", "large_text", "max_workers", "workers_hard_cap", "parallel_turns",
+                      "worker_worktrees"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
@@ -796,6 +806,10 @@ def load_config(path: str) -> Config:
                           else str(proj / "golden.md") if proj else ""),
             golden_limit=int(craw.get("golden_limit", ControllerConfig.golden_limit) or 0),
             large_text=int(craw.get("large_text", ControllerConfig.large_text) or 0),
+            max_workers=int(craw.get("max_workers", ControllerConfig.max_workers) or 1),
+            workers_hard_cap=int(craw.get("workers_hard_cap", ControllerConfig.workers_hard_cap) or 1),
+            parallel_turns=int(craw.get("parallel_turns", 0) or 0),
+            worker_worktrees=bool(craw.get("worker_worktrees", False)),
             **{k: str(craw[k]) for k in ("question_pattern", "note_pattern", "accept_pattern", "revise_pattern")
                if craw.get(k)},
         )
@@ -911,7 +925,10 @@ def validate(cfg: Config, check_paths: bool = False) -> List[str]:
                 raise ConfigError(f"{where}: at most one agent with role: auditor")
             if len(m.by_role("monitor")) > 1:
                 warnings.append(f"{where}: several agents with role: monitor; only "
-                                f"{m.by_role('monitor')[0].name!r} watches the work (one monitor per worker comes later)")
+                                f"{m.by_role('monitor')[0].name!r} watches the work (each extra worker gets its own copy of it)")
+            if c.max_workers < 1 or c.workers_hard_cap < c.max_workers or c.parallel_turns < 0:
+                raise ConfigError(f"{where}: controller.max_workers must be >= 1, workers_hard_cap >= max_workers and "
+                                  f"parallel_turns >= 0")
             if c.audit_every < 0 or c.audit_points < 1:
                 raise ConfigError(f"{where}: controller.audit_every must be >= 0 and audit_points >= 1")
         if check_paths:

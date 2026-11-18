@@ -17,6 +17,9 @@ Every signal is an XML-style tag with a start and an end, so orch never has to g
     <instruction>…</instruction>       what the next agent must act on: passed on whole, in place of the rest of the reply
     <rubric>…</rubric>                 the manager: the current milestone's 3–8 criteria, one per line
     <summary>…</summary>               the manager: what changed, what was checked, where to look (top of a gate)
+    <workers n="3" steps="2,3">…</workers>  B11: the critic proposes several workers for independent steps; the
+                                       manager approves (n >= 2) or declines (n="1")
+    <to worker="w-2" step="3">…</to>   B11: the critic's instruction (and step) for one of several workers
 
 Text outside the tags is for whoever the agent is replying to. Tags inside `code` or ``` fences are only quoted,
 not used. A tag left open runs to the next protocol tag or to the end of the reply.
@@ -27,7 +30,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
-         "instruction", "rubric", "summary")
+         "instruction", "rubric", "summary", "workers", "to")
 _ALT = "|".join(re.escape(n) for n in NAMES)
 _OPEN = re.compile(rf"<({_ALT})((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)
 _ATTR = re.compile(r"([\w-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>/]+))")

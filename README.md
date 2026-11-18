@@ -319,6 +319,27 @@ the turn's output (or which job processes still run) and the current step's item
 * **The board** shows a live line per working agent from its latest check: "Sam: step 3, running 14 min — log
   active".
 
+**Parallel workers (B11).** When steps don't depend on each other, the critic (or the manager) can propose several
+workers: `<workers n="3" steps="2,3,4">why</workers>` (n counts the worker already on the job).
+
+* **Who decides.** The manager, up to `max_workers` (controller, default 3), as long as enough rounds are left and,
+  when `parallel_turns` is set, n is within it. More goes to me as a gate. In night mode the manager's number stands up
+  to `workers_hard_cap` (default 6). A critic proposal reaches the manager as a note that wakes it.
+* **The workers.** `writer-2` … `writer-N` are copies of the worker: same settings, own session, lane, job tag, state
+  file and monitor (`monitor-2` …; without a monitor, a side session of the critic). Each sees only the critic, never
+  each other; a prompt that names another worker is flagged on the board.
+* **The critic's format.** It hands out steps with one `<to worker="writer-2" step="3" out="results/s3/">instruction</to>`
+  per worker. Each finished step is reviewed in its own critic turn, one at a time: text outside the tags goes to
+  that worker, `<verdict>PASS</verdict>` is checked against that step's items in the checklist file, and `<to>`
+  sections hand the next step to whoever is free. A worker whose step passed with no step left stops.
+* **The work board.** `work-m<N>.md` beside the critic's checklist file: who does which step, status, output folder,
+  workspace, turns and the monitor's last line. orch keeps it up to date; the critic edits only its "Shared limits".
+* **Workspaces.** By default every worker uses the same folder and the critic gives each its own output folder.
+  `worker_worktrees: true` gives each copy a git worktree (`<repo>-worktrees/<run>-writer-2`, branch
+  `parallel/<run>-writer-2`); the critic merges. A worktree is removed at the end only when nothing would be lost.
+* When every worker is done, the critic takes stock in one review, and the run goes on with the one worker.
+  `parallel_turns` (0 = only `max_rounds`) caps the worker turns of one parallel section.
+
 ## Steering and inspecting a live run
 
 **Night mode** (🌙 on the board): while it is on, the manager answers its own questions for you and plan and milestone

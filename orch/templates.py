@@ -611,6 +611,57 @@ I commented on your review `{{path}}`. My changes and comments, as a diff of the
 
 Please answer each comment here. If they change the work, tell {{critic}} what changes in one message.
 """,
+    # B11 parallel workers. The critic's proposal, as the manager reads it (a note that wakes it: it is a decision)
+    "workers_proposal": """\
+{{critic}} proposes {{n}} people working at the same time on steps {{steps}}: {{reason}}
+
+You can approve up to {{max}} on your own: `<workers n="N">why</workers>` (N counts the person working now). More
+than that comes to me to decide. To keep one person, write `<workers n="1">why</workers>`.""",
+    # the critic hears that its proposal was declined (neutral: no one above is named)
+    "workers_declined": "Let's keep to one person on these steps for now; carry on one step at a time.",
+    # the critic hands out the steps: one <to> section per worker
+    "critic_par_assign": """\
+{{human_messages}}
+
+From now on {{n}} people work at the same time, each in their own conversation: {{ids}}. {{first}} is the person
+you have worked with so far{{fresh}}. They don't know about each other: write to each as "I" to "you", and never
+mention one to another.
+
+Steps to hand out: {{steps}}. Give each of {{who}} one step now, one section each, complete on its own:
+
+<to worker="ID" step="N" out="output folder">what to do, how you will check it, what it must keep to</to>
+
+Avoid two people writing the same files: give each their own output folder{{worktrees}}. Steps you don't hand out now
+go to whoever finishes first. The work board `{{board}}` shows who does what, each step's status and where outputs
+go; I keep it up to date. Add shared limits (GPU, API rate) under its "Shared limits" heading.""",
+    # one review of one worker's step, while the others keep working
+    "critic_par_review": """\
+{{human_messages}}
+
+{{who}} (`{{id}}`) sent this update on {{step}}:
+
+{{report}}
+
+Please check this step and tick what holds in your checklist file `{{checklist_path}}`. Text outside the tags goes
+to {{who}} only. End with `<verdict>PASS</verdict>` when every item of {{step}} is `[x]`, otherwise
+`<verdict>FAIL</verdict>` with what to fix.{{next}} The work board is `{{board}}`.""",
+    "critic_par_next": " If it passes, {{next_step}} is next for {{who}}: give that step in this same reply.",
+    "critic_par_last": " If it passes, no step is left for {{who}}; they stop there.",
+    # the parallel steps are finished: the critic takes stock (a review, as for one worker)
+    "critic_par_done": """\
+{{human_messages}}
+
+The steps done in parallel are finished:
+
+{{summary}}
+
+The work board `{{board}}` has the details. Merge or tidy up what needs it, check the checklist file
+`{{checklist_path}}`, and give {{worker}} the next step in this reply if one is left. End with `<verdict>PASS</verdict>`
+(only when every item of every step in the file is `[x]`) or `<verdict>FAIL</verdict>`.""",
+    # a PASS on a step whose items are not all ticked
+    "par_checklist_nudge": "You passed {{step}} for {{who}}, but its items in your checklist file are not all `[x]`; "
+                           "I sent your words back as a review instead. Tick the items that hold, or say what is "
+                           "missing.",
     # B6 milestone fallback: the item added to a reopened milestone's checklist file
     "checklist_reopened": "reopened: check this part again before it counts as done",
 }

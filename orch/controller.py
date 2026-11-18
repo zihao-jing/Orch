@@ -849,7 +849,7 @@ class MonitorRunner:
         attempts: List[Dict[str, Any]] = []
         reason = ""
         lock = rec.agent_lock(agent.name)
-        lock.__enter__()
+        self.enter_agent_lock(lock)
         hit: List[str] = []
         cancel = self.turn_cancel(agent, hit)
         chain = agent.variants()
@@ -909,7 +909,7 @@ class MonitorRunner:
                 on_message=message_status if agent.role == "worker" else None,
             )
             try:
-                res = backend.run(req, cancel)
+                res = self.run_backend(backend, req, cancel)
             except Exception:
                 res = TurnResult("error", "", sid, None, traceback.format_exc(), [], {})
             got_there = bool(reached) or bool((res.output or "").strip()) or bool(res.meta)
@@ -1074,6 +1074,14 @@ class MonitorRunner:
             raise NeedsHuman(record, reason)
         record["reason"] = reason
         return record
+
+    def run_backend(self, backend: Any, req: TurnRequest, cancel: Callable[[], bool]) -> TurnResult:
+        """The backend's turn itself (managed mode lets other threads use the run state meanwhile)."""
+        return backend.run(req, cancel)
+
+    def enter_agent_lock(self, lock: Any) -> None:
+        """Take an agent's turn lock (managed mode waits for it without holding the run state)."""
+        lock.__enter__()
 
     def stage(self, items: List[Tuple[AgentConfig, str, str]], rnd: int, parallel: bool) -> List[Dict[str, Any]]:
         """Run several turns, in order or concurrently. Returns records in item order."""
