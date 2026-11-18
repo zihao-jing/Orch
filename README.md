@@ -330,9 +330,9 @@ orch audit .                           # audit the last audit_every rounds now (
   "nothing changed" to a few lines. Long messages cost twice: tokens for the reader, and attention for the next
   agent, who has to find what is new.
 
-More, from auditing a 110-round run and checking every finding against the records (cost meters behind other
-providers' endpoints, messages dropped at gates, what an auditor's digest must say): see
-[`docs/insights-from-audits.md`](docs/insights-from-audits.md).
+More lessons from building orch and running a 272-round project: [`docs/lessons.md`](docs/lessons.md).
+The user's writing and collaboration preferences from that run: [`docs/writing-preferences.md`](docs/writing-preferences.md),
+[`docs/collaboration-preferences.md`](docs/collaboration-preferences.md).
 
 ## Other setups: one config file, `pipeline` and `llm` modes
 
