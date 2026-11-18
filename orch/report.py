@@ -261,7 +261,21 @@ def _preview(text: str) -> str:
     return out[:200]
 
 
-def _turn_html(t: Dict[str, Any]) -> str:
+REPORT_FULL_CHARS = 4_000_000  # above this much turn text in a run, report.html cuts long texts (B9b)
+CUT_OUT, CUT_IN = 20_000, 3_000  # characters kept of a reply / of a prompt, system prompt or stderr when cut
+
+
+def _cut(text: Any, n: int, tid: str, part: str) -> str:
+    """A long text cut for a large run's report, with where the whole text is (beside report.html)."""
+    s = "" if text is None else str(text)
+    if len(s) <= n:
+        return s
+    head, _, rest = tid.partition("-")
+    where = f"rounds/{head}/{rest}.{part}.md" if part in ("input", "output") else f"rounds/{head}/{rest}.json"
+    return s[:n] + f"\n\n… [{len(s) - n:,} more characters: the whole text is in {where}, and on the board]"
+
+
+def _turn_html(t: Dict[str, Any], cut: bool = False) -> str:
     tid = str(t.get("turn_id"))
     cost = t.get("_cost")
     out = t.get("output") or ""
@@ -294,12 +308,14 @@ def _turn_html(t: Dict[str, Any]) -> str:
     if t.get("status") == "running":
         parts.append("<div class='label'>output</div><pre class='mute'>running…</pre>")
     else:
-        parts.append(_sub(tid, "out", "output", out or "(empty)", open_=True, cls="out"))
-    parts.append(_sub(tid, "in", f"input · {len(t.get('input') or ''):,} chars", t.get("input")))
+        parts.append(_sub(tid, "out", "output", (_cut(out, CUT_OUT, tid, "output") if cut else out) or "(empty)",
+                          open_=True, cls="out"))
+    inp = t.get("input")
+    parts.append(_sub(tid, "in", f"input · {len(inp or ''):,} chars", _cut(inp, CUT_IN, tid, "input") if cut else inp))
     if t.get("system_prompt"):
-        parts.append(_sub(tid, "sys", "system prompt", t["system_prompt"]))
+        parts.append(_sub(tid, "sys", "system prompt", _cut(t["system_prompt"], CUT_IN, tid, "json") if cut else t["system_prompt"]))
     if t.get("stderr"):
-        parts.append(_sub(tid, "err", "stderr", t["stderr"]))
+        parts.append(_sub(tid, "err", "stderr", _cut(t["stderr"], CUT_IN, tid, "json") if cut else t["stderr"]))
     if t.get("command"):
         parts.append(_sub(tid, "cmd", "command", " ".join(map(str, t["command"]))))
     parts.append(f"<details class='sub' id='{e(tid)}-meta'><summary>details</summary><div class='body'><div class='kv'>{kvh}</div></div></details>")
@@ -378,6 +394,8 @@ def render_run_report(run_dir: Path) -> str:
     chats = [dict(c, _cost=c.get("cost")) for c in _chat_turns(run_dir)]
     total = turn_costs(every + chats, "_cost")
     agents = sorted({str(t.get("agent")) for t in every})
+    size = sum(len(str(t.get(k) or "")) for t in every for k in ("input", "output", "system_prompt", "stderr"))
+    cut = size > REPORT_FULL_CHARS  # a long run: don't embed every full prompt (a report reached 51 MB)
     cards = [("status", pill(status)), ("mode", e(st.get("mode"))),
              ("round", f"{e(st.get('round'))} / {e(st.get('max_rounds'))}"),
              ("turns", f"{e(tc.get('total', 0))} <span class='mute' style='font-size:12px'>({e(tc.get('ok', 0))} ok · {e(tc.get('error', 0) + tc.get('timeout', 0))} failed)</span>"),
@@ -390,6 +408,10 @@ def render_run_report(run_dir: Path) -> str:
             "<div class='grid'>" + "".join(f"<div class='card'><div class='k'>{k}</div><div class='v'>{v}</div></div>" for k, v in cards) + "</div>",
             f"<details id='goal'><summary><b>Goal</b><span class='prev'>{e(_preview(st.get('goal') or ''))}</span></summary>"
             f"<div class='body'><div class='goal'>{e(st.get('goal') or '(none)')}</div></div></details>"]
+    if cut:
+        body.append(f"<p class='decision' style='color:var(--warn)'>This run holds {size / 1e6:.0f} MB of turn text, so this "
+                    f"report cuts replies after {CUT_OUT:,} and prompts after {CUT_IN:,} characters; each cut says where "
+                    "the whole text is. Every message, in full, is on the board (<code>orch serve</code>).</p>")
     if st.get("final_report"):
         body.append(f"<h2>Final report</h2><div class='goal'>{e(st['final_report'])}</div>")
     if st.get("error"):
@@ -454,7 +476,7 @@ def render_run_report(run_dir: Path) -> str:
                 + (f"<span class='tag'>${rcost:.2f}</span>" if rcost else "")
                 + f"<span class='tag'>{e(rs.get('decision') or '')}</span></summary>"
                 f"<div class='body'>" + "".join(f"<div class='decision'>{x}</div>" for x in extra)
-                + "".join(_turn_html(t) for t in turns) + "</div></details>")
+                + "".join(_turn_html(t, cut) for t in turns) + "</div></details>")
         body.append(f"<details class='ms' id='ms-{e(ms)}-{e(rs_[0][0].name)}'{' open' if gi == 0 else ''}><summary><b>{e(name)}</b>"
                     f"<span class='tag'>{span} · {nturns} turns</span></summary><div class='body'>{''.join(inner)}</div></details>")
     body.append("<p class='mute' style='margin-top:24px'>Costs are what each agent's CLI reports for the turn "

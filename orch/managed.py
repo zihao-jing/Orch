@@ -2673,6 +2673,8 @@ class ManagedRunner(MonitorRunner):
             mg["phase"] = "job"
             pids = ", ".join(str(x) for j in jobs.values() for x in j["pids"])
             self.rec.progress(f"⏳ waiting for the worker's job (pid {pids}) before {self.critic.name} reviews")
+            for a, j in jobs.items():  # B9b: a small job line on the board
+                self.rec.event("job_wait", agent=a, jobs="; ".join(j["lines"])[:300])
             self.log(f"  ⏳ waiting for job pid {pids} (watched by progress checks; 'Review now' on the board skips)")
             return None
         if any(self.rec.pending_worker_messages(w.name) for w in self.workers):
@@ -2743,6 +2745,7 @@ class ManagedRunner(MonitorRunner):
                 self.end_watch(w)
             self.rec.set(status="running")
         mg.pop("job", None)
+        self.rec.event("job_end", agent=next(iter(agents), ""), why=why)
         if why == "released":
             mg.pop("work_earlier", None)
             self.rec.progress(f"▶ review now, without waiting for the job")

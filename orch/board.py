@@ -8,8 +8,13 @@ answers and approvals become ``inbox/*.json`` control files, the live view tails
 chat with the manager resumes the manager's own session (under the same per-agent lock the run uses), with
 the exchange kept in ``chat.jsonl``.
 
-Endpoints: GET / · GET /log/… (the run logs: index.html, each run's report.html and files) · GET /api/state · GET /api/turn?id= · GET /api/events (SSE) ·
-POST /api/chat · /api/answer · /api/gate · /api/note · /api/stop
+Endpoints: GET / · GET /report (the run's static report) · GET /log/<path> (files below the output folder) ·
+GET /api/state · /api/items?g= · /api/message?id= · /api/search?q= · /api/turn?id= · /api/chat · /api/audit ·
+GET /api/events (SSE) · POST /api/chat · /api/answer · /api/gate · /api/note · /api/night · /api/discussion ·
+/api/review · /api/review_comments · /api/job · /api/milestone · /api/stop
+
+B9b: the page has every message (orch/timeline.py). The state carries one line per message for the open step only;
+full texts load on unfold (/api/message), folded steps on opening (/api/items), so the payload stays small.
 
 ``GET /api/state?since=<ver>`` answers with only what changed since the payload ``<ver>`` (see ``StateDeltas``);
 without ``since`` it is the full payload as before. JSON and text replies are gzipped when the browser accepts it.
@@ -27,7 +32,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from . import reminders as REM
 from . import routing as RT
@@ -35,6 +40,8 @@ from .backends import TurnRequest, run_variants
 from .config import MonitorConfig
 from .recorder import agent_lock, live_event, now_iso, read_json
 from . import report as R
+from . import tags as T
+from . import timeline as TL
 from .report import checklist_items, review_checklist, turn_costs
 from .templates import render
 
@@ -51,6 +58,7 @@ STATE_GAP = 1.0     # seconds between two `state` events: a busy run writes stat
 GZIP_MIN = 1024     # replies shorter than this go out uncompressed
 PREVIEW_CHARS = 900  # a turn's output is sent in full up to this length; longer ones are fetched with /api/turn
 CHAT_TAIL = 60       # chat messages per conversation in the state payload; older ones come from /api/chat
+CHAT_CLIP = 1500     # characters of a chat message in the state payload; the rest with /api/message
 
 
 def _chat_rows(rd: Path) -> List[Dict[str, Any]]:
@@ -164,6 +172,9 @@ class Board:
         self._chat_lock = threading.Lock()
         self._rows: Dict[Path, Any] = {}  # turn file -> ((mtime, size), (row, checklist item, what it got and sent) or None)
         self.deltas = StateDeltas()
+        self._events: Dict[str, Any] = {}  # events.jsonl, parsed (orch/timeline.py)
+        self._tl_lock = threading.Lock()
+        self._tl: Optional[Tuple[float, Any, Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], str]] = None
 
     @property
     def run_dir(self) -> Optional[Path]:
@@ -171,6 +182,10 @@ class Board:
 
     # ------------------------------------------------------------------ data
     def data(self) -> Dict[str, Any]:
+        """The run's full model (every turn row, route and message). The page polls `state()`, a slim view of it."""
+        return {k: v for k, v in self._model().items() if not k.startswith("_")}
+
+    def _model(self, full: bool = True) -> Dict[str, Any]:
         rd = self.run_dir
         if rd is None or not (rd / "state.json").is_file():
             return {"monitor": self.name, "status": "starting"}
@@ -196,7 +211,7 @@ class Board:
             if c.get("status") == "running":
                 live[c["id"]] = self._live_text(rd / "live" / f"{c['id']}.jsonl")
         ledger = st.get("messages") or []
-        relays = _relays(rd, chat, turns, ledger)
+        relays = _relays(rd, chat_all, turns, ledger)
         routes, received = _routes(rd, turns, seen, cfg.get("agents") or [], st.get("worker_messages") or [], ledger)
         held = {}  # blocks of a reply orch keeps from the next agent by design: logged, not lost
         for m in ledger:
@@ -241,7 +256,8 @@ class Board:
             "terminal": _terminal(rd), "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
             "worker_messages": st.get("worker_messages") or [],
             "messages": _message_log(rd, chat_all, turns, {a["name"]: a["called"] for a in agents}, mgr_name,
-                                     st.get("worker_messages") or [], st.get("fwd") or {}),
+                                     st.get("worker_messages") or [], st.get("fwd") or {}) if full else [],
+            "_chat_all": chat_all,
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
             "audit": self._audit(rd),
@@ -365,6 +381,177 @@ class Board:
                 return {k: t.get(k) for k in ("turn_id", "agent", "purpose", "status", "input", "output",
                                               "system_prompt", "stderr", "session_id", "duration_s")}
         return {"error": "not found"}
+
+    # ------------------------------------------------------------------ B9b: the slim state and the timeline
+    def _timeline(self, fresh: float = 1.0) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], str]:
+        """(model, every item in order, groups, open group key), rebuilt at most once per `fresh` seconds."""
+        with self._tl_lock:
+            rd = self.run_dir
+            hit = self._tl
+            if hit is not None and hit[1] == rd and time.time() - hit[0] < fresh:
+                return hit[2], hit[3], hit[4], hit[5]
+            d = self._model(full=False)
+            if rd is None or not d.get("run_id"):
+                self._tl = (time.time(), rd, d, [], [], "")
+                return d, [], [], ""
+            items = TL.Builder(rd, d, d.get("_chat_all") or [], TL.read_events(rd / "events.jsonl", self._events)).build()
+            labels = TL.assign(items, d.get("turns") or [])
+            items = TL.order(items)
+            gs, cur = TL.groups(items, labels)
+            self._tl = (time.time(), rd, d, items, gs, cur)
+            return d, items, gs, cur
+
+    def state(self) -> Dict[str, Any]:
+        """What the page polls: the run's status, switches, what needs me and who is working, plus the timeline as
+        one-line items for the open step only. Full texts come with /api/message, folded steps with /api/items."""
+        d, items, gs, cur = self._timeline(fresh=0.0)
+        if not d.get("run_id"):
+            return {k: v for k, v in d.items() if not k.startswith("_")}
+        mine = [it for it in items if TL.key_of(it) == cur]
+        shown = mine[-TL.ITEMS_MAX:]
+        mg = d.get("managed") or {}
+        out = {k: d.get(k) for k in (
+            "monitor", "run_id", "status", "mode", "round", "max_rounds", "cost", "cost_estimate", "turn_counts",
+            "updated_at", "started_at", "error", "night", "night_pending", "discussion", "discussion_pending",
+            "review_files", "golden", "status_lines", "reliability", "stop_reason", "reviews", "agents", "series",
+            "chat", "chat_more", "terminal", "live", "queued_answers", "min_score", "can_chat", "audit")}
+        out["managed"] = _slim_managed(mg)
+        qa = d.get("queued_answers") or {}
+        out["questions"] = [q if q.get("status") == "open" and not qa.get(q.get("id")) else
+                            {**q, "text": _clip(q.get("text")), "answer": _clip(q.get("answer")),
+                             "assumption": _clip(q.get("assumption"))} for q in d.get("questions") or []]
+        out["decisions"] = [{**x, "text": _clip(x.get("text"), 600), "len": len(x.get("text") or "")}
+                            for x in d.get("decisions") or []]
+        # chat texts are clipped too: the panel loads a whole message (/api/message?id=c:<id>) when asked
+        out["chat"] = [{**c, "text": _clip(c.get("text"), CHAT_CLIP), "len": len(c.get("text") or "")}
+                       if len(c.get("text") or "") > CHAT_CLIP else c for c in d.get("chat") or []]
+        ids = {c.get("id") for c in d.get("chat") or []}
+        out["relays"] = {k: v for k, v in (d.get("relays") or {}).items() if k in ids}
+        out["running"] = [{k: t.get(k) for k in ("turn_id", "agent", "purpose", "started_at", "milestone")}
+                          for t in d.get("turns") or [] if t.get("status") == "running"]
+        out["checklists"] = _checklists(d.get("turns") or [])
+        out.update(tl_groups=gs, tl_cur=cur, tl_items=shown, tl_more=len(mine) - len(shown))
+        return out
+
+    def items(self, key: str, all_: bool = False) -> Dict[str, Any]:
+        """The items of one (milestone, step) group, oldest first: the newest GROUP_MAX unless all are asked for."""
+        _d, items, _gs, _cur = self._timeline()
+        mine = [it for it in items if TL.key_of(it) == key]
+        shown = mine if all_ else mine[-TL.GROUP_MAX:]
+        return {"key": key, "items": shown, "more": len(mine) - len(shown)}
+
+    def message(self, mid: str) -> Dict[str, Any]:
+        """One item's full text (and, for a turn, what became of each message it passed on)."""
+        rd = self.run_dir
+        if rd is None:
+            return {"error": "no run"}
+        d, items, _gs, _cur = self._timeline()
+        item = next((it for it in items if it["id"] == mid), None)
+        kind, _, rest = mid.partition(":")
+        out: Dict[str, Any] = {"id": mid, "item": item}
+        if kind in ("t", "r"):
+            tid, _, i = rest.partition(":")
+            t = read_json(TL.turn_path(rd, tid)) or {}
+            if not t:
+                return {**out, "error": "not found"}
+            text = t.get("output") or ""
+            if kind == "r":
+                found = re.findall(r"<system-reminder>([\s\S]*?)</system-reminder>", t.get("input") or "")
+                out["text"] = "\n\n---\n\n".join(x.strip() for x in found) or "(the reminder text is in the prompt)"
+            elif i:
+                bl = T.blocks(text, "message")
+                out["text"] = bl[int(i)][1] if i.isdigit() and int(i) < len(bl) else ""
+            else:
+                out.update(text=text, routes=(d.get("routes") or {}).get(tid) or [],
+                           received=(d.get("received") or {}).get(tid) or [], held=(d.get("held") or {}).get(tid) or [],
+                           input_len=len(t.get("input") or ""), model=t.get("model") or (t.get("options") or {}).get("model"))
+            out["turn"] = tid
+            return out
+        if kind == "c":
+            cid, _, i = rest.rpartition(":") if re.search(r":\d+$", rest) else (rest, "", "")
+            c = next((x for x in d.get("_chat_all") or [] if x.get("id") == cid), None)
+            if c is None:
+                return {**out, "error": "not found"}
+            if i:
+                bl = T.blocks(c.get("text") or "", "message")
+                out["text"] = bl[int(i)][1] if int(i) < len(bl) else ""
+            else:
+                out.update(text=c.get("text") or "", problems=c.get("problems") or [],
+                           relays=(d.get("relays") or {}).get(cid) or [])
+            return out
+        if kind == "q":
+            q = next((x for x in d.get("questions") or [] if x.get("id") == rest), None)
+            if q is None:
+                return {**out, "error": "not found"}
+            parts = [q.get("text") or ""]
+            if q.get("assumption"):
+                parts.append(f"**Recommendation:** {q['assumption']}")
+            if q.get("answer"):
+                parts.append(f"**Answer** ({q.get('answered_by') or 'answered'}): {q['answer']}")
+            out["text"] = "\n\n".join(parts)
+            return out
+        if kind == "e":
+            ev = next((e for n, e in TL.read_events(rd / "events.jsonl", self._events) if str(n) == rest), None)
+            if ev is None:
+                return {**out, "error": "not found"}
+            gate = (d.get("managed") or {}).get("gate") or {}
+            text = ""
+            if ev.get("event") == "gate" and gate and gate.get("title") == ev.get("title"):
+                text = (gate.get("summary") or "") + "\n\n" + (gate.get("text") or "")
+            out["text"] = (text.strip() + "\n\n" if text.strip() else "") + "```\n" + json.dumps(ev, ensure_ascii=False, indent=1) + "\n```"
+            return out
+        if kind == "i":
+            for sub in (rd / "inbox" / "consumed", rd / "inbox"):
+                p = sub / Path(rest).name
+                if p.is_file():
+                    x = read_json(p) or {}
+                    out["text"] = str(x.get("message") or "")
+                    return out
+            return {**out, "error": "not found"}
+        if kind == "d":
+            x = next((x for x in d.get("decisions") or [] if x.get("id") == rest), None)
+            return {**out, "text": x.get("text") or ""} if x else {**out, "error": "not found"}
+        return {**out, "error": "unknown id"}
+
+    def search(self, q: str) -> Dict[str, Any]:
+        """Every item whose full text (or line) has `q`, newest first, at most SEARCH_MAX."""
+        q = (q or "").strip()
+        if len(q) < 2:
+            return {"q": q, "hits": [], "more": False}
+        rd = self.run_dir
+        d, items, _gs, _cur = self._timeline()
+        chat = {c.get("id"): c for c in d.get("_chat_all") or []}
+        qs = {x.get("id"): x for x in d.get("questions") or []}
+        evs = {str(n): e for n, e in TL.read_events(rd / "events.jsonl", self._events)} if rd else {}
+        low, hits = q.lower(), []
+        for it in reversed(items):
+            kind, _, rest = it["id"].partition(":")
+            text = ""
+            if kind == "t" and ":" not in rest:
+                p = TL.turn_path(rd, rest)
+                try:
+                    text = p.with_name(p.stem + ".output.md").read_text(encoding="utf-8")
+                except OSError:
+                    text = (read_json(p) or {}).get("output") or ""
+            elif kind == "c" and not re.search(r":\d+$", rest):
+                text = (chat.get(rest) or {}).get("text") or ""
+            elif kind == "q":
+                x = qs.get(rest) or {}
+                text = "\n".join(str(x.get(k) or "") for k in ("text", "assumption", "answer"))
+            elif kind == "e":
+                text = json.dumps(evs.get(rest) or {}, ensure_ascii=False)
+            elif kind == "i":
+                for sub in (rd / "inbox" / "consumed", rd / "inbox"):
+                    p = sub / Path(rest).name
+                    if p.is_file():
+                        text = str((read_json(p) or {}).get("message") or "")
+                        break
+            hay = " ".join((it.get("line") or "", str(it.get("from")), str(it.get("to")), text))
+            if low in hay.lower():
+                hits.append({**it, "snip": TL.snippet(text or it.get("line") or "", q)})
+                if len(hits) >= TL.SEARCH_MAX:
+                    return {"q": q, "hits": hits, "more": True}
+        return {"q": q, "hits": hits, "more": False}
 
     # ------------------------------------------------------------------ actions (all via the run folder)
     def control(self, data: Dict[str, Any]) -> None:
@@ -567,6 +754,38 @@ class Board:
         if bad:
             self.control({"kind": "correction", "agent": a.name, "bad": bad, "source": cid})
         return [f"{b} names no one {a.called} can write to; not sent" for b in bad]
+
+
+def _clip(x: Any, n: int = 300) -> Any:
+    s = str(x or "")
+    return s if len(s) <= n else s[:n] + "…"
+
+
+_MS_KEYS = ("title", "done_when", "status", "score", "rounds", "summary", "gate_summary", "rubric", "reopened_at",
+            "accepted", "name")
+_MG_KEYS = ("ms", "phase", "gate", "job", "held", "review_req")
+
+
+def _slim_managed(mg: Dict[str, Any]) -> Dict[str, Any]:
+    """What the page uses of the managed state: not the stored work outputs, which can be large."""
+    out = {k: mg.get(k) for k in _MG_KEYS if k in mg}
+    out["milestones"] = [{k: m.get(k) for k in _MS_KEYS if k in m} for m in mg.get("milestones") or []]
+    return out
+
+
+def _checklists(turns: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Per milestone: the critic's latest plan and checklist (text) and the checklist's history by round."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for t in turns:
+        if t.get("role") != "verifier" or t.get("milestone") is None or t.get("status") == "running":
+            continue
+        c = out.setdefault(str(t["milestone"]), {"hist": []})
+        if t.get("plan"):
+            c.update(plan=t["plan"], plan_text=t.get("plan_text") or "")
+        if t.get("checklist") and t.get("purpose") == "verify":
+            c.update(checklist=t["checklist"], checklist_text=t.get("checklist_text") or "", round=t.get("round"))
+            c["hist"].append([t.get("round"), t["checklist"][0], t["checklist"][1]])
+    return out
 
 
 def _turn_env(a: Any, rd: Path) -> Dict[str, str]:
@@ -985,9 +1204,20 @@ def _handler(boards: Dict[str, Board]):
             elif u.path == "/api/state":
                 b = self.board(q)
                 if "since" in q or "since=" in u.query:  # parse_qs drops an empty since=, which asks for the full payload
-                    self.send(200, b.deltas.reply(b.data(), (q.get("since") or [""])[0]).encode("utf-8"), "application/json")
+                    self.send(200, b.deltas.reply(b.state(), (q.get("since") or [""])[0]).encode("utf-8"), "application/json")
                 else:
-                    self.js(b.data())
+                    self.js(b.state())
+            elif u.path == "/api/items":
+                self.js(self.board(q).items((q.get("g") or [""])[0], all_=(q.get("all") or [""])[0] == "1"))
+            elif u.path == "/api/message":
+                self.js(self.board(q).message((q.get("id") or [""])[0]))
+            elif u.path == "/api/search":
+                self.js(self.board(q).search((q.get("q") or [""])[0]))
+            elif u.path == "/report":
+                rd = self.board(q).run_dir
+                if rd is None or not (rd / "state.json").is_file():
+                    return self.send(404, b"no run yet", "text/plain")
+                self.send(200, R.render_run_report(rd).encode("utf-8"), "text/html; charset=utf-8")
             elif u.path == "/api/chat":
                 self.js(self.board(q).chat_before((q.get("with") or [""])[0], (q.get("before") or [""])[0]))
             elif u.path == "/api/turn":
@@ -1008,8 +1238,12 @@ def _handler(boards: Dict[str, Board]):
             self.end_headers()
 
         def log_file(self, rel: str, q: Dict[str, List[str]]) -> None:
-            """The run logs, read-only: /log/ is the runs index, /log/run the current run's report, and any
-            file below the output folder by its path there. Reports are rendered fresh on each request."""
+            """Files below the output folder by their path there, read-only (review files, a run's records).
+            B9b: the log pages are gone, every message is on the dashboard: /log/, /log/index.html and /log/run lead
+            back to it; a run's report.html is rendered fresh (the static report, as /report gives it)."""
+            if rel in ("", "index.html", "run"):
+                m = (q.get("m") or [""])[0]
+                return self.redirect(("../" if self.path.startswith("/log/") else "./") + (f"?m={quote(m)}" if m else ""))
             roots = []
             for b in boards.values():
                 rd = b.run_dir
@@ -1017,18 +1251,10 @@ def _handler(boards: Dict[str, Board]):
                     roots.append(rd.parent.parent.resolve())
             if not roots:
                 return self.send(404, b"no run yet", "text/plain")
-            if rel == "run":
-                rd = self.board(q).run_dir
-                if rd is None:
-                    return self.redirect("index.html")
-                return self.redirect(f"{rd.parent.name}/{rd.name}/report.html")
-            rel = rel or "index.html"
             for root in roots:
                 f = (root / rel).resolve()
                 if not (f == root or root in f.parents):
                     continue  # nothing outside the output folder
-                if f.name == "index.html" and f.parent == root:
-                    return self.send(200, R.render_index(root).encode("utf-8"), "text/html; charset=utf-8")
                 if f.name == "report.html" and (f.parent / "state.json").is_file():
                     return self.send(200, R.render_run_report(f.parent).encode("utf-8"), "text/html; charset=utf-8")
                 if f.is_file():
