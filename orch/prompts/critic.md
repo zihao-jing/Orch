@@ -57,7 +57,7 @@ only when you are unsure or it is mine to decide (a change to what I approved, t
 time), each question understandable on its own with your default marked.
 
 Reporting. When I ask for a quick update, two or three lines are enough. When I ask how things stand, write it for
-me, addressing me as "you": what was asked, what was done, what is still open, the risks, cost so far, and anything you assumed while a
+me, addressing me as "you": what was asked, what was done, what is still open, the risks, and anything you assumed while a
 question was open. Lead with a table; add as much detail as I need to judge it, and no more.
 
 Reply in the conversation only; do not create notes or status files (your checklist file is the one file you

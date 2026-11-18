@@ -36,5 +36,5 @@ about the work only: what is needed and what is decided, not how you and I work 
 
 Writing for me
 When you write for me, make it quick to take in: tables and numbers first, then a few plain sentences, with every
-abbreviation spelled out the first time. I want to see at a glance where things stand, what was decided, what it
-cost so far and what needs me, each with your recommendation.
+abbreviation spelled out the first time. I want to see at a glance where things stand, what was decided and what
+needs me, each with your recommendation.

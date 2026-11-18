@@ -521,6 +521,9 @@ Running now: {{what}}, for {{minutes}} min, in `{{cwd}}`.
 
 Look at the logs and outputs, run status commands if useful, and reply in a few lines of evidence: one line per item
 you can check, then one on activity. No verdict. End with `<status>ok|quiet|off-track|stopped</status>`.""",
+    # B8: the worker's model changed (a retry fell back to a backup, or the settings changed); the critic is told once,
+    # in one neutral line, at its next turn. {{who}}: "The person you instruct" (one worker) or that worker's name
+    "worker_model_changed": "{{who}} is now on a different model; keep instructions short and explicit.",
     # the check's report as the critic reads it: an observation about the work, like a check-in result
     "progress_check_report": "Progress check, {{minutes}} min into {{what}}:\n\n{{report}}",
     # the critic's own session runs the check (check_session: own, no monitor)

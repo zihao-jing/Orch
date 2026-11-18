@@ -135,7 +135,7 @@ class TestPipeline(unittest.TestCase):
 
     def test_error_retry_then_ok(self):
         m = pipeline()
-        m["agents"][0].update(retries=1, backend_options={"fail_turns": [2]})  # 2nd turn of the session fails once
+        m["agents"][0].update(retries=1, retry_waits=[], backend_options={"fail_turns": [2]})  # 2nd turn of the session fails once
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "completed")
         second = [t for t in turns(rec) if t["agent"] == "w1"][1]
@@ -146,7 +146,7 @@ class TestPipeline(unittest.TestCase):
     def test_provider_refusal_is_not_kept_as_a_reply_and_retries_once(self):
         m = pipeline()
         msg = "API Error: Your account can't receive replies from Claude right now."
-        m["agents"][0].update(retries=1, backend_options={"fail_turns": [2], "error_text": msg})
+        m["agents"][0].update(retries=1, retry_waits=[], backend_options={"fail_turns": [2], "error_text": msg})
         m["controller"]["provider_retry_wait"] = 0
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "completed")
@@ -159,7 +159,7 @@ class TestPipeline(unittest.TestCase):
     def test_a_refused_turn_that_fails_again_keeps_the_provider_message_out_of_its_output(self):
         m = pipeline()
         msg = "API Error: Your account can't receive replies from Claude right now."
-        m["agents"][0].update(retries=1, backend_options={"fail_turns": [2, 3], "error_text": msg})
+        m["agents"][0].update(retries=1, retry_waits=[], backend_options={"fail_turns": [2, 3], "error_text": msg})
         m["controller"]["provider_retry_wait"] = 0
         status, rec = run(make_cfg(self.tmp, [m]))
         failed = [t for t in turns(rec) if t["agent"] == "w1"][1]
@@ -170,7 +170,7 @@ class TestPipeline(unittest.TestCase):
     def test_stop_on_error(self):
         m = pipeline()
         m["controller"]["stop_on_error"] = True
-        m["agents"][0]["backend_options"] = {"fail_turns": [1]}
+        m["agents"][0].update(retry_waits=[], backend_options={"fail_turns": [1]})
         status, _ = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "failed")
 
@@ -2369,7 +2369,7 @@ class TestFallback(unittest.TestCase):
     def test_backup_takes_over_in_the_same_session_and_stays_for_the_cooldown(self):
         m = pipeline()
         msg = "API Error: overloaded_error"
-        m["agents"][0].update(backend_options={"fail_turns": [2], "error_text": msg},
+        m["agents"][0].update(backend_options={"fail_turns": [2], "error_text": msg}, retry_waits=[],
                               fallback=[{"label": "backup", "backend_options": {"fail_turns": []}}])
         m["agents"][1]["backend_options"] = {"pass_after": 3}
         status, rec = run(make_cfg(self.tmp, [m]))
@@ -2384,7 +2384,7 @@ class TestFallback(unittest.TestCase):
 
     def test_backup_on_another_provider_starts_a_new_session_with_a_handover(self):
         m = pipeline()
-        m["agents"][0].update(backend_options={"fail_turns": [2]}, fallback_cooldown=0,
+        m["agents"][0].update(backend_options={"fail_turns": [2]}, fallback_cooldown=0, retry_waits=[],
                               fallback=[{"backend_options": {"fail_turns": []}, "env": {"ANTHROPIC_BASE_URL": "x"}}])
         m["agents"][1]["backend_options"] = {"pass_after": 3}
         status, rec = run(make_cfg(self.tmp, [m]))
@@ -2398,7 +2398,7 @@ class TestFallback(unittest.TestCase):
 
     def test_all_models_failing_still_fails_the_turn(self):
         m = pipeline()
-        m["agents"][0].update(backend_options={"fail_turns": [2, 3]}, fallback=["other"])
+        m["agents"][0].update(backend_options={"fail_turns": [2, 3]}, fallback=["other"], retry_waits=[])
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "failed")
         self.assertEqual([a["model"] for a in self._w1(rec)[1]["attempts"]], ["mock", "mock:other"])

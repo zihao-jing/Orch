@@ -584,9 +584,44 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
   * `output_format: text|json` together with `output_field` and `session_field`, or `session_regex`
 * **mock**: a deterministic fake for dry runs and tests. Options: `delay`, `script`, `pass_after`, `done_after`, `fail_turns`, `write_file`.
 
+### Project model list, retries and backups (`models:`)
+
+Models are defined once for the project, in `.orch/settings.yaml` (or `models:` at the top of a config file), and
+each agent picks them by id:
+
+```yaml
+# .orch/settings.yaml
+models:
+  opus:   {backend: claude, backend_options: {model: opus, effort: high}}
+  glm:    {backend: claude, backend_options: {model: glm-4.6},
+           env: {ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic, ANTHROPIC_AUTH_TOKEN: "${GLM_KEY}"}}
+  gemini: {backend: agy, backend_options: {model: gemini-3.6-pro}}
+retry_waits: [60, 120, 240]     # seconds before each retry of the same model (default)
+fallback_cooldown: 18000        # 5 h on a backup that worked before the primary again (default)
+
+# agents/worker/agent.yaml
+model: opus
+backup: glm
+backup2: gemini
+backend_options: {permission_mode: auto}   # options on top of the model's (on a backup of the same backend too)
+```
+
+* A failed turn (API error, overload, rate limit, crash) is retried on the same model after each of `retry_waits`,
+  then on `backup`, then `backup2` (each with the same waits). An unusable reply (exit 0, no text) gets the
+  `retries` immediate corrections instead. A billing or account problem is not retried: the run stops and the
+  board says why. Each retry and switch is in the turn record (`retries`, `fallbacks`), in `state.json`
+  (`reliability`) and on the board. `retry_waits` and `fallback_cooldown` can be set per agent too.
+* Edits to the model list or to an agent file apply from the agent's next turn. `$VARS` in a model's `env` come
+  from the shell, so keys need not be written into the file.
+* When a worker's model changes (a switch, or an edit), its critic is told once at its next turn that the person
+  it instructs is on a different model.
+* The stored reply is the agent's final message (or the text so far, on a cut-off), never the raw event stream;
+  that is kept only as `tNN-<agent>.stream.jsonl` beside the turn when the reply had to be parsed out of it.
+  Sizes over `large_text` (controller, default 50000 characters) are a board warning; nothing is cut.
+
 ### Backup models (`fallback`)
 
-Each agent can list backup models, tried in order when a turn still fails after its `retries` (an API error,
+Each agent can list backup models, tried in order when a turn still fails after its retries (`retry_waits`, above; an API error,
 a refusal from the provider, a crash; not a timeout, a stop or a question):
 
 ```yaml

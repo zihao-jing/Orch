@@ -194,7 +194,7 @@ class TestSessions(unittest.TestCase):
         from orch.controller import MonitorRunner
         from test_orch import pipeline
         m = pipeline()
-        m["agents"][0].update(retries=1)
+        m["agents"][0].update(retries=1, retry_waits=[])
         cfg = load_config(make_cfg(self.tmp, [m]))
         r = MonitorRunner(cfg.monitor("m"), threading.Event(), log=lambda s: None)
         import orch.controller as ctl

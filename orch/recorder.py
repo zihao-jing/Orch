@@ -214,6 +214,13 @@ class Recorder:
                    session_id=rec.get("session_id"), duration_s=rec.get("duration_s"))
         self.refresh_reports()
 
+    def write_raw_stream(self, rec: Dict[str, Any], raw: str) -> Path:
+        """B8: a turn's raw event stream, kept only for debugging when the reply had to be parsed out of it (an
+        error or a cut-off): `tNN-<agent>.stream.jsonl` beside the turn. Never the reply itself."""
+        p = self.round_dir(rec["round"]) / f"t{rec['seq']:02d}-{rec['agent']}.stream.jsonl"
+        p.write_text(raw, encoding="utf-8")
+        return p
+
     def charge_chats(self, upto: str = "") -> List[Dict[str, Any]]:
         """Board-chat turns run in the agents' own sessions (orch/board.py), and Claude reports a session's running
         total. Each finished chat turn is an entry of its own: its cost is the increase over the session's last

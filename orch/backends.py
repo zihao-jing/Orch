@@ -57,6 +57,9 @@ class TurnResult:
     stderr: str = ""
     command: List[str] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
+    # B8: the backend's raw event stream, only when the reply had to be parsed out of it (no final result: an error
+    # or a cut-off). Kept apart from the reply (a debug file beside the turn); never stored as the output.
+    raw: str = ""
 
 
 class StopRequested(Exception):
@@ -277,9 +280,16 @@ class ClaudeBackend(Backend):
                 meta["models"] = sorted(data["modelUsage"])  # the models that actually answered
             if data.get("is_error") and status == "ok":
                 status = "error"
-        elif status == "ok":
-            status = "error"
-            meta["parse_error"] = "could not parse claude JSON output"
+        else:  # B8: no final result (an error or a cut-off): the last assistant message, never the raw stream
+            output, sid2 = _claude_stream_text(out)
+            sid = sid2 or sid
+            raw = out
+            if status == "ok":
+                status = "error"
+                meta["parse_error"] = "could not parse claude JSON output"
+            if out.strip():
+                meta["partial"] = True
+            return TurnResult(status, output, sid, rc, err, _redact(cmd, req), meta, raw=raw)
         return TurnResult(status, output, sid, rc, err, _redact(cmd, req), meta)
 
     COMPACT = "/compact"
@@ -327,6 +337,47 @@ def _claude_stream_cb(emit: Callable[[Dict[str, Any]], None]) -> Callable[[str],
                 if isinstance(c, dict) and c.get("type") == "tool_use":
                     emit({"k": "tool", "s": f"{c.get('name')}: {_short_input(c.get('input'))}".rstrip(": ")})
     return cb
+
+
+def _claude_stream_text(text: str) -> Tuple[str, Optional[str]]:
+    """(reply, session id) from a Claude stream that has no final result line: the text of the last top-level
+    assistant message; if the turn was cut off mid-message, the text streamed since that message started. Lines
+    that are not JSON (a plain error message from the CLI) are kept as they are when nothing else is there."""
+    last, partial, sid, plain = "", [], None, []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith("{"):
+            plain.append(line)
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        sid = ev.get("session_id") or sid
+        if ev.get("parent_tool_use_id"):
+            continue  # a subagent's messages are not the reply
+        if ev.get("type") == "assistant":
+            body = "".join(c.get("text", "") for c in (ev.get("message") or {}).get("content") or []
+                           if isinstance(c, dict) and c.get("type") == "text")
+            if body.strip():
+                last, partial = body, []
+        elif ev.get("type") == "stream_event":
+            e = ev.get("event") or {}
+            d = e.get("delta") or {}
+            if e.get("type") == "message_start":
+                partial = []
+            elif e.get("type") == "content_block_delta" and d.get("type") == "text_delta":
+                partial.append(str(d.get("text") or ""))
+    cut = "".join(partial)
+    if cut.strip() and cut.strip() != last.strip():
+        return cut.strip(), sid  # streamed after the last complete message: the cut-off message so far
+    if last.strip():
+        return last.strip(), sid
+    return "\n".join(plain).strip(), sid
 
 
 def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
@@ -415,7 +466,12 @@ class CodexBackend(Backend):
             pass
         if status == "ok" and not sid:
             status = "error"
-        return TurnResult(status, final or out, sid, rc, err, cmd[:-1] + ["<prompt via stdin>"], {})
+        if final:
+            return TurnResult(status, final, sid, rc, err, cmd[:-1] + ["<prompt via stdin>"], {})
+        # B8: no final message: never the raw JSON event stream as the reply (plain text from the CLI is kept)
+        plain = "\n".join(ln for ln in out.splitlines() if ln.strip() and not ln.lstrip().startswith("{")).strip()
+        return TurnResult(status, plain, sid, rc, err, cmd[:-1] + ["<prompt via stdin>"], {},
+                          raw=out if out.strip() and plain != out.strip() else "")
 
 
 def _codex_stream_cb(emit: Callable[[Dict[str, Any]], None]) -> Callable[[str], None]:
@@ -478,7 +534,7 @@ class AgyBackend(Backend):
         cmd += ["-p", prompt] if via_arg else ["-p"]
         rc, out, err, status = run_process(cmd, None if via_arg else prompt, req.cwd, req.timeout, req.env, should_stop)
         data = _parse_agy_json(out)
-        sid, meta, output = req.session_id, {}, out.strip()
+        sid, meta, output, raw = req.session_id, {}, out.strip(), ""
         if data is not None:
             output = str(_first(data, AGY_TEXT_KEYS) or "")
             sid = str(_first(data, AGY_SESSION_KEYS) or "") or sid
@@ -487,13 +543,16 @@ class AgyBackend(Backend):
                     meta[k] = data[k]
             if data.get("is_error") and status == "ok":
                 status = "error"
-        elif status == "ok":
-            status = "error"
-            meta["parse_error"] = "could not parse agy JSON output"
+        else:
+            if out.lstrip().startswith(("{", "[")):  # B8: unparsed JSON is never the reply; kept apart for debugging
+                output, raw = "", out
+            if status == "ok":
+                status = "error"
+                meta["parse_error"] = "could not parse agy JSON output"
         if status == "ok" and not sid:
             meta["warning"] = "agy did not report a conversation id; the next turn starts a new conversation"
         shown = [("<prompt>" if c == prompt else c) for c in cmd] + ([] if via_arg else ["<prompt via stdin>"])
-        return TurnResult(status, output, sid, rc, err, shown, meta)
+        return TurnResult(status, output, sid, rc, err, shown, meta, raw=raw)
 
 
 AGY_TEXT_KEYS = ("result", "response", "text", "output", "content", "message")
@@ -691,6 +750,10 @@ class MockBackend(Backend):
                 req.on_event({"k": "tool", "s": "run: step"})
             time.sleep(min(0.05, max(0.0, end - time.monotonic())))
         if n in [int(x) for x in o.get("fail_turns", [])]:
+            if o.get("stream_on_fail"):  # tests (B8): a Claude-like stream that ends without a result line
+                raw = str(o["stream_on_fail"])
+                text, _ = _claude_stream_text(raw)
+                return TurnResult("error", text, sid, 1, "mock: simulated failure", ["mock"], {"turn": n}, raw=raw)
             return TurnResult("error", str(o.get("error_text", "")), sid, 1, "mock: simulated failure", ["mock"], {"turn": n})
         script = o.get("script")
         if o.get("spawn") and purpose == "work" and n == 1:  # tests: leave a detached job running in the workspace

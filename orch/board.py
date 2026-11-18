@@ -229,6 +229,8 @@ class Board:
             "decisions": st.get("decisions") or [],
             "golden": _golden(st),
             "status_lines": st.get("status_lines") or {},  # B5: a live line per working agent from its latest check
+            "reliability": st.get("reliability") or {},  # B8: retries waiting and backups in use, per agent
+            "stop_reason": st.get("stop_reason"),
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
             "chat": chat, "chat_more": chat_more, "relays": relays, "routes": routes, "received": received, "held": held,
             "terminal": _terminal(rd), "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,
@@ -663,14 +665,33 @@ def _message_log(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any
         add(t.get("started_at"), "check-in", who(t.get("agent")), who(mgr), full.get("output") or t.get("output"),
             status=t.get("status"), turn=t.get("turn_id"))
 
-    for ln in _lines(rd / "events.jsonl"):  # warnings, and session resets with their reasons (small system lines)
-        if '"route_problem"' not in ln and '"tooling_mention"' not in ln and '"session_note"' not in ln:
+    keys = ('"route_problem"', '"tooling_mention"', '"session_note"', '"retry"', '"fallback"', '"billing_error"',
+            '"size_warning"', '"model_note"')
+    for ln in _lines(rd / "events.jsonl"):  # warnings, session resets, retries and model switches (small system lines)
+        if not any(k in ln for k in keys):
             continue
         try:
             ev = json.loads(ln)
         except json.JSONDecodeError:
             continue
-        if ev.get("event") == "session_note":
+        kind = ev.get("event")
+        if kind == "retry":  # B8: each retry of the same model, and each switch to a backup
+            add(ev.get("ts"), "system", who(ev.get("agent")), "",
+                f"{ev.get('model')} failed ({ev.get('reason') or 'error'}); retry {ev.get('retry')}/{ev.get('of')} "
+                f"in {float(ev.get('wait_s') or 0):g}s", label="retry")
+            continue
+        if kind == "fallback":
+            add(ev.get("ts"), "system", who(ev.get("agent")), "",
+                f"{ev.get('old')} failed ({ev.get('reason') or 'error'}); switched to backup {ev.get('new')}",
+                label="model switch")
+            continue
+        if kind == "model_note":
+            add(ev.get("ts"), "system", who(ev.get("agent")), who(ev.get("to")),
+                f"model changed ({ev.get('old')} → {ev.get('new')}); told in one line", label="model change")
+            continue
+        if kind not in ("route_problem", "tooling_mention", "session_note", "billing_error", "size_warning"):
+            continue
+        if kind == "session_note":
             what = {"compact": "session compacted", "model": "model changed"}.get(ev.get("change"), "new session")
             add(ev.get("ts"), "system", who(ev.get("agent")), "", f"{what}: {ev.get('reason') or ''}".rstrip(": "),
                 label=ev.get("change") or "reset")

@@ -260,7 +260,13 @@ class ManagedRunner(MonitorRunner):
         if agent.name in (self.mg.get("compact_due") or []) and agent.role != "monitor":
             self.compact(agent, rnd)
         before = (self.st.get("golden") or {}).get("hash")
-        r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
+        if agent.role == "verifier":
+            self.check_worker_models()
+        try:
+            r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
+        finally:
+            if agent.role == "worker":
+                self.note_worker_model(agent, self.last_model(agent))
         if r.get("status") == "ok" and agent.role == "monitor":
             self.rec.save()  # a check's report is handled by quick_check: it is never routed by tags
         elif r.get("status") == "ok":
@@ -270,6 +276,56 @@ class ManagedRunner(MonitorRunner):
             self.route_reply(agent, r)
             self.rec.save()
         return r
+
+    # ---- B8: the worker's model changed: the critic is told once, in one neutral line, at its next turn
+
+    def last_model(self, w: AgentConfig) -> str:
+        """The model the worker's latest turn ran on (after any switch to a backup)."""
+        return str((getattr(self, "turn_models", None) or {}).get(w.name) or "")
+
+    def check_worker_models(self) -> None:
+        """Before a critic turn: a worker whose settings now name another model (the user edited them, or its backup's
+        cooldown ended) counts as a change, so the critic hears of it before it writes the next instruction."""
+        for w in self.workers:
+            if self.rec.agent_busy(w.name):
+                continue  # its running turn reports the model it ends on
+            try:
+                self.refresh_agent(w)
+            except Exception:
+                continue
+            chain = w.variants()
+            if chain:
+                self.note_worker_model(w, chain[self.start_variant(w, len(chain))].label)
+
+    def note_worker_model(self, w: AgentConfig, model: str) -> None:
+        if not model:
+            return
+        known = self.mg.setdefault("worker_models", {})
+        old = known.get(w.name)
+        known[w.name] = model
+        if not old or old == model:
+            self.rec.save()
+            return
+        who = "The person you instruct" if len(self.workers) == 1 else w.called
+        text = self.mtpl("worker_model_changed", who=who).strip()
+        if not text:
+            return
+        L, critic = self.ledger, self.critic
+        q = self.st.setdefault("fwd", {}).setdefault(critic.name, [])
+        for m in L.rows:  # one line per change: a newer change replaces a note still waiting
+            if m.get("kind") == "model_change" and m["to"] == critic.name and m["status"] == "sent" \
+                    and m.get("worker") == w.name:
+                if m["text"] in q:
+                    q.remove(m["text"])
+                L.mark(m, "superseded", reason="replaced by a newer model change")
+        if text in q:
+            q.remove(text)  # the same line from another worker: one is enough
+        L.add("orch", critic.name, text, text, via="note", purpose="model_change", kind="model_change",
+              worker=w.name, old_model=old, new_model=model, carrier={"fwd": True})
+        self.forward(critic, text)
+        self.rec.event("model_note", agent=w.name, to=critic.name, old=old, new=model)
+        self.rec.progress(f"🔀 {w.called}'s model changed ({old} → {model}); {critic.called} is told at its next turn")
+        self.rec.save()
 
     def check_tooling(self, agent: AgentConfig, r: Dict[str, Any]) -> None:
         """A critic or worker reply that mentions orch, its run folder or `.orch/` paths is flagged on the board

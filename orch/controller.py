@@ -136,6 +136,26 @@ def provider_error(res: TurnResult) -> str:
     return truncate((text.strip().splitlines() or [""])[0], 300)
 
 
+# B8: a billing or account problem: no retry or backup fixes it; the run stops and the user is told
+BILLING_ERROR = re.compile(r"credit balance is too low|insufficient[_ ]quota|exceeded your current quota|"
+                           r"billing|payment required|purchase (more )?credits|"
+                           r"account (has been |is )?(suspended|disabled|deactivated)", re.I)
+
+
+def billing_error(res: TurnResult) -> str:
+    """The provider's message when a failed turn is a billing or account problem; '' otherwise."""
+    if res.status != "error":
+        return ""
+    # the agent's own partial reply (a cut-off) is its work, not a provider message: only the CLI's error is read
+    said = "" if (res.meta or {}).get("partial") else (res.output or "")[:2000]
+    text = said + "\n" + (res.stderr or "")[-2000:]
+    m = BILLING_ERROR.search(text)
+    if not m:
+        return ""
+    line = next((ln for ln in text.splitlines() if BILLING_ERROR.search(ln)), m.group(0))
+    return truncate(line.strip(), 300)
+
+
 def _cut_input(sess: Dict[str, Any], t: Dict[str, Any]) -> str:
     """What the session holds of a cut-off turn's message (a cut-off "continue" still holds the message before it)."""
     before = (sess.get("cut_off") or {}).get("input") or "" if t.get("continues") else ""
@@ -234,7 +254,7 @@ class MonitorRunner:
             self.log(f"resuming {rec.run_dir} after round {rec.state.get('completed_round', 0)}")
             self.switch_backends()
             self.recover_interrupted()
-        rec.set(status="running", ended_at=None, error=None)
+        rec.set(status="running", ended_at=None, error=None, stop_reason=None)
         answered = False
         try:
             self.snapshot(None)
@@ -770,8 +790,7 @@ class MonitorRunner:
         if reminders:
             extra = {**(extra or {}), "reminders": reminders}
             rec.save()  # the reminder counters
-        if len(prompt) > LARGE_TEXT:
-            rec.progress(f"⚠ {agent.name}: a large prompt for `{rnd}` ({len(prompt):,} characters)")
+        big_input = len(prompt) > self.large_text
         seq = seq or rec.next_seq(rnd)
         record: Dict[str, Any] = {
             "turn_id": rec.turn_id(rnd, seq, agent.name),
@@ -791,6 +810,8 @@ class MonitorRunner:
         if sid and sess.get("terminal_use"):  # turns typed in a terminal report no cost; this turn's increase has them
             record["cost_includes_terminal"] = sess["terminal_use"]
         rec.write_turn(record)  # relayed messages stay queued until the turn ends, so a restart re-sends them
+        if big_input:
+            self.size_warning(agent, record, f"a large input ({len(prompt):,} characters)")
         self.on_prompt(agent, record["turn_id"], prompt, "prompt")
         for m in updates:
             rec.worker_message_status(m["id"], "in_prompt", delivery_turn=record["turn_id"], via="prompt")
@@ -835,6 +856,7 @@ class MonitorRunner:
         v = chain[vi]
         backend = get_backend(v.backend)
         attempt, urgent_send, entering, got_there = 0, "", True, False
+        waited, fixes = 0, 0  # B8: retries of the current model after a wait, and immediate corrections
         last_pe = ""  # the provider's message from the last attempt, if it refused the request
         while True:
             if entering:  # the primary model, or a backup taking over this turn
@@ -930,9 +952,38 @@ class MonitorRunner:
             if res.status in ("ok", "stopped", "needs_human", "timeout") or self.should_stop():
                 break  # a timed-out turn is not re-run from scratch (it may have been running a long job)
             self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} ({v.label}) → {res.status}" + (f" ({pe})" if pe else ""))
-            if attempt < v.retries:
+            bill = (billing_error(dataclasses.replace(res, output=pe or res.output)) if res.status == "error"
+                    else "")  # the provider's message was taken out of the output above
+            if bill:  # B8: a billing or account problem: no retry or backup; the run stops and the user is told
+                record["billing_error"] = bill
+                reason = f"billing or account problem: {bill}"
+                attempts[-1]["reason"] = reason
+                rec.event("billing_error", turn=record["turn_id"], agent=agent.name, model=v.label,
+                          problem=f"{agent.name} ({v.label}): billing or account problem; the run stops: {bill}")
+                rec.progress(f"⛔ `{record['turn_id']}` **{agent.name}** (`{v.label}`): billing or account problem "
+                             f"({bill}). No retry or backup; the run stops. Fix the account and resume.")
+                self.log(f"r{rnd} ⛔ {agent.name}: billing or account problem; stopping")
+                break
+            # B8: a provider error, overload, rate limit or crash (anything but an unusable reply) is retried on the
+            # same model after each of the configured waits (1, 2, 4 min); an unusable reply (exit 0, no text) gets
+            # the `retries` immediate corrections. Then the backups take over in order.
+            waits = list(getattr(agent, "retry_waits", []) or [])
+            transient = bool(pe) or not reason
+            if transient and waits:
+                if waited < len(waits):
+                    secs = waits[waited]
+                    waited += 1
+                    self.retry_wait(agent, record, v, waited, len(waits), secs, pe or reason or res.status)
+                    if self.should_stop():
+                        break
+                    attempt += 1
+                    continue
+            elif fixes < v.retries:
+                fixes += 1
                 if pe:
                     self.wait_provider(agent, pe)
+                if self.should_stop():
+                    break
                 attempt += 1
                 continue
             if vi + 1 >= len(chain):
@@ -941,16 +992,27 @@ class MonitorRunner:
             record.setdefault("fallbacks", []).append({"at": now_iso(), "from": v.label, "to": nxt.label,
                                                        "reason": reason or res.status})
             rec.event("fallback", turn=record["turn_id"], agent=agent.name, old=v.label, new=nxt.label,
-                      reason=reason or res.status)
+                      reason=reason or res.status, backup=vi + 1)
+            self.set_reliability(agent, model=nxt.label, state="switched", reason=reason or res.status)
             rec.progress(f"↪ `{record['turn_id']}` **{agent.name}**: `{v.label}` failed ({reason or res.status}); "
                          f"switching to backup `{nxt.label}`")
             self.log(f"r{rnd} ↪ {agent.name}: {v.label} failed, switching to backup {nxt.label}")
-            vi, attempt, entering = vi + 1, 0, True
+            vi, attempt, entering, waited, fixes = vi + 1, 0, True, 0, 0
         lock.__exit__(None, None, None)
+        if attempts:  # the model this turn ended on (after any switch to a backup)
+            self.turn_models = {**(getattr(self, "turn_models", None) or {}), agent.name: v.label}
+        if res.status == "ok" and v.index and agent.fallback_cooldown > 0:  # the board says it is on a backup
+            self.set_reliability(agent, model=v.label, state="backup", primary=chain[0].label, reason=None,
+                                 until=time.time() + agent.fallback_cooldown)
+        elif res.status == "ok":
+            self.set_reliability(agent, state=None)
+        elif res.status == "error":
+            self.set_reliability(agent, model=v.label, state="failed", reason=reason or res.status)
         if res.status == "ok":
             for m in updates:
                 message_status(m["id"], "accepted", {"via": "prompt"})
-        if fwd and res.status != "stopped" and not self.should_stop():  # a stopped turn is re-sent on resume
+        billing = bool(record.get("billing_error"))
+        if fwd and res.status != "stopped" and not billing and not self.should_stop():  # a stopped turn is re-sent on resume
             left = (self.st.get("fwd") or {}).get(agent.name) or []
             if left[:len(fwd)] == fwd:
                 del left[:len(fwd)]
@@ -984,12 +1046,23 @@ class MonitorRunner:
             self.snapshot(record)
         except Exception:
             self.log("snapshot failed:\n" + traceback.format_exc())
-        if len(res.output or "") > LARGE_TEXT:
-            rec.progress(f"⚠ `{record['turn_id']}` **{agent.name}**: a large reply ({len(res.output):,} characters)")
+        if getattr(res, "raw", ""):  # B8: the raw event stream is never the reply; kept beside it for debugging
+            path = rec.write_raw_stream(record, res.raw)
+            record["raw_stream"] = {"file": path.name, "chars": len(res.raw)}
+            rec.write_turn(record)
+            if len(res.raw) > self.large_text:
+                self.size_warning(agent, record, f"its raw event stream ({len(res.raw):,} characters) was kept "
+                                                 f"apart in {path.name}; the reply is the final message only")
+        if len(res.output or "") > self.large_text:
+            self.size_warning(agent, record, f"a large reply ({len(res.output):,} characters)")
         rec.progress(f"- `{record['turn_id']}` **{agent.name}** · {purpose} → **{res.status}** ({dur}s)"
                      + (f" · provider: {last_pe}" if last_pe else ""))
         self.log(f"r{rnd} ■ {agent.name} → {res.status} in {dur}s")
         if res.status == "stopped":
+            raise StopRequested()
+        if billing:  # B8: stop the whole run (as `orch stop` would); the board says why; resume once it is fixed
+            rec.set(stop_reason=f"billing or account problem ({agent.name}, {v.label}): {record['billing_error']}")
+            (rec.run_dir / "STOP").write_text("billing or account problem\n", encoding="utf-8")
             raise StopRequested()
         if res.status == "ok" and (self.st.get("asked") or {}).get("agent") == agent.name:
             rec.set(asked=None)  # the question has been dealt with
@@ -1058,6 +1131,48 @@ class MonitorRunner:
         secs = max(0.0, float(getattr(self.mon.controller, "provider_retry_wait", 0) or 0))
         self.rec.progress(f"⏳ {agent.name}: the provider refused the request ({reason}); retrying in {secs:g}s")
         end = time.monotonic() + secs
+        while time.monotonic() < end and not self.should_stop():
+            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+
+    @property
+    def large_text(self) -> int:
+        return int(getattr(self.mon.controller, "large_text", 0) or LARGE_TEXT)
+
+    def size_warning(self, agent: AgentConfig, record: Dict[str, Any], what: str) -> None:
+        """B8: an out-of-range size is a board warning; nothing is cut."""
+        record.setdefault("size_warnings", []).append(what)
+        self.rec.progress(f"⚠ `{record['turn_id']}` **{agent.name}**: {what}")
+        self.rec.event("size_warning", turn=record["turn_id"], agent=agent.name,
+                       problem=f"{agent.name} `{record['turn_id']}`: {what}")
+
+    def set_reliability(self, agent: AgentConfig, **kw: Any) -> None:
+        """The agent's live retry / switch state in state.json (`reliability`), for the board; cleared on success."""
+        st = self.st.setdefault("reliability", {})
+        if kw.get("state") is None:
+            if st.pop(agent.name, None) is not None:
+                self.rec.save()
+            return
+        st[agent.name] = {**{k: v for k, v in kw.items() if v is not None}, "at": now_iso()}
+        self.rec.save()
+
+    def retry_wait(self, agent: AgentConfig, record: Dict[str, Any], v: Any, n: int, of: int, secs: float,
+                   reason: str) -> None:
+        """B8: wait, then run the turn again on the same model; recorded with the turn, in state and on the board."""
+        rec = self.rec
+        entry = {"at": now_iso(), "model": v.label, "retry": n, "of": of, "wait_s": secs, "reason": reason}
+        record.setdefault("retries", []).append(entry)
+        rec.write_turn(record)
+        rec.event("retry", turn=record["turn_id"], agent=agent.name, **{k: entry[k] for k in entry if k != "at"})
+        rec.progress(f"⏳ `{record['turn_id']}` **{agent.name}**: `{v.label}` failed ({reason}); retry {n}/{of} "
+                     f"on the same model in {secs:g}s")
+        self.log(f"{agent.name}: {v.label} failed ({reason}); retry {n}/{of} in {secs:g}s")
+        self.set_reliability(agent, model=v.label, state="retrying", retry=n, of=of, wait_s=secs, reason=reason,
+                             until=time.time() + secs)
+        self.pause(secs)
+
+    def pause(self, secs: float) -> None:
+        """Sleep for `secs`; a stop request ends the wait. (Tests replace it with a fake clock.)"""
+        end = time.monotonic() + max(0.0, float(secs))
         while time.monotonic() < end and not self.should_stop():
             time.sleep(min(0.5, max(0.0, end - time.monotonic())))
 
