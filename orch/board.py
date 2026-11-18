@@ -1305,6 +1305,11 @@ def _handler(boards: Dict[str, Board]):
             elif u.path == "/api/job":
                 b.control({"kind": "job"})
             elif u.path == "/api/gate":
+                st = read_json(b.run_dir / "state.json", {}) or {}
+                cur = ((st.get("managed") or {}).get("gate") or {}).get("key")
+                if body.get("gate") and body.get("gate") != cur:  # the run drops it: say so instead of "ok"
+                    return self.js({"error": f"no open gate {body.get('gate')!r}"
+                                             + (f" (the open one is {cur!r})" if cur else " (none is open)")}, 409)
                 b.control({"kind": "gate", "gate": body.get("gate"), "message": msg,
                            "decision": "approve" if body.get("decision") == "approve" else "revise"})
             elif u.path == "/api/note":

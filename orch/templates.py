@@ -182,7 +182,8 @@ my OK: what the plan covers, what you checked it against, and where to look.
 {{comment}}
 
 Please send me the updated milestone list in the same form, with a `<summary>`: what changed, what you checked, and
-where to look.
+where to look. It is still the plan for my OK: nothing starts until I approve it, so keep the first milestone's
+instruction, rubric and number of people for when it starts.
 """,
     "manager_kickoff": """\
 {{human_messages}}
@@ -266,6 +267,15 @@ the first step's items under it, standing rules under `## Standing rules`), then
 only: what to do, how you will check it, and whatever settled matters the work must keep to. The repository is at
 `{{cwd}}`.
 """,
+    # B11: the manager approved several people before the brief: the critic plans for them and hands out nothing yet
+    "critic_brief_workers": """\
+{{n}} people can work on this at the same time, each in their own conversation. Plan the steps so that the
+independent ones can go to different people; I introduce them, with their ids, right after this. Don't give a step
+to {{worker}} in this reply.""",
+    # the critic's review came without its verdict tag: one short turn asks for it (nothing else changes)
+    "critic_verdict_missing": "Your review ended without a verdict. Please give it now, in one line: "
+                              "`<verdict>PASS</verdict>` only when every item in your checklist file is `[x]`, "
+                              "otherwise `<verdict>FAIL</verdict>`. What you wrote is passed on as it is.",
     "critic_review": """\
 {{human_messages}}
 
@@ -369,6 +379,11 @@ replaces. No checklist or verdict is needed.
     "manager_message_turn": """\
 The message above came in while the work goes on. Act on it if it needs something: only a
 `<message to="{{critic}}">` reaches {{critic}}. Otherwise a line for me is enough.
+""",
+    # a message for the manager while a milestone waits at my gate: the next milestone waits for my OK too
+    "manager_message_at_gate": """\
+Milestone {{n}} is waiting for my OK at the gate, so nothing new starts yet: keep the next milestone's instruction
+for when I approve. Write to {{critic}} now only if the finished work itself has to change.
 """,
     "manager_checkin": """\
 {{human_messages}}
