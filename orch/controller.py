@@ -486,6 +486,10 @@ class MonitorRunner:
             return "cut"
         return None
 
+    def watched(self, agent: AgentConfig) -> bool:
+        """Do progress checks watch this agent's turns (then only its safety limit stops them; managed mode)?"""
+        return False
+
     def yields_to(self, agent: AgentConfig, to: List[str]) -> bool:
         """Does an urgent message for one of `to` end this agent's running turn?"""
         return False
@@ -792,7 +796,7 @@ class MonitorRunner:
             hit.clear()
             req = TurnRequest(
                 agent=agent.name, role=agent.role, prompt=send, system_prompt=record["system_prompt"],
-                session_id=sid, cwd=agent.working_dir, timeout=agent.timeout,
+                session_id=sid, cwd=agent.working_dir, timeout=agent.turn_limit(self.watched(agent)),
                 options=v.options, env={**v.env, _jobs.TAG_VAR: _jobs.tag_for(rec.run_dir.name, agent.name)},
                 context={"round": rnd, "purpose": purpose, "monitor": self.mon.name,
                          "roster": [a.name for a in self.mon.agents], **(extra or {})},

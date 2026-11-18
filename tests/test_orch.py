@@ -534,7 +534,8 @@ class TestManaged(unittest.TestCase):
 
     def test_worker_timeout_is_not_fatal(self):
         m = managed(mgr={"milestones": 1})
-        m["agents"][2].update(backend="command", timeout=0.5, retries=2, backend_options={
+        # a watched worker turn is stopped only by its safety limit (B5); an older `timeout` below 8 h no longer cuts it
+        m["agents"][2].update(backend="command", safety_timeout=0.5, retries=2, backend_options={
             "command": [sys.executable, "-c", "import sys,time; p=sys.stdin.read(); time.sleep(5) if 'brief' not in p and 'ran past the time limit' not in p else 0; print('done')"]})
         status, rec = run(make_cfg(self.tmp, [m]))
         ts = turns(rec)
@@ -1932,7 +1933,13 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 50, 400))
         self.assertTrue(mon.goal.startswith("Describe what you want done"))
         self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker"),
-                                                                ("auditor", "auditor")])
+                                                                ("auditor", "auditor"), ("monitor", "monitor")])
+        mo = mon.agent("monitor")  # B5: a small read-only watcher; reports only to the critic
+        self.assertEqual((mo.backend_options["model"], mo.backend_options["effort"], mo.check_session), ("haiku", "low", "own"))
+        self.assertIn("Edit", mo.backend_options["disallowed_tools"])
+        self.assertIn("Quick check", mo.current_system_prompt())
+        self.assertNotRegex(mo.current_system_prompt().lower().replace("`.orch/`", ""), r"manager|orch\b")
+        self.assertEqual((mon.agent("worker").turn_limit(True), mon.agent("worker").check_every), (28800.0, 20.0))
         aud = mon.agent("auditor")
         self.assertFalse((d / "agents/auditor/system_prompt.md").exists())  # orch's own prompt: it audits orch
         self.assertIn("You are the auditor", aud.current_system_prompt())
@@ -1964,7 +1971,7 @@ class TestProjectFolder(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_config(str(self.tmp))
         for name, extra in (("manager", "approve_plan: false\napprove_milestones: false\nmax_rounds: 20\n"),
-                            ("critic", ""), ("worker", ""), ("auditor", "")):
+                            ("critic", ""), ("worker", ""), ("auditor", ""), ("monitor", "")):
             y = d / "agents" / name / "agent.yaml"
             text = y.read_text().replace("backend: claude", "backend: mock").replace("approve_plan: true\n", "") \
                 .replace("approve_milestones: true\n", "").replace("max_rounds: 20 ", "# ").replace("max_rounds: 3\n", "")

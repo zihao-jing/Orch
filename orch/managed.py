@@ -22,6 +22,7 @@ Nothing in the agents' messages mentions a workflow; relayed text reads like a n
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -36,12 +37,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import audit as _audit
 from . import boards as B
 from . import jobs as _jobs
+from . import progress as P
 from . import reminders as R
 from . import routing as RT
 from . import tags as T
 
 from .backends import StopRequested
-from .config import AgentConfig
+from .config import CHECK_EVERY, MANAGER_CHECK_EVERY, PROMPTS_DIR, AgentConfig
 from .controller import MonitorRunner, checklist_state, parse_options, relayed, resolve_choice, strip_checklist, truncate
 from .report import CHECKBOX
 from .templates import render
@@ -67,6 +69,7 @@ _STATE_HEAD_RE = re.compile(r"\A\s*<!--\s*orch: working state of .*?run (\S+?), 
 # placeholders a reset leaves in an agent's queue; the handover notes are written when its next turn starts
 HANDOVER = "(handover notes: written when this agent's next turn starts)"
 HANDOVER_TOP_DOWN = "(handover notes for the top-down restart: written when this agent's next turn starts)"
+PROGRESS_STATUS = "(orch, progress check)"  # the manager's light status look (B5); only the newest one waits for it
 PLAN_STATUS = "(orch, from the critic's plan)"  # a check-in written by orch; only the newest one waits for the manager
 QUESTION_TAG = re.compile(r"<question>.*?</question>", re.S | re.I)  # a question block, removed from a forwarded note
 TERMINAL_HOLD = "its session is open in a terminal; delivered when the terminal closes"
@@ -255,7 +258,9 @@ class ManagedRunner(MonitorRunner):
         self.board_vars()
         before = (self.st.get("golden") or {}).get("hash")
         r = super().turn(agent, prompt, rnd, purpose, seq=seq, extra=extra)
-        if r.get("status") == "ok":
+        if r.get("status") == "ok" and agent.role == "monitor":
+            self.rec.save()  # a check's report is handled by quick_check: it is never routed by tags
+        elif r.get("status") == "ok":
             self.golden_after_turn(agent, r, before)
             self.check_addresses(agent, r.get("output") or "")
             self.check_tooling(agent, r)
@@ -923,11 +928,13 @@ class ManagedRunner(MonitorRunner):
         frm = sorted({m["from"] for m in want})
         self.rec.progress(f"✉ {a.called}: {len(want)} message(s) from {', '.join(frm)} arrived; it answers now")
         self.rec.event("activation", agent=a.name, msgs=[m["id"] for m in want])
-        try:
-            r = self.say(a, self.mtpl("manager_message_turn" if a.role == "manager" else "critic_message_turn"), "incoming")
+        checks = a.role == "verifier" and all(m.get("kind") == "progress_check" for m in want)
+        try:  # woken by a progress check that found a problem: it messages the worker if needed, nothing goes up
+            r = self.say(a, self.mtpl("manager_message_turn" if a.role == "manager" else
+                                      "critic_check_turn" if checks else "critic_message_turn"), "incoming")
             if r.get("status") == "ok" and a.role == "manager":
                 self.after_manager(r, relay=False)
-            elif r.get("status") == "ok":  # its words for its user, like a check-in update; a question goes up whole
+            elif r.get("status") == "ok" and not checks:  # its words for its user, like a check-in update; a question goes up whole
                 update = "\n\n".join(x for x in [T.outside(r["output"]), self.ask_block(r["output"], "verifier")] if x)
                 if update:
                     self.deliver(a, self.manager, update, self.mtpl("relay_note_up", note=update).strip(),
@@ -1894,6 +1901,8 @@ class ManagedRunner(MonitorRunner):
     def main_loop(self) -> str:
         mg = self.mg
         self._main_ident = threading.get_ident()
+        if self.st.pop("status_lines", None):  # lines left by a run that stopped mid-turn: nothing is watched yet
+            self.rec.save()
         self.adopt_state_files()
         self.setup_boards()
         while True:
@@ -2096,7 +2105,11 @@ class ManagedRunner(MonitorRunner):
         mg["summary"] = summary
         for r in recs:  # past the time limit: not fatal; the worker picks up from where things stand
             if r["status"] == "timeout":
-                self.rec.progress(f"{r['agent']} ran past its time limit ({m.agent(r['agent']).timeout:.0f}s); continuing")
+                a = m.agent(r["agent"])
+                self.rec.progress(f"{r['agent']} ran past its safety limit ({a.turn_limit(self.watched(a)):.0f}s); "
+                                  "the turn was stopped; continuing")
+                self.rec.event("safety_timeout", agent=r["agent"], turn=r.get("turn_id"),
+                               limit=a.turn_limit(self.watched(a)))
                 self.forward(m.agent(r["agent"]), self.mtpl("worker_timeout").strip())
         errors = [r for r in recs if r["status"] not in ("ok", "timeout")]
         if errors and c.stop_on_error:
@@ -2109,6 +2122,7 @@ class ManagedRunner(MonitorRunner):
         jobs: Dict[str, Dict[str, Any]] = {}
         if c.job_wait > 0 and cut:
             self._procs = {}  # the critic acts now; it doesn't wait for a job the worker left running
+            self._carry_jobs = {}
         elif c.job_wait > 0:
             outs = "\n".join(r.get("output") or "" for r in recs)
             skip = {int(a["pid"]) for a, _b in T.blocks(outs, "no-wait") if str(a.get("pid", "")).isdigit()}
@@ -2118,21 +2132,30 @@ class ManagedRunner(MonitorRunner):
                                              tags=[_jobs.tag_for(self.rec.run_dir.name, r["agent"]) for r in recs])
                      if j["pid"] not in skip]  # orch finds them itself
             self._procs = {}
+            for name, j in (getattr(self, "_carry_jobs", None) or {}).items():  # still running from the last wait
+                for pid in j["pids"]:
+                    cmd = (j.get("cmds") or {}).get(str(pid), "")
+                    if pid not in skip and _jobs.alive(pid, cmd) and not any(pid == x["pid"] for x in found):
+                        found.append({"pid": pid, "command": cmd, "agent": name})
+            self._carry_jobs = {}
             for j in found:
                 if any(j["pid"] in x["pids"] for x in jobs.values()):
                     continue
-                for r in recs[:1] if len(recs) == 1 else recs:
+                for r in recs[:1] if len(recs) == 1 else [x for x in recs if x["agent"] == j.get("agent", x["agent"])]:
                     x = jobs.setdefault(r["agent"], {"pids": [], "lines": [], "cmds": {}})
                     x["pids"].append(j["pid"])
                     x["lines"].append(f"pid {j['pid']}: {_clip(str(j['command']), 160)}")
                     x["cmds"][str(j["pid"])] = j["command"]
+        carried = getattr(self, "_carry_since", None)
+        self._carry_since = None
         if jobs:
-            mg["job"] = {"agents": jobs, "since": now_iso(), "since_ts": time.time()}
+            mg["job"] = {"agents": jobs, "since": (carried or {}).get("since") or now_iso(),
+                         "since_ts": (carried or {}).get("since_ts") or time.time()}
             mg["work_earlier"] = {a: x.get("output") or "" for a, x in mg["work"].items()}
             mg["phase"] = "job"
             pids = ", ".join(str(x) for j in jobs.values() for x in j["pids"])
             self.rec.progress(f"⏳ waiting for the worker's job (pid {pids}) before {self.critic.name} reviews")
-            self.log(f"  ⏳ waiting for job pid {pids} (up to {c.job_wait / 3600:.1f} h; 'Review now' on the board skips)")
+            self.log(f"  ⏳ waiting for job pid {pids} (watched by progress checks; 'Review now' on the board skips)")
             return None
         if any(self.rec.pending_worker_messages(w.name) for w in self.workers):
             # A check-in can finish after the worker's backend has already closed its turn. Deliver
@@ -2146,7 +2169,9 @@ class ManagedRunner(MonitorRunner):
 
     def ph_job(self, mg: Dict[str, Any]) -> Optional[str]:
         """The worker finished its turn but is waiting on its own background job: don't spend a critic review on
-        work that isn't done. When the job ends (or after job_wait), the worker picks up again; I can skip ahead."""
+        work that isn't done, and no rounds on asking whether it still runs. While it runs, progress checks watch it
+        (B5); when it ends, the worker picks up again. A message for the worker gives it a turn now, and the job is
+        watched again afterwards. `job_wait` caps the wait only when checks are off. I can skip ahead."""
         c, job = self.mon.controller, mg.get("job") or {}
         agents = job.get("agents") or {}
         for name in list(agents):  # a wait saved by an older orch may hold processes that were never jobs
@@ -2167,12 +2192,20 @@ class ManagedRunner(MonitorRunner):
             return None
         self.rec.set(status="waiting_job")
         why = "finished"
+        since = float(job.get("since_ts") or time.time())
+        watched = []
+        for name, j in agents.items():
+            w = self.mon.agent(name)
+            if self.start_watch(w, "job", jobs=j["lines"], since=since):
+                watched.append(w)
+        nap = min([2.0] + [max(0.05, x["every"] / 4) for x in (getattr(self, "_watches", None) or {}).values()])
         try:
             while True:
                 if self.should_stop():
                     raise StopRequested()
                 self.check_control()
                 self.urgent_checkin()
+                self.progress_tick()  # B5: the monitor looks at the job every few minutes; no rounds spent
                 self.activate("wait")
                 if any(self.rec.pending_worker_messages(n) or self.ledger.waiting(n) for n in agents):
                     why = "message"  # a message for the worker: its turn comes now, the job may keep running
@@ -2183,11 +2216,13 @@ class ManagedRunner(MonitorRunner):
                 if not any(_jobs.alive(x, (j.get("cmds") or {}).get(str(x), "")) for j in agents.values()
                            for x in j["pids"]):
                     break
-                if time.time() - float(job.get("since_ts") or time.time()) > c.job_wait:
+                if not watched and time.time() - since > c.job_wait:  # with checks off, job_wait caps the wait
                     why = "timeout"
                     break
-                time.sleep(2)
+                time.sleep(nap)
         finally:
+            for w in watched:
+                self.end_watch(w)
             self.rec.set(status="running")
         mg.pop("job", None)
         if why == "released":
@@ -2199,8 +2234,15 @@ class ManagedRunner(MonitorRunner):
         summary = mg.get("summary") or {"round": rnd, "turns": []}
         hours = (time.time() - float(job.get("since_ts") or time.time())) / 3600
         items = []
+        self._carry_jobs, self._carry_since = {}, None
+        if why == "message":  # the job runs on: after the worker's turn it is watched again, not reviewed half done
+            self._carry_jobs = {n: {"pids": list(j["pids"]), "cmds": dict(j.get("cmds") or {})} for n, j in agents.items()}
+            self._carry_since = {"since": job.get("since"), "since_ts": job.get("since_ts")}
         for name, j in agents.items():
             w = self.mon.agent(name)
+            if why == "message":
+                items.append((w, self.mtpl("worker_job_message", jobs="; ".join(j["lines"]), human_messages=""), "work"))
+                continue
             state = (f"has finished" if why == "finished" else f"is still running after {hours:.1f} h")
             items.append((w, self.mtpl("worker_job_done", jobs="; ".join(j["lines"]), state=state, human_messages=""),
                           "work"))
@@ -2222,12 +2264,20 @@ class ManagedRunner(MonitorRunner):
             self.write_handover(a)
             # Keep draining the worker's backend while the main thread handles a critic check-in.
             # Finish both conversations before advancing the phase or starting another worker turn.
-            with ThreadPoolExecutor(max_workers=1) as ex:
-                future = ex.submit(self.turn, a, p, rnd, purpose, extra=extra)
-                while not wait([future], timeout=0.2).done:
-                    self.urgent_checkin()
-                    self.activate("stage")  # the manager and critic answer their messages while the worker works
-                out.append(future.result())
+            watch = purpose == "work" and a.role == "worker"
+            if watch:
+                self.start_watch(a, "turn")
+            try:
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    future = ex.submit(self.turn, a, p, rnd, purpose, extra=extra)
+                    while not wait([future], timeout=0.2).done:
+                        self.urgent_checkin()
+                        self.progress_tick()  # B5: quick checks while the worker works; no rounds spent on them
+                        self.activate("stage")  # the manager and critic answer their messages while the worker works
+                    out.append(future.result())
+            finally:
+                if watch:
+                    self.end_watch(a)
             self.after_state_turn(a, out[-1])
         return out
 
@@ -2251,6 +2301,237 @@ class ManagedRunner(MonitorRunner):
         except _Failed as e:
             self.rec.event("checkin_error", error=str(e))
             self.rec.progress(f"Urgent check-in did not finish: {e}; the worker continues")
+        self.rec.save()
+
+    # ------------------------------------------------------------------ B5: progress checks
+    # While a worker's turn or its background job runs, a quick check every `check_every` minutes (the worker's
+    # agent.yaml, else the monitor's; default 20; 0 = off). The monitor (role: monitor, a small cheap model) looks at
+    # logs and status, with the current step's items from the critic's checklist file, and reports evidence only.
+    # Without a monitor, the critic's side session does it (check_session: own runs it in the critic's own session).
+    # The report goes to the critic: held for its next turn when all is fine, waking it now when the run is quiet,
+    # off track or something it relies on has stopped. The manager gets a status line at its own, longer interval
+    # (no turn of its own). Each check updates the worker's status line on the board.
+
+    def clock(self) -> float:
+        return time.time()
+
+    @property
+    def monitor_agent(self) -> Optional[AgentConfig]:
+        m = self.mon.by_role("monitor")
+        return m[0] if m else None
+
+    def check_every(self, w: AgentConfig) -> float:
+        """Minutes between checks of this worker's turns and jobs (0 = off)."""
+        for a in (w, self.monitor_agent):
+            if a is not None and a.check_every is not None:
+                return float(a.check_every)
+        return CHECK_EVERY
+
+    def watched(self, agent: AgentConfig) -> bool:
+        return self.mon.controller.mode == "managed" and agent.role == "worker" and self.check_every(agent) > 0
+
+    def refresh_agent(self, agent: AgentConfig) -> None:
+        if agent.role == "monitor" and agent.name not in {a.name for a in self.mon.agents}:
+            return  # the critic's side session for checks: built from the critic's settings at each check
+        super().refresh_agent(agent)
+
+    def checker(self) -> Tuple[AgentConfig, str]:
+        """Who runs a check and where: (agent, "own" | "side"). The monitor (own session unless its check_session
+        says side); without one, the critic: a side session by default (its own conversation is left alone)."""
+        m = self.monitor_agent
+        if m is not None:
+            return m, m.check_session or "own"
+        c = self.critic
+        if (c.check_session or "side") == "own":
+            return c, "own"
+        side = dataclasses.replace(
+            c, name=f"{c.name}-check", role="monitor", display_name="", description="", task="", system_prompt="",
+            system_prompt_path=str(PROMPTS_DIR / "monitor.md"), memory_files=[], state_file="", fresh_session="",
+            protocol_path=str(PROMPTS_DIR / "protocol" / "monitor.md") if self.mon.controller.protocol else "")
+        return side, "side"
+
+    def start_watch(self, w: AgentConfig, kind: str, jobs: Optional[List[str]] = None,
+                    since: Optional[float] = None) -> bool:
+        every = self.check_every(w) * 60.0
+        if every <= 0:
+            return False
+        now = self.clock()
+        watches = self.__dict__.setdefault("_watches", {})
+        watches[w.name] = {"agent": w.name, "kind": kind, "jobs": list(jobs or []), "since": since or now,
+                           "every": every, "next": now + every, "checks": 0}
+        if getattr(self, "_mgr_next", None) is None:
+            me = self.manager.check_every
+            me = MANAGER_CHECK_EVERY if me is None else float(me)
+            self._mgr_next = now + me * 60.0 if me > 0 else None
+        self.status_line(w, watches[w.name], None)
+        return True
+
+    def end_watch(self, w: AgentConfig) -> None:
+        (getattr(self, "_watches", None) or {}).pop(w.name, None)
+        if not getattr(self, "_watches", None):
+            self._mgr_next = None
+        lines = self.st.get("status_lines") or {}
+        if lines.pop(w.name, None) is not None:
+            self.rec.save()
+
+    def progress_tick(self) -> None:
+        """Run the checks that are due (called from the loops that wait on a worker's turn or job)."""
+        if self.should_stop():
+            return
+        now = self.clock()
+        for name, watch in list((getattr(self, "_watches", None) or {}).items()):
+            if now >= watch["next"]:
+                watch["next"] = now + watch["every"]
+                self.quick_check(watch)
+        if getattr(self, "_watches", None) and getattr(self, "_mgr_next", None) and self.clock() >= self._mgr_next:
+            me = self.manager.check_every
+            self._mgr_next = self.clock() + (MANAGER_CHECK_EVERY if me is None else float(me)) * 60.0
+            self.manager_status()
+
+    def what_runs(self, w: AgentConfig, watch: Dict[str, Any]) -> str:
+        if watch["kind"] == "job":
+            return f"{w.called}'s background job ({'; '.join(watch['jobs']) or 'a job'})"
+        return f"{w.called}'s current turn"
+
+    def step_items(self) -> Tuple[str, str]:
+        """(label for the status line, e.g. "step 3"; the current step's items for the check prompt)."""
+        try:
+            ck = self.checklist_board()
+        except Exception:
+            return "", ""
+        steps = ck.get("steps") or []
+        i = B.current_index(ck)
+        if i < 0 or not steps:
+            return "", ""
+        s = steps[i]
+        label = "" if s.get("implicit") else f"step {i + 1}"
+        items = B.current_list(ck)
+        return label, (f"What to look for, {s['title']}:\n{items}" if items else "")
+
+    def activity_text(self, w: AgentConfig, watch: Dict[str, Any], now: float) -> Tuple[str, str, Optional[float]]:
+        """(the activity paragraph of the check prompt, the short phrase for the status line, seconds quiet)."""
+        if watch["kind"] == "job":
+            alive = []
+            for ln in watch["jobs"]:
+                m = re.match(r"pid (\d+)", ln)
+                if m:
+                    alive.append(f"pid {m.group(1)} {'running' if _jobs.alive(int(m.group(1))) else 'gone'}")
+            state = ", ".join(alive)
+            return (f"Process check: {state}." if state else ""), ("job " + (state or "running")), None
+        quiet, tail = P.activity(self.rec.run_dir, w.name, watch["since"], now)
+        if quiet is None:
+            q = now - watch["since"]
+            return (f"Nothing written in the turn's output since it started {P.minutes(q)} min ago.",
+                    f"no output for {P.minutes(q)} min", q)
+        lines = "\n".join(f"- {x}" for x in tail)
+        head = f"Latest activity in the turn's output, {P.minutes(quiet)} min ago:"
+        phrase = "log active" if quiet < watch["every"] else f"log quiet for {P.minutes(quiet)} min"
+        return f"{head}\n{lines}", phrase, quiet
+
+    def status_line(self, w: AgentConfig, watch: Dict[str, Any], check: Optional[Dict[str, Any]]) -> None:
+        """The board's live line for a working agent: "Sam: step 3, running 14 min — log active"."""
+        now = self.clock()
+        label, _items = self.step_items()
+        mins = P.minutes(now - watch["since"])
+        summary = (check or {}).get("summary") or "no check yet"
+        doing = "job running" if watch["kind"] == "job" else "running"
+        text = f"{w.called}: " + (f"{label}, " if label else "") + f"{doing} {mins} min — {summary}"
+        self.st.setdefault("status_lines", {})[w.name] = {
+            "agent": w.name, "kind": watch["kind"], "step": label, "since": time.strftime(
+                "%Y-%m-%dT%H:%M:%S", time.localtime(watch["since"])), "since_ts": watch["since"], "summary": summary,
+            "status": (check or {}).get("status") or "", "checked_at": now_iso() if check else "", "text": text,
+            "checks": watch.get("checks", 0)}
+        self.rec.save()
+
+    def quick_check(self, watch: Dict[str, Any]) -> None:
+        """One quick check of a running worker turn or job: the checker looks and reports evidence; the report goes
+        to the critic (problem: now; all fine: at its next turn); the status line is updated."""
+        w = self.mon.agent(watch["agent"])
+        checker, where = self.checker()
+        if self.rec.agent_busy(checker.name):  # e.g. a board chat with it: try again shortly
+            watch["next"] = self.clock() + min(60.0, watch["every"])
+            return
+        now = self.clock()
+        mins = P.minutes(now - watch["since"])
+        what = self.what_runs(w, watch)
+        act, phrase, quiet = self.activity_text(w, watch, now)
+        _label, step = self.step_items()
+        own_critic = checker.role == "verifier"
+        tpl = "critic_quick_check" if own_critic else "monitor_check"
+        prompt = self.mtpl(tpl, what=what, minutes=mins, cwd=w.working_dir or self.mon.working_dir, activity=act,
+                           step=step or "(No step items to look for yet.)").strip()
+        if where == "side":  # a fresh session for each check
+            self.st["sessions"].pop(checker.name, None)
+        watch["checks"] = watch.get("checks", 0) + 1
+        self.rec.event("progress_check", agent=w.name, checker=checker.name, where=where, watch=watch["kind"],
+                       minutes=mins)
+        try:
+            r = self.turn(checker, prompt, int(self.st.get("round", 0)), "check",
+                          extra={"watching": w.name, "watch_kind": watch["kind"]})
+        except StopRequested:
+            raise
+        except Exception as e:  # a check that fails never stops the work
+            self.rec.event("check_error", agent=w.name, checker=checker.name, error=str(e))
+            self.rec.progress(f"⚠ progress check of {w.called} did not finish: {e}")
+            return
+        if r.get("status") != "ok":
+            self.rec.event("check_error", agent=w.name, checker=checker.name, error=r.get("status"))
+            self.rec.progress(f"⚠ progress check of {w.called} ended with {r.get('status')}; the work goes on")
+            return
+        out = r.get("output") or ""
+        status, tagged = P.parse_status(out)
+        if own_critic and not tagged:  # the critic's own session: a message to the worker marks a problem
+            status = P.QUIET if T.bodies(out, "message") else P.OK
+        if quiet is not None and quiet >= watch["every"] and status == P.OK:
+            status = P.QUIET  # orch's own evidence: nothing written in the turn for a whole interval
+        report, flags = P.clean_report(T.outside(out) if own_critic else out, w.name, self.rec.run_dir)
+        for f in flags:
+            self.rec.event("check_flag", agent=checker.name, turn=r.get("turn_id"), problem=f)
+        if flags:
+            self.rec.progress(f"⚠ progress check `{r.get('turn_id')}`: removed from the report before the critic "
+                              f"reads it: {'; '.join(flags[:3])}")
+        problem = P.is_problem(status)
+        summary = phrase + ("" if status == P.OK else f"; check: {status}")
+        self.status_line(w, watch, {"status": status, "summary": summary})
+        self.rec.progress(f"🔎 progress check of {w.called} ({mins} min): {status}"
+                          + (" → the critic is told now" if problem and not own_critic else ""))
+        if not own_critic and report:
+            self.report_check(checker, w, watch, report, status, problem, r.get("turn_id") or "", mins)
+        self.rec.save()
+
+    def report_check(self, checker: AgentConfig, w: AgentConfig, watch: Dict[str, Any], report: str, status: str,
+                     problem: bool, turn_id: str, mins: int) -> None:
+        """The report to the critic, as an observation about the work. A newer report replaces one still waiting.
+        All fine: held for the critic's next turn. A problem: it starts a short critic turn now (activate)."""
+        L, critic = self.ledger, self.critic
+        text = self.mtpl("progress_check_report", minutes=mins, what=self.what_runs(w, watch), report=report).strip()
+        for old in L.rows:
+            if old.get("kind") == "progress_check" and old["to"] == critic.name and old["status"] in ("sent", "held"):
+                q = (self.st.get("fwd") or {}).get(critic.name) or []
+                if old["text"] in q:
+                    q.remove(old["text"])
+                L.mark(old, "superseded", reason="replaced by a newer progress check", by=turn_id)
+        m = L.add(checker.name, critic.name, report, text, source=turn_id, via="check", purpose="check",
+                  kind="progress_check", check_status=status, activate=bool(problem), carrier={"fwd": True})
+        if not problem:
+            L.mark(m, "held", reason=RT.NEXT_TURN, next_turn=True)
+        self.forward(critic, text)
+        self.rec.event("check_report", agent=w.name, checker=checker.name, status=status, msg=m["id"],
+                       wakes=bool(problem))
+
+    def manager_status(self) -> None:
+        """The manager's light status look: one line from the latest checks and the plan, waiting for its next turn
+        (it starts no turn; only the newest one waits)."""
+        lines = [x.get("text") or "" for x in (self.st.get("status_lines") or {}).values() if x.get("text")]
+        plan = self.plan_line()
+        line = "; ".join(lines + ([f"plan: {plan}"] if plan else []))
+        if not line:
+            return
+        fwd = self.st.setdefault("fwd", {}).setdefault(self.manager.name, [])
+        fwd[:] = [x for x in fwd if not x.startswith(PROGRESS_STATUS)]
+        fwd.append(f"{PROGRESS_STATUS} " + self.mtpl("manager_progress_status", line=line).strip())
+        self.rec.event("manager_check", text=line)
+        self.rec.progress(f"ⓘ status for the manager: {line}")
         self.rec.save()
 
     def ph_review(self, mg: Dict[str, Any]) -> Optional[str]:

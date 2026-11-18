@@ -27,7 +27,14 @@ MODES = ("pipeline", "llm", "managed")
 
 # Agent settings that take effect on the agent's next turn without restarting the run. Everything else
 # (prompts, memory, role, working folder, name) is read at start; a change there is reported, not applied.
-HOT_AGENT_FIELDS = ("backend", "backend_options", "env", "timeout", "retries", "fallback", "fallback_cooldown")
+HOT_AGENT_FIELDS = ("backend", "backend_options", "env", "timeout", "retries", "fallback", "fallback_cooldown",
+                    "safety_timeout", "check_every", "check_session")
+
+# B5: a turn that progress checks watch (a worker's, in managed mode) may run long; only this high limit stops it
+SAFETY_TIMEOUT = 28800.0  # 8 h
+CHECK_EVERY = 20.0  # minutes between quick checks of a worker's turn or job
+MANAGER_CHECK_EVERY = 60.0  # minutes between status summaries for the manager while work runs
+CHECK_SESSIONS = ("own", "side")
 
 
 class ConfigError(Exception):
@@ -79,6 +86,22 @@ class AgentConfig:
     # label, backend, backend_options, env, retries (already merged with the primary's settings when loaded)
     fallback: List[Dict[str, Any]] = field(default_factory=list)
     fallback_cooldown: float = 18000.0  # 5 h: seconds an agent stays on the backup that worked before trying its primary again
+    # B5 progress checks. safety_timeout: the hard per-turn limit in seconds (None: see turn_limit). check_every:
+    # minutes between quick checks while this agent works (a worker: its turns and jobs; the manager: its status
+    # summaries); None = the default, 0 = off. check_session: where this agent runs the checks it does (a monitor,
+    # or the critic when there is no monitor): "own" (its continuing session) or "side" (a fresh session per check)
+    safety_timeout: Optional[float] = None
+    check_every: Optional[float] = None
+    check_session: str = ""
+
+    def turn_limit(self, watched: bool = False) -> float:
+        """Seconds a turn may run before it is stopped. `safety_timeout` when set. Otherwise `timeout` keeps its
+        old meaning for turns nobody watches (manager, critic, auditor, monitor; a worker with checks off), and a
+        watched turn (a worker's, with progress checks on) gets at least the 8 h safety limit: an older `timeout`
+        below it no longer cuts the turn."""
+        if self.safety_timeout:
+            return float(self.safety_timeout)
+        return max(float(self.timeout or 0), SAFETY_TIMEOUT) if watched else float(self.timeout or 0)
 
     def variants(self) -> List[Variant]:
         """The primary model first, then each backup."""
@@ -215,7 +238,9 @@ class ControllerConfig:
     tag_reminder: Optional[float] = None
     # managed mode: short reminders at intervals (orch/reminders.py): [{id, text, to, every | random, skip}]
     reminders: List[Dict[str, Any]] = field(default_factory=lambda: R.parse(None))
-    job_wait: int = 21600  # seconds the critic waits for a job the worker says it is waiting on (0 = never wait)
+    # 0 = never hold a review for a job the worker left running; otherwise progress checks watch the job (B5), and this
+    # caps the wait (seconds) only for a worker whose checks are off
+    job_wait: int = 21600
     checkin_every: int = 0  # every N rounds a short update for the manager: from the critic's plan when it has one (0 = off)
     # a reply holding a line like this sends questions one level up (worker -> critic -> manager -> me)
     question_pattern: str = r"^\W*QUESTIONS? FOR\b"
@@ -369,13 +394,24 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
     working_dir = _expand(wd, Path(mon_wd)) if wd else mon_wd
     known = {"name", "role", "description", "system_prompt", "task", "backend", "backend_options",
              "working_dir", "timeout", "retries", "env", "reviews", "feedback_to", "display_name",
-             "memory_files", "memory_heading", "fresh_session", "state_file", "fallback", "fallback_cooldown"}
+             "memory_files", "memory_heading", "fresh_session", "state_file", "fallback", "fallback_cooldown",
+             "safety_timeout", "check_every", "check_session"}
     unknown = set(merged) - known
     if unknown:
         raise ConfigError(f"{where} ({name}): unknown keys: {', '.join(sorted(unknown))}")
     fresh = str(merged.get("fresh_session", "") or "").strip().lower()
     if fresh not in ("", "never", "milestone"):
         raise ConfigError(f"{where} ({name}): fresh_session must be 'milestone' or 'never'")
+    session = str(merged.get("check_session", "") or "").strip().lower()
+    if session and session not in CHECK_SESSIONS:
+        raise ConfigError(f"{where} ({name}): check_session must be 'own' or 'side'")
+    try:
+        safety = float(merged["safety_timeout"]) if merged.get("safety_timeout") is not None else None
+        every = float(merged["check_every"]) if merged.get("check_every") is not None else None
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"{where} ({name}): safety_timeout and check_every must be numbers") from e
+    if (safety is not None and safety < 0) or (every is not None and every < 0):
+        raise ConfigError(f"{where} ({name}): safety_timeout and check_every must be >= 0")
     primary = {"backend": str(merged.get("backend", "claude")),
                "backend_options": dict(merged.get("backend_options") or {}),
                "env": {str(k): str(v) for k, v in (merged.get("env") or {}).items()},
@@ -403,12 +439,16 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
         memory_heading=str(merged.get("memory_heading", AgentConfig.memory_heading) or ""),
         fresh_session="" if fresh == "never" else fresh,
         state_file=_expand(merged["state_file"], base) if merged.get("state_file") else "",
+        safety_timeout=safety or None,
+        check_every=every,
+        check_session=session,
     )
 
 
 ROLE_ALIASES = {"critic": "verifier", "reviewer": "verifier", "writer": "worker"}
 PROMPTS_DIR = Path(__file__).with_name("prompts")
-DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "worker.md", "auditor": "auditor.md"}
+DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "worker.md", "auditor": "auditor.md",
+                  "monitor": "monitor.md"}
 # workflow settings an agent.yaml may carry (usually: the manager's goal and approvals, the critic's checklist
 # and rounds, the worker's snapshot). Two agents setting the same one differently is an error.
 MONITOR_KEYS = ("goal", "goal_file", "max_rounds", "output_dir", "workspace")
@@ -463,7 +503,7 @@ def _project_raw(orch_dir: Path) -> Dict[str, Any]:
     owner: Dict[str, str] = {}
     ctrl: Dict[str, Any] = {}
     agents = []
-    order = {"manager": 0, "verifier": 1, "worker": 2}
+    order = {"manager": 0, "verifier": 1, "worker": 2, "monitor": 3}
     folders = [x for x in sorted((orch_dir / "agents").iterdir()) if (x / "agent.yaml").is_file()]
     for d in folders:
         raw = _agent_folder(d)
@@ -597,7 +637,7 @@ def load_config(path: str) -> Config:
                 for key, role in (("manager", "manager"), ("critic", "verifier"), ("worker", "worker"))}
         for a in agents:
             a.prompt_vars = dict(team)
-            proto = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(a.role)
+            proto = {"manager": "manager", "verifier": "critic", "worker": "worker", "monitor": "monitor"}.get(a.role)
             if controller.mode == "managed" and controller.protocol and proto:
                 a.protocol_path = str(PROMPTS_DIR / "protocol" / f"{proto}.md")
         m_known = {"name", "workspace", "working_dir", "goal", "max_rounds", "controller", "agents",
@@ -694,11 +734,14 @@ def validate(cfg: Config, check_paths: bool = False) -> List[str]:
             if m.max_rounds <= c.milestone_rounds:
                 warnings.append(f"{where}: max_rounds ({m.max_rounds}) counts rounds over all milestones; at or below "
                                 f"milestone_rounds ({c.milestone_rounds}) the run can stop in the middle of a milestone")
-            others = [a.name for a in m.agents if a.role not in ("worker", "verifier", "manager", "auditor")]
+            others = [a.name for a in m.agents if a.role not in ("worker", "verifier", "manager", "auditor", "monitor")]
             if others:
                 warnings.append(f"{where}: managed mode ignores agents with custom roles: {', '.join(others)}")
             if len(m.by_role("auditor")) > 1:
                 raise ConfigError(f"{where}: at most one agent with role: auditor")
+            if len(m.by_role("monitor")) > 1:
+                warnings.append(f"{where}: several agents with role: monitor; only "
+                                f"{m.by_role('monitor')[0].name!r} watches the work (one monitor per worker comes later)")
             if c.audit_every < 0 or c.audit_points < 1:
                 raise ConfigError(f"{where}: controller.audit_every must be >= 0 and audit_points >= 1")
         if check_paths:

@@ -503,4 +503,38 @@ Read the files and logs you need before you act, and carry on from there.""",
     "chat_reminder_critic": "Answer my message. Don't start new work or change files unless I ask. Your reply comes "
                             "to me; to pass something on to {{worker}}, put it in `<message to=\"{{worker}}\">…</message>`.",
     "chat_reminder_worker": "Answer my message. Don't start new work or change files unless I ask.",
+    # B5 progress checks. To the monitor (or the critic's side session): a quick look at running work, evidence only
+    "monitor_check": """\
+Quick check: how is the run going?
+
+Running now: {{what}}, for {{minutes}} min, in `{{cwd}}`.
+{{activity}}
+
+{{step}}
+
+Look at the logs and outputs, run status commands if useful, and reply in a few lines of evidence: one line per item
+you can check, then one on activity. No verdict. End with `<status>ok|quiet|off-track|stopped</status>`.""",
+    # the check's report as the critic reads it: an observation about the work, like a check-in result
+    "progress_check_report": "Progress check, {{minutes}} min into {{what}}:\n\n{{report}}",
+    # the critic's own session runs the check (check_session: own, no monitor)
+    "critic_quick_check": """\
+Quick check: how is the run going? {{worker}} is still working ({{what}}, {{minutes}} min so far); leave that work
+running and don't start a review.
+{{activity}}
+
+{{step}}
+
+Look at the logs and outputs, in a few lines. Write to {{worker}} in `<message to="{{worker}}">…</message>` only if
+the run is quiet, off track, or a job or watcher it relies on has died; otherwise no message.""",
+    # the critic is woken by a check that found a problem
+    "critic_check_turn": "The progress check above found something that may need you. {{worker}} is still working: "
+                         "don't start a review. If the run is quiet, off track, or a job or watcher it relies on has "
+                         "died, send {{worker}} a short message in `<message to=\"{{worker}}\">…</message>`, as \"I\", "
+                         "saying what to check or change. If it needs nothing from you, reply in one line.",
+    # a worker turn started by a message while its background job keeps running
+    "worker_job_message": "{{human_messages}}\n\nYour background job ({{jobs}}) is still running and is being "
+                          "watched; you don't need to check on it or wait for it. Act on my message above, then reply "
+                          "briefly.",
+    # the manager's light status look while work runs (queued for its next turn; it starts no turn)
+    "manager_progress_status": "{{line}}",
 }

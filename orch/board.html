@@ -353,7 +353,7 @@ function running(){ return (D.turns||[]).filter(t => t.status === 'running'); }
 const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milestone', brief:'briefing the worker', work:'working',
   verify:'reviewing the changes', answer:'answering a question', amend:'updating the notes', report:'writing the milestone report',
   review:'scoring the milestone', guidance:'passing on guidance', feedback:'reading your feedback',
-  checkin:'sending a quick update', ack:'reading the quick update', incoming:'answering a message that just arrived'};
+  checkin:'sending a quick update', check:'checking on the work', ack:'reading the quick update', incoming:'answering a message that just arrived'};
 function renderTiles(mg){
   const nb = $('night'), want = nightWanted();  // the switch as last set (the run applies it when the current turn ends)
   nb.textContent = want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
@@ -361,11 +361,16 @@ function renderTiles(mg){
   const run = running()[0];
   const nowTxt = run ? `<span class="dot live"></span> <b>${esc(called(run.agent))}</b>&nbsp;is ${esc(DOING[run.purpose]||run.purpose)}`
                      : D.status === 'waiting_job' ? 'Waiting for the worker\'s job to finish' : (D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? 'Paused until your task is done' : 'Waiting for your OK') : esc(D.status||''));
+  const checks = Object.values(D.status_lines||{}).map(x => {  // B5: the latest progress check of each working agent
+    const mins = x.since_ts ? Math.max(0, Math.round((Date.now()/1000 - x.since_ts)/60)) : 0;
+    const bad = x.status && x.status !== 'ok';
+    return `<div class="${bad ? '' : 'mute'}" style="font-size:12px${bad ? ';color:var(--you)' : ''}" title="${esc(x.checked_at ? 'last check ' + x.checked_at : 'no check yet')}">🔎 ${esc(called(x.agent))}: ${x.step ? esc(x.step) + ', ' : ''}${x.kind === 'job' ? 'job running' : 'running'} ${mins} min — ${esc(x.summary||'')}</div>`;
+  }).join('');
   const term = Object.keys(D.terminal||{}).map(n => `<div class="mute" title="orch holds this agent's turns and routes the messages it writes there">⌨ ${esc(called(n))} is open in a terminal</div>`).join('');
   const QA = D.queued_answers || {}, live = qs.filter(q => q.status === 'open' && !QA[q.id]);  // settled-but-queued counts as done
   const openQ = live.length, mine = live.filter(q => q.to === 'human').length;
   const tiles = [
-    ['Now', `<div class="now" style="font-size:14px;font-weight:500">${nowTxt}</div>${term}`, ''],
+    ['Now', `<div class="now" style="font-size:14px;font-weight:500">${nowTxt}</div>${checks}${term}`, ''],
     ['Milestones', `${done}<span class="mute" style="font-size:15px"> / ${mss.length||'–'}</span>`, mss[mg.ms] ? 'on: ' + esc(mss[mg.ms].title) : ''],
     ['Rounds', esc(D.round||0), 'worker ↔ critic'],
     ['Questions', `${openQ}<span class="mute" style="font-size:15px"> open</span>`, mine ? `<b style="color:var(--you)">${mine} for you</b>` : `${qs.length} asked in all`],

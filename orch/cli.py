@@ -89,6 +89,7 @@ backend: claude
 backend_options: {model: opus, effort: medium, permission_mode: auto}
 timeout: 2400
 retries: 1
+# check_every: 60           # minutes between status lines for me from the progress checks (no turn; 0 = off)
 # the run as a whole
 goal_file: goal.md          # only the manager reads the goal
 max_rounds: 400             # worker/critic rounds in all milestones together (safety cap); keep it well above
@@ -108,7 +109,8 @@ retries: 1
 checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
 milestone_rounds: 50        # rounds without a step of the critic's plan finishing before the manager and I look
 checkin_every: 2            # every 2 rounds, a status line for the manager (from the plan: no model turn; 0 = off)
-# job_wait: 21600           # how long a review waits for a job the worker left running (seconds; 0 = never)
+# job_wait: 21600           # 0 = never wait for a job the worker left running; caps the wait only when checks are off
+# check_session: side       # without a monitor, the critic runs the checks: side (a fresh session) or own
 # job_ignore: ["status_loop"]  # commands that are never waited on (regexes), e.g. a long-lived helper
 """,
         "agents/worker/agent.yaml": """\
@@ -118,12 +120,14 @@ backend: claude
 backend_options: {model: sonnet, effort: medium, permission_mode: auto}
 # Codex instead: backend: codex, backend_options: {model: <model>, sandbox: workspace-write,
 #                extra_args: ["-c", "sandbox_workspace_write.network_access=true"]}
-timeout: 7200               # per turn; long jobs run in the background, and orch waits for them between turns
+safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
+check_every: 20             # minutes between quick checks of a running turn or background job (0 = off)
 retries: 1
 fresh_session: milestone    # a new session for each milestone: turns stay fast and cheap; the files carry the state
 # snapshot: [docs]          # folders whose every version is kept in the run log
 """,
         "agents/auditor/agent.yaml": AUDITOR_YAML,
+        "agents/monitor/agent.yaml": MONITOR_YAML,
     }
     from .config import PROMPTS_DIR
     for name in ("manager", "critic", "worker", "auditor"):
@@ -155,6 +159,21 @@ backend_options:
 timeout: 900
 audit_every: 10             # rounds between audits, plus one when the run ends (0 = no automatic audits, not even the final one; only `orch audit`)
 audit_points: 5             # at most this many points per audit
+"""
+
+MONITOR_YAML = """\
+role: monitor
+description: Watches the worker's long turns and jobs; reports evidence (never verdicts) to the critic.
+backend: claude
+backend_options:
+  model: haiku
+  effort: low
+  permission_mode: auto
+  disable_hooks: true
+  # read-only: it may run status commands and read logs and files, never edit
+  disallowed_tools: [Edit, Write, NotebookEdit, Task, WebFetch, WebSearch]
+timeout: 600
+check_session: own          # own: one continuing session for its checks; side: a fresh session per check
 """
 
 NO_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"]

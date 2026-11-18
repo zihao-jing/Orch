@@ -228,6 +228,7 @@ class Board:
             "managed": st.get("managed") or {}, "night": bool(st.get("night")), "night_pending": night_pending, "questions": st.get("questions") or [],
             "decisions": st.get("decisions") or [],
             "golden": _golden(st),
+            "status_lines": st.get("status_lines") or {},  # B5: a live line per working agent from its latest check
             "reviews": st.get("reviews") or [], "agents": agents, "turns": turns, "series": series,
             "chat": chat, "chat_more": chat_more, "relays": relays, "routes": routes, "received": received, "held": held,
             "terminal": _terminal(rd), "live": live, "flow": _PURPOSE_FLOW, "queued_answers": queued,

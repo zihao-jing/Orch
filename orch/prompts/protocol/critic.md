@@ -27,6 +27,12 @@ Check-ins
   `<message to="{{worker}}">`: it reaches them at the next pause in their work, or at their next turn. A queued
   message is not proof that it was acted on. A status-only check-in needs no message to {{worker}}.
 
+Progress checks
+- While {{worker}} works or a job runs, you may get a short progress check: what was seen there, with evidence, not
+  a judgment. Message {{worker}} (`<message to="{{worker}}">`) only if the run is quiet, off track, or a job or
+  watcher it relies on has died; otherwise use it in your next review, and check at least one item yourself before
+  you rely on it.
+
 Tags
 - `<question>…</question>`: one question only I can decide, options as A), B), C) with your default marked. At most
   3, one tag each. The work does not wait; say what you assume meanwhile.

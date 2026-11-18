@@ -599,7 +599,8 @@ class MockBackend(Backend):
     """Fake agent for dry runs. Never touches anything outside `write_file` if set.
 
     options:
-      delay:        seconds to sleep per turn (default 0)
+      delay:        seconds to sleep per turn (default 0); delays: {"purpose": seconds} per purpose
+      activity:     while sleeping, emit a stream event every 50 ms (a turn that is visibly working)
       script:       list of replies, used in order per agent session (placeholders {round} {agent})
       pass_after:   verifiers reply PASS from this round on (default 2)
       done_after:   llm controllers declare done at this round (default 2)
@@ -621,14 +622,19 @@ class MockBackend(Backend):
         with self._lock:
             n = self._counts.get(sid, 0) + 1
             self._counts[sid] = n
-        delay = float(o.get("delay", 0))
-        end = time.monotonic() + delay
+        rnd = int(req.context.get("round", 1))
+        purpose = str(req.context.get("purpose", ""))
+        delay = float((o.get("delays") or {}).get(purpose, o.get("delay", 0)))
+        t0 = time.monotonic()
+        end = t0 + delay
         while time.monotonic() < end:
             if should_stop():
                 return TurnResult("stopped", "", sid, None, "", ["mock"], {})
+            if req.timeout and time.monotonic() - t0 > req.timeout:  # like run_process: past the limit, stopped
+                return TurnResult("timeout", "", sid, None, "mock: timed out", ["mock"], {})
+            if o.get("activity") and req.on_event:  # tests: a turn that keeps writing to its stream
+                req.on_event({"k": "tool", "s": "run: step"})
             time.sleep(min(0.05, max(0.0, end - time.monotonic())))
-        rnd = int(req.context.get("round", 1))
-        purpose = str(req.context.get("purpose", ""))
         if n in [int(x) for x in o.get("fail_turns", [])]:
             return TurnResult("error", str(o.get("error_text", "")), sid, 1, "mock: simulated failure", ["mock"], {"turn": n})
         script = o.get("script")

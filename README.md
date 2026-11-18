@@ -105,7 +105,8 @@ checkin_every: 2            # a status line for the manager every 2 rounds (0 = 
 role: worker
 backend: claude
 backend_options: {model: sonnet, effort: medium, permission_mode: auto}
-timeout: 7200               # per turn; long jobs run in the background, and orch waits for them between turns
+safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
+check_every: 20             # minutes between quick checks of a running turn or job (0 = off)
 fresh_session: milestone    # a new session for each milestone
 ```
 
@@ -120,6 +121,8 @@ fresh_session: milestone    # a new session for each milestone
 | Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `reminders` |
 | Rounds per milestone, checklist, check-ins, job waiting | `critic/agent.yaml`: `milestone_rounds`, `checklist`, `checklist_nudge`, `checkin_every`, `job_wait`, `job_ignore` |
 | Fresh sessions, saved versions of files | `worker/agent.yaml`: `fresh_session`, `snapshot` |
+| Progress checks: interval, turn limit | `worker/agent.yaml`: `check_every`, `safety_timeout`; `manager/agent.yaml`: `check_every` (its status lines) |
+| Who checks, and where | `monitor/agent.yaml` (model, tools, `check_session`); without it, `critic/agent.yaml`: `check_session` |
 | Where runs are recorded | `output_dir:` in any `agent.yaml` (default `.orch/runs`) |
 | The agents' working directory | `working_dir:` per agent (relative to the project root) |
 | The exact wording of routed prompts | `templates:` (see `orch/templates.py` for the names and `{{placeholders}}`) |
@@ -257,13 +260,42 @@ then tells the worker what to do next.
 **Waiting for the worker's own jobs.** orch finds them itself: a process that started during the worker's turn, is
 still running after the turn ends, runs inside the workspace and was detached from the agent (`nohup … &`, so its
 parent is the system's init process) is a job; processes of mine, an editor or a terminal never count. While a job
-runs, the critic's review is held (no review spent on unfinished work, and none of it counts against the worker's
-turn time limit); when it exits, the worker gets the turn back to finish, and the critic then reviews both replies
-together. `job_wait` (seconds, default 21600; 0 = off) caps the wait, after which the worker is asked for progress;
-`job_ignore` (regexes on the command line) and a worker's `<no-wait pid="…"/>` exclude long-lived helpers.
+runs, the critic's review is held (no review spent on unfinished work, and no rounds spent asking whether it still
+runs): the progress checks below watch it instead. When it exits, the worker gets the turn back to finish, and the
+critic then reviews both replies together. A message for the worker while the job runs gives the worker a turn
+now; the job is watched again afterwards, not reviewed half done. `job_wait: 0` turns job waiting off; any other value
+caps the wait (seconds) only when progress checks are off for that worker (`check_every: 0`). `job_ignore` (regexes
+on the command line) and a worker's `<no-wait pid="…"/>` exclude long-lived helpers.
 **Review now** on the board skips the wait.
 
 **The board** — `orch run --serve [--open]`, or `orch serve` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). The **📜 Log** button opens the full log at `/log/` on the same server: every run, and for each run every turn's input, output, system prompt and command, grouped by milestone and round with everything folded except the newest round, a one-line preview on each folded turn, filters by agent and a search box. Files under `.orch/runs/` are served read-only at their path below `/log/`; nothing outside that folder is. To look from another machine, start it with `--host 0.0.0.0` (it then prints your network address). There is no password, so anyone who can reach the port can also steer and stop the run: use it on a network you trust, or keep the default and tunnel in (`ssh -L 8765:127.0.0.1:8765 you@this-machine`). Without the board: `orch approve [--note … | --revise …]`, `orch answer . Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
+
+**Progress checks (B5).** Long worker turns are allowed, as long as someone watches. While a worker's turn or job
+runs, a quick check every `check_every` minutes (in the worker's `agent.yaml`, else the monitor's; default 20; 0 =
+off) looks at the logs and status: "Quick check: how is the run going?", with how long it has run, the latest lines of
+the turn's output (or which job processes still run) and the current step's items from the critic's checklist file.
+
+* **Who checks.** An agent with `role: monitor` (scaffolded in `agents/monitor/`: Claude Code `haiku`, low effort,
+  edit tools disallowed). It reports to the critic only, never talks to the worker, and gives evidence, never a
+  verdict ("item 2: done, results/x.json has 120 rows"; "log quiet for 25 min"), ending with
+  `<status>ok|quiet|off-track|stopped</status>`. Without a monitor (older projects), the critic does the check in a
+  side session with the monitor's prompt. `check_session` in the checker's `agent.yaml`: `own` (its continuing
+  session; the monitor's default; for the critic, its own conversation, where it messages the worker itself) or
+  `side` (a fresh session for each check; the critic's default).
+* **What the critic sees.** The report arrives as an observation about the work: "Progress check, 14 min into Sam's
+  current turn: …", with no word of a monitor or of orch. orch removes verdict words (PASS/FAIL, `<verdict>`) and
+  lines about its own tooling before the critic reads it, and flags both on the board.
+* **When the critic is woken.** All fine (`ok`): the report waits for the critic's next turn (only the newest one).
+  Quiet, off track or stopped: a short critic turn starts now; the critic messages the worker only if needed, and
+  nothing of it goes up to the manager. A turn that wrote nothing to its output for a whole interval counts as quiet,
+  whatever the check says.
+* **The manager** gets a one-line status (the latest checks and the plan) every `check_every` minutes of its own
+  (default 60), waiting for its next turn; it starts no manager turn.
+* **Turn limit.** `safety_timeout` (seconds) is an agent's hard per-turn limit. Without it, a watched worker turn
+  gets 8 h: an older `timeout` below that no longer cuts it; the other agents (and a worker with checks off) keep
+  `timeout` as before.
+* **The board** shows a live line per working agent from its latest check: "Sam: step 3, running 14 min — log
+  active".
 
 ## Steering and inspecting a live run
 
@@ -568,6 +600,7 @@ orch/controller.py  MonitorRunner: pipeline + llm modes, sessions, routing, retr
 orch/recorder.py    run directory, state, events, turn and round records, inbox / STOP control files
 orch/report.py      static HTML viewers
 orch/templates.py   all default prompts ({{goal}}, {{feedback}}, {{worker_reports}}, …)
+orch/progress.py    progress checks (B5): reading a check's status, keeping verdicts and tooling from the critic, turn activity
 orch/audit.py       the auditor's digest (origins, repeats, relays, flags), its findings file, one audit
 orch/routing.py     message routing: who may address whom, the message ledger, the supersede rule
 orch/hooks/         terminal_relay.py: Claude Code hook for an agent's session open in a terminal
