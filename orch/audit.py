@@ -10,6 +10,10 @@ parts by where each part came from. Everything that can be counted is counted he
 - relays: how much of each source output reached the recipient, and what was left out
 - request vs reply: near-empty replies, bursts of short turns by one agent, questions and who they went to
 - waits: how long a human or relayed note sat in the inbox before an agent read it
+- times: each turn's start and end, each message's status in the routing ledger (`state["messages"]`) with how long
+  it waited from sent to delivered, and when each question opened and closed (`state["questions"]`)
+
+Every check reads messages with orch's reminders stripped (`reminders.strip`): they are by design, not content.
 
 The digest is markdown; excerpts are capped so the auditor reads structure and samples, not the whole task.
 """
@@ -25,6 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import reminders as R
 from . import tags as T
+from .routing import DISCUSSION as RT_DISCUSSION, NEXT_TURN as RT_NEXT_TURN
 from .recorder import read_json
 from .report import turn_cost_basis, turn_model
 
@@ -36,6 +41,7 @@ TINY_REPLY = 300
 REPEAT_SHARE, REPEAT_MIN = 0.3, 1500
 BIG_INPUT = 20000
 WAIT_MIN = 30  # minutes a note may wait before it is flagged
+MAX_LEDGER = 30  # message lines in the digest; ones that waited long or are held (not by design) always shown
 SOURCE_WINDOW = 40  # earlier turns searched for the origin of a paragraph
 ROLE = {"manager": "manager", "verifier": "critic", "worker": "worker"}
 # who normally speaks to whom in managed mode: manager <-> critic <-> worker, the human -> manager
@@ -69,6 +75,17 @@ def _ts(s: Optional[str]) -> Optional[float]:
         return datetime.fromisoformat(s).timestamp()
     except ValueError:
         return None
+
+
+def _hms(s: Optional[str]) -> str:
+    """'HH:MM:SS' of an ISO time ('' when missing)."""
+    m = re.search(r"T(\d{2}:\d{2}:\d{2})", s or "")
+    return m.group(1) if m else ""
+
+
+def _mins(a: Optional[float], b: Optional[float]) -> str:
+    return f"{(b - a) / 60:.0f} min" if a is not None and b is not None and b - a >= 60 else (
+        f"{max(0, int(b - a))} s" if a is not None and b is not None else "?")
 
 
 def _file_ts(name: str) -> Optional[float]:
@@ -107,14 +124,14 @@ def load_sources(run_dir: Path) -> List[Dict[str, Any]]:
             continue
         if d.get("text") and d.get("role") in ("human", "manager"):
             out.append({"id": d.get("id", ""), "origin": "human" if d["role"] == "human" else "manager-chat",
-                        "text": d["text"], "ts": _ts(d.get("ts"))})
+                        "text": R.strip(d["text"]), "ts": _ts(d.get("ts"))})
     for sub in ("consumed", ""):
         d = run_dir / "inbox" / sub if sub else run_dir / "inbox"
         for p in sorted(d.glob("*.json")) if d.is_dir() else []:
             m = read_json(p, {}) or {}
             if m.get("message"):
                 out.append({"id": p.name, "origin": f"note from {m['from']}" if m.get("from") else "human",
-                            "text": m["message"], "ts": _file_ts(p.name)})
+                            "text": R.strip(m["message"]), "ts": _file_ts(p.name)})
     return out
 
 
@@ -136,7 +153,7 @@ def note_waits(run_dir: Path, lo_ts: float, hi_ts: float) -> List[Dict[str, Any]
             continue
         m = read_json(run_dir / "inbox" / "consumed" / f, {}) or {}
         out.append({"file": f, "minutes": (read - made) / 60, "to": m.get("to"), "from": m.get("from") or "human",
-                    "urgent": bool(m.get("urgent")), "text": m.get("message") or ""})
+                    "urgent": bool(m.get("urgent")), "text": R.strip(m.get("message") or "")})
     pending = []
     for p in sorted((run_dir / "inbox").glob("*.json")) if (run_dir / "inbox").is_dir() else []:
         m = read_json(p, {}) or {}
@@ -144,8 +161,100 @@ def note_waits(run_dir: Path, lo_ts: float, hi_ts: float) -> List[Dict[str, Any]
         if m.get("message") and made is not None and not m.get("kind"):
             pending.append({"file": p.name, "minutes": (hi_ts - made) / 60, "to": m.get("to"),
                             "from": m.get("from") or "human", "urgent": bool(m.get("urgent")),
-                            "text": m["message"], "pending": True})
+                            "text": R.strip(m["message"]), "pending": True})
     return out + pending
+
+
+def _held_kind(m: Dict[str, Any]) -> str:
+    """Why a held message is held: 'by design' (never meant for that agent: the critic's checklist, plan, verdict),
+    'next turn' (a note up with nothing to decide), 'discussion' (the manager's messages while the user discusses
+    with it), or '' for a hold that is not by design (a bad address, a terminal open)."""
+    if m.get("by_design"):
+        return "by design"
+    if m.get("next_turn") or m.get("reason") == RT_NEXT_TURN:
+        return "next turn"
+    if m.get("reason") == RT_DISCUSSION:
+        return "discussion"
+    return ""
+
+
+def ledger(run_dir: Path, lo_ts: float, hi_ts: float) -> Tuple[List[str], Dict[str, Any], List[Dict[str, Any]]]:
+    """The routing ledger's messages that touch the window: (lines, counts, flags). Each line: id, sender →
+    recipient, sent time, then what became of it and how long it waited. Held-by-design messages are listed as such:
+    they were never meant to arrive and are not lost."""
+    rows = (read_json(run_dir / "state.json", {}) or {}).get("messages") or []
+    picked = []
+    for m in rows:
+        made, got = _ts(m.get("created_at")), _ts(m.get("delivered_at"))
+        waiting = m.get("status") in ("sent", "held")
+        if made is None:
+            continue
+        if lo_ts <= made <= hi_ts + 1 or (got is not None and lo_ts <= got <= hi_ts + 1) or (waiting and made <= hi_ts + 1):
+            picked.append(m)
+    counts: Dict[str, Any] = {"messages": len(picked)}
+    lines, flags, notable = [], [], set()
+    for m in picked:
+        made, got = _ts(m.get("created_at")), _ts(m.get("delivered_at"))
+        st, kind = m.get("status") or "?", _held_kind(m) if m.get("status") == "held" else ""
+        key = f"held {kind}" if st == "held" and kind else ("held (not by design)" if st == "held" else st)
+        counts[key] = counts.get(key, 0) + 1
+        head = f"- {m['id']} {m.get('from', '?')} → {m.get('to') or '?'} sent {_hms(m.get('created_at'))}" + (
+            " (urgent)" if m.get("urgent") else "")
+        if st == "delivered":
+            wait = (got - made) / 60 if got is not None else 0
+            line = f"{head}, delivered {_hms(m.get('delivered_at'))} in {m.get('turn', '?')}" + (
+                f" ({m['how']})" if m.get("how") and m.get("how") != "prompt" else "") + f", waited {_mins(made, got)}"
+            if m.get("next_turn"):
+                line += " (held for the manager's next turn, by design)"
+            elif wait >= WAIT_MIN:
+                notable.add(m["id"])
+                flags.append({"kind": "message waited", "weight": 2, "turn": m.get("turn", ""),
+                              "line": f"{m['id']} {m.get('from')} → {m.get('to')} waited {wait:.0f} min before "
+                                      f"{m.get('turn', '?')} read it", "excerpt": clip(R.strip(m.get("body") or ""), 300)})
+        elif st == "held":
+            why = {"by design": f"held by design ({m.get('kind') or m.get('reason') or ''}): never meant for "
+                                f"{m.get('to')}, not lost",
+                   "next turn": "held until the manager's next regular turn, by design",
+                   "discussion": "held for the discussion, by design; the manager's message when it closes replaces it"
+                   }.get(kind, f"held: {m.get('reason') or '?'}")
+            line = f"{head}, {why}" + ("" if kind == "by design" else f", {_mins(made, hi_ts)} so far")
+            if not kind:
+                notable.add(m["id"])
+        elif st == "superseded":
+            line = f"{head}, superseded {_hms(m.get('updated_at'))} by {m.get('by', '?')} before delivery"
+        else:
+            line = f"{head}, still waiting after {_mins(made, hi_ts)}"
+            if made is not None and (hi_ts - made) / 60 >= WAIT_MIN:
+                notable.add(m["id"])
+                flags.append({"kind": "message waited", "weight": 2, "turn": "",
+                              "line": f"{m['id']} {m.get('from')} → {m.get('to')} is still waiting after "
+                                      f"{(hi_ts - made) / 60:.0f} min", "excerpt": clip(R.strip(m.get("body") or ""), 300)})
+        lines.append((m["id"], line))
+    keep = [x for x in lines if x[0] in notable]
+    keep += [x for x in lines if x[0] not in notable][:max(0, MAX_LEDGER - len(keep))]
+    shown = [ln for mid, ln in lines if (mid, ln) in keep]
+    if len(lines) > len(shown):
+        shown.append(f"- … and {len(lines) - len(shown)} more, all delivered or held by design")
+    meant = len(picked) - counts.get("held by design", 0) - counts.get("superseded", 0)
+    counts["delivered_share"] = counts.get("delivered", 0) / meant if meant else None
+    return shown, counts, flags
+
+
+def questions(run_dir: Path, lo_ts: float, hi_ts: float) -> List[str]:
+    """Questions open in the window: who asked whom, when each opened and closed (or how long it has been open)."""
+    out = []
+    for q in (read_json(run_dir / "state.json", {}) or {}).get("questions") or []:
+        a, c = _ts(q.get("asked_at")), _ts(q.get("answered_at"))
+        if a is None or a > hi_ts + 1 or (c is not None and c < lo_ts):
+            continue
+        line = f"{q['id']}: {q.get('from', '?')} → {q.get('to', '?')} opened {_hms(q.get('asked_at'))}"
+        if q.get("status") == "open" or c is None:
+            line += f", still open after {_mins(a, hi_ts)}"
+        else:
+            by = f" by {q['answered_by']}" if q.get("answered_by") else ""
+            line += f", {q.get('status')}{by} {_hms(q.get('answered_at'))} (open {_mins(a, c)})"
+        out.append(line)
+    return out
 
 
 # --------------------------------------------------------------------------- analysis
@@ -154,7 +263,7 @@ def note_waits(run_dir: Path, lo_ts: float, hi_ts: float) -> List[Dict[str, Any]
 def trace(turns: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """For each turn: its input paragraphs, each with its origin and whether it repeats the agent's previous input."""
     prev_input: Dict[str, set] = {}
-    outs = [(t, norm(t.get("output") or ""), _ts(t.get("started_at")) or 0.0) for t in turns]
+    outs = [(t, norm(R.strip(t.get("output") or "")), _ts(t.get("started_at")) or 0.0) for t in turns]
     srcs = [(s, norm(s["text"])) for s in sources]
     traced = []
     for i, t in enumerate(turns):
@@ -180,7 +289,7 @@ def passable(src: Dict[str, Any], to: Dict[str, Any]) -> Tuple[str, Dict[str, in
     """The part of `src`'s reply that orch passes on to the agent of turn `to`, and what it withholds by design
     ({what: chars}): protocol tags (checklist, verdict, state…) never travel, a <message> goes only to the agent it
     names, and when the manager writes a <message> to someone, the rest of its reply is for the human."""
-    text = src.get("output") or ""
+    text = R.strip(src.get("output") or "")
     names = [to.get("agent") or "", ROLE.get(to.get("role"), "")]
     keep, withheld = [], {}
     mine = False
@@ -246,8 +355,9 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     for x in win:
         t, paras = x["turn"], x["paras"]
         who = _agent_of(t)
-        inp, out = t.get("input") or "", R.strip(t.get("output") or "")
-        asked = R.strip(inp)  # what the turn asked: without the reminders at its end (lessons §9)
+        # every check reads the message without orch's reminders at its end (lessons §9); *in* counts it that way
+        inp = asked = R.strip(t.get("input") or "")
+        out = R.strip(t.get("output") or "")
         rep = sum(len(p["text"]) for p in paras if p["repeat"])
         mix: Dict[str, int] = {}
         for p in paras:
@@ -258,7 +368,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
         est = turn_cost_basis(t) == "estimate"
         sess = f"resumed #{t.get('session_turn')}" if t.get("resumed_session") else "new"
         rem = f" (↺ {', '.join(t['reminders'])})" if t.get("reminders") else ""  # reminders sent at its end
-        rows.append(f"| {t['turn_id']} | {t.get('purpose', '')}{rem} | {t.get('status', '')} | {sess} | "
+        rows.append(f"| {t['turn_id']} | {_hms(t.get('started_at'))}–{_hms(t.get('ended_at'))} | "
+                    f"{t.get('purpose', '')}{rem} | {t.get('status', '')} | {sess} | "
                     f"{turn_model(t) or '?'} | {len(inp)} | {rep} | "
                     f"{len(out)} | {int(t.get('duration_s') or 0)} | {'~' if est else ''}{cost:.2f} | "
                     + ", ".join(f"{k} {v}" for k, v in sorted(mix.items(), key=lambda kv: -kv[1])) + " |")
@@ -316,13 +427,15 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
                                   f"{'is still waiting after' if w.get('pending') else 'waited'} {w['minutes']:.0f} min",
                           "excerpt": clip(w["text"], 300)})
 
-    qs = []
+    qs = questions(run_dir, lo_ts, hi_ts)
+    led, led_counts, led_flags = ledger(run_dir, lo_ts, hi_ts)
+    flags += led_flags
     for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if (run_dir / "events.jsonl").is_file() else []:
         try:
             e = json.loads(line)
         except ValueError:
             continue
-        if e.get("event") == "question" and lo_ts <= (_ts(e.get("ts")) or 0) <= hi_ts + 1:
+        if not (run_dir / "state.json").is_file() and e.get("event") == "question" and lo_ts <= (_ts(e.get("ts")) or 0) <= hi_ts + 1:
             qs.append(f"{e.get('qid')}: {e.get('frm')} → {e.get('to')}")
 
     # system prompts: only the ones that changed since the last audit
@@ -349,6 +462,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     stats["flags"] = flags
     stats["origin"] = origin
     stats["questions"] = qs
+    stats["ledger"] = led_counts
 
     md = [f"# Audit digest: rounds {lo}–{hi}",
           f"{len(win)} turns, {win[0]['turn'].get('started_at', '')[:16]} to "
@@ -359,17 +473,26 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           f"design; they are left out of the origins and repeats. *session*: *resumed #n* continues the agent's session at its n-th "
           f"turn, so the agent still has everything said before in it: a short message there is not a lost task. "
           f"*$*: the backend's figure; *~* marks Claude Code's own estimate for a model on another provider, priced "
-          f"at Claude rates, which is not what the provider charged — don't judge spend on it.",
+          f"at Claude rates, which is not what the provider charged — don't judge spend on it. Times are HH:MM:SS; "
+          f"*in* is the message without orch's reminders.",
           "", "## Turns", "",
-          "| turn | purpose | status | session | model | in | repeat | out | s | $ | origin of the message |",
-          "|---|---|---|---|---|---|---|---|---|---|---|", *rows,
+          "| turn | start–end | purpose | status | session | model | in | repeat | out | s | $ | origin of the message |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|", *rows,
           "", "## Who received text from whom (chars)", "",
           "| recipient | " + " | ".join(sorted({o for v in origin.values() for o in v})) + " |",
           "|---|" + "---|" * len({o for v in origin.values() for o in v})]
     cols = sorted({o for v in origin.values() for o in v})
     for who, v in sorted(origin.items()):
         md.append(f"| {who} | " + " | ".join(str(v.get(c, 0)) for c in cols) + " |")
-    md += ["", "## Questions raised", "", *(f"- {q}" for q in qs or ["none"])]
+    md += ["", "## Questions (opened and closed)", "", *(f"- {q}" for q in qs or ["none"])]
+    if led:
+        c = led_counts
+        share = f"{c['delivered_share']:.0%}" if c.get("delivered_share") is not None else "n/a"
+        md += ["", "## Messages (orch's routing ledger: what each recipient was actually given)", "",
+               f"{c['messages']} messages: " + ", ".join(f"{k} {v}" for k, v in c.items()
+                                                       if k not in ("messages", "delivered_share")) +
+               f". Delivered share of those meant to arrive (not held by design, not superseded): {share}. A message "
+               f"counts as delivered only when it was found in the recipient's actual prompt.", "", *led]
     md += ["", "## Relays (share of what orch passes on that reached the recipient, in chars; tags such as the "
                "critic's plan and checklist, and messages for someone else, are withheld by design and listed apart)", "",
            *(relays or ["none"])]
@@ -397,13 +520,13 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
 
 def _burst_flag(burst: List[Dict[str, Any]], flags: List[Dict[str, Any]]) -> None:
     if len(burst) >= 3:
-        short = sum(1 for t in burst if len((t.get("output") or "").strip()) < 1000)
+        short = sum(1 for t in burst if len(R.strip(t.get("output") or "")) < 1000)
         if short >= 2:
             flags.append({"kind": "burst of turns", "weight": 2, "turn": burst[0]["turn_id"],
                           "line": f"{len(burst)} {burst[0]['agent']} turns in a row ({burst[0]['turn_id']} … "
                                   f"{burst[-1]['turn_id']}), {short} with short replies: "
                                   + "; ".join(f"{t['turn_id'].split('-')[1]} {t.get('purpose')}: "
-                                              f"{norm(t.get('output') or '')[:80]!r}" for t in burst[:5]),
+                                              f"{norm(R.strip(t.get('output') or ''))[:80]!r}" for t in burst[:5]),
                           "excerpt": ""})
 
 

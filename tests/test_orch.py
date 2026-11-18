@@ -937,7 +937,7 @@ class TestManaged(unittest.TestCase):
         md, st = audit.build(rec.run_dir, 1, last)
         work = [t for t in turns(rec) if t["agent"] == "writer" and int(t["round"]) >= 1]
         for t in work:
-            self.assertIn(f"| {t['turn_id']} | work |", md)
+            self.assertRegex(md, rf"\| {t['turn_id']} \| [0-9:]+–[0-9:]+ \| work \|")
         crit = [t for t in turns(rec) if t["agent"] == "critic" and t.get("output")]
         self.assertIn("worker", st["origin"].get("critic", {}))  # the worker's report reached the critic
         self.assertIn("## System prompts", md)
