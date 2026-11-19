@@ -203,3 +203,39 @@ class TimelineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoldenEditTest(unittest.TestCase):
+    """I edit the golden board on the page: saved, refused on a newer file, and the manager is told what changed."""
+
+    def test_edit_golden(self):
+        from orch import boards as B
+        tmp = Path(tempfile.mkdtemp())
+        rd = make_run(tmp)
+        gp = tmp / "golden.md"
+        gp.write_text(B.GOLDEN_HEAD + "- Python 3 only.\n", encoding="utf-8")
+        st = json.loads((rd / "state.json").read_text())
+        st["golden"] = {"path": str(gp), "limit": 8000}
+        (rd / "state.json").write_text(json.dumps(st))
+        b = Board("m", lambda: rd)
+        g = b.state()["golden"]
+        self.assertEqual(g["raw"], gp.read_text())
+        # the manager edited it after I opened the editor: refused, nothing written
+        gp.write_text(g["raw"] + "- Tests use unittest.\n", encoding="utf-8")
+        r = b.edit_golden(g["raw"] + "- Mine.\n", g["hash"])
+        self.assertTrue(r.get("conflict"))
+        self.assertNotIn("Mine", gp.read_text())
+        # from the current text: saved, and one note to the manager with my change
+        g = b.state()["golden"]
+        r = b.edit_golden(g["raw"].replace("- Python 3 only.", "- Python 3.11 only."), g["hash"])
+        self.assertTrue(r.get("ok"))
+        self.assertIn("Python 3.11 only.", gp.read_text())
+        self.assertIn("Tests use unittest.", gp.read_text())
+        notes = [json.loads(p.read_text()) for p in (rd / "inbox").glob("*-board-note.json")]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("+- Python 3.11 only.", notes[0]["message"])
+        self.assertIn("-- Python 3 only.", notes[0]["message"])
+        self.assertNotIn("to", notes[0])  # to the manager, as from its usual user
+        # saving the same text again changes nothing and sends nothing
+        self.assertTrue(b.edit_golden(gp.read_text(), B.digest(gp.read_text())).get("unchanged"))
+        self.assertEqual(len(list((rd / "inbox").glob("*-board-note.json"))), 1)

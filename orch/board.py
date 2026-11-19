@@ -26,6 +26,7 @@ import gzip
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import threading
 import time
@@ -724,6 +725,38 @@ class Board:
         threading.Thread(target=work, daemon=True).start()
         return {"id": cid}
 
+    def edit_golden(self, text: str, base: Optional[str]) -> Dict[str, Any]:
+        """I edit the golden board on the page. Refused when the file changed since I opened it (the manager keeps it
+        too). The run sees the change by its hash and gives every agent the new board; the manager is also told what
+        I changed, so it keeps my edits."""
+        from . import boards as B
+        st = read_json(self.run_dir / "state.json", {}) or {}
+        path = (st.get("golden") or {}).get("path")
+        if not path:
+            return {"error": "this run has no golden board"}
+        p = Path(path)
+        old = B.read(p)
+        if base and B.digest(old) != base:
+            return {"error": "The golden board changed while you were editing (the manager edited it). Your text is "
+                             "kept in the editor: copy it, reload the board, and edit again.", "conflict": True}
+        new = text.replace("\r\n", "\n")
+        if not new.endswith("\n"):
+            new += "\n"
+        if new == old:
+            return {"ok": True, "unchanged": True}
+        tmp = p.with_name(p.name + ".edit")
+        tmp.write_text(new, encoding="utf-8")
+        os.replace(tmp, p)
+        import difflib
+        diff = "".join(difflib.unified_diff(B.golden_body(old).splitlines(True), B.golden_body(new).splitlines(True),
+                                            "before", "after", n=0))
+        if diff.strip():
+            lines = [ln for ln in diff.splitlines() if not ln.startswith(("---", "+++", "@@"))]
+            self.control({"kind": "note", "message": (
+                f"I edited the golden board ({p}) myself. Keep these changes; merge or reword only if you must, "
+                f"without changing their meaning:\n\n```diff\n" + "\n".join(lines) + "\n```")})
+        return {"ok": True, "hash": B.digest(new)}
+
     def chat_question_pending(self) -> bool:
         """A question the manager asked in a board chat that the run has not registered yet (it is open)."""
         rd = self.run_dir
@@ -833,9 +866,10 @@ def _golden(st: Dict[str, Any]) -> Dict[str, Any]:
     if not g.get("path"):
         return {}
     from . import boards as B
-    body = B.golden_body(B.read(Path(g["path"])))
+    raw = B.read(Path(g["path"]))
+    body = B.golden_body(raw)
     limit = int(g.get("limit") or 0)
-    return {"path": g["path"], "text": body, "chars": len(body), "limit": limit,
+    return {"path": g["path"], "text": body, "raw": raw, "hash": B.digest(raw), "chars": len(body), "limit": limit,
             "over": bool(limit) and len(body) > limit, "leaks": g.get("leaks") or {}}
 
 
@@ -1302,6 +1336,9 @@ def _handler(boards: Dict[str, Board]):
                 return self.js(b.chat(msg, qid=body.get("qid"), settle=settle, agent=body.get("agent") or None))
             if u.path == "/api/answer":
                 b.control({"kind": "answer", "qid": body.get("qid"), "message": msg})
+            elif u.path == "/api/golden":
+                r = b.edit_golden(str(body.get("text") or ""), body.get("base"))
+                return self.js(r, 409 if r.get("conflict") else 200)
             elif u.path == "/api/night":
                 st = read_json(b.run_dir / "state.json", {}) or {}
                 if any(q.get("to") == "human" and q.get("status") == "open" for q in st.get("questions") or []) \

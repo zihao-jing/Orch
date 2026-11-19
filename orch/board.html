@@ -239,8 +239,8 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
     <div class="tlbar" id="bfilter" style="margin:6px 0 0" title="Which conversations to show below"></div>
     <div id="sres" style="margin-top:10px"></div></div>
    <div id="timeline"></div>
-   <div class="card"><h2 id="gold-h">Golden board</h2><div id="golden"></div>
-    <details class="fold" id="dec-fold"><summary><b id="dec-h">Decisions record</b></summary><div id="decs"></div></details></div>
+   <details class="card bcard" id="gold-card" open><summary><h2 id="gold-h">Golden board</h2><span style="flex:1"></span><button class="sm" id="gold-edit" title="Edit the board yourself. Every agent gets the new board; the manager is told what you changed">✎ Edit</button></summary><div id="golden"></div>
+    <details class="fold" id="dec-fold"><summary><b id="dec-h">Decisions record</b></summary><div id="decs"></div></details></details>
    <details class="card ckp" id="qs-card"><summary><h2 id="qs-h">Questions</h2></summary><div id="qs"></div></details>
    <details class="card ckp" id="reviews-card" hidden><summary><h2>Review files</h2></summary><div id="reviews"></div></details>
   <details class="card ckp" id="audit-card" hidden><summary><h2 id="audit-h">Auditor</h2><span class="mute">click to load</span></summary><div id="audit"></div></details>
@@ -866,9 +866,14 @@ function renderReviews(mg){  // B9: the review files the manager wrote; comment 
         ${r.exists ? `<button class="sm" data-rc="${esc(r.path)}" title="Sends what you changed in the file (your comments) to the manager">↩ Send back comments</button>` : ''}</div>
         <div class="mute mono" style="font-size:11px">${esc(r.path)} — comment in this file, then send it back</div></div>`; }).join(''));
 }
+let goldEdit = null;  // while I edit: {text, base}; the poll then leaves the editor alone
+try { if (localStorage.getItem('orch-gold-shut') === '1') $('gold-card').open = false; } catch(e){}
+$('gold-card').addEventListener('toggle', e => { if (e.target !== $('gold-card')) return; try { localStorage.setItem('orch-gold-shut', $('gold-card').open ? '0' : '1'); } catch(err){} });
 function renderGolden(){  // the golden board (B3): the rules, preferences and key decisions every agent reads; the manager keeps it
   const G = D.golden || {}, warn = [];
   $('gold-h').textContent = 'Golden board' + (G.chars ? ` · ${G.chars.toLocaleString()} chars` : '');
+  $('gold-edit').hidden = !G.path || !!goldEdit;
+  if (goldEdit) return;
   if (G.over) warn.push(`<span class="pill p-warn">over ${(G.limit||0).toLocaleString()} characters: the manager was asked to prune it</span>`);
   const lk = Object.values(G.leaks || {}).flat();
   if (lk.length) warn.push(`<span class="pill p-warn">names ${esc([...new Set(lk)].join(', '))}: held from the agents below until rewritten</span>`);
@@ -877,6 +882,23 @@ function renderGolden(){  // the golden board (B3): the rules, preferences and k
   setHTML($('golden'), (warn.length ? `<div class="row">${warn.join(' ')}</div>` : '') + body
     + (G.path ? `<div class="mute mono" style="font-size:11px;margin-top:4px">${esc(G.path)}</div>` : ''));
 }
+$('gold-edit').addEventListener('click', e => {
+  e.preventDefault(); e.stopPropagation();  // a button in the summary: don't fold the card
+  const G = D.golden || {}; if (!G.path) return;
+  goldEdit = {text: G.raw || '', base: G.hash}; $('gold-card').open = true; $('gold-edit').hidden = true;
+  const rows = Math.min(30, Math.max(8, (G.raw || '').split('\n').length + 2));
+  setHTML($('golden'), `<textarea id="gold-ta" rows="${rows}" spellcheck="false" style="font:12.5px/1.5 ui-monospace,Menlo,monospace"></textarea>
+    <div class="row" style="margin-top:8px;gap:8px;align-items:center"><button class="pri sm" id="gold-save">Save</button><button class="sm" id="gold-cancel">Cancel</button>
+    <span class="mute" style="font-size:12px">Every agent gets the new board; the manager is told what you changed and keeps it.</span></div>`);
+  $('gold-ta').value = goldEdit.text; $('gold-ta').focus();
+});
+$('golden').addEventListener('click', async e => {
+  if (e.target.id === 'gold-cancel'){ goldEdit = null; $('golden')._h = null; renderGolden(); return; }
+  if (e.target.id !== 'gold-save') return;
+  e.target.disabled = true;
+  const j = await post('api/golden', {text: $('gold-ta').value, base: goldEdit.base});
+  if (j && j.ok){ goldEdit = null; $('golden')._h = null; renderGolden(); } else e.target.disabled = false;
+});
 function renderDecisions(){  // the register: everything settled, newest first; a record (the agents read the golden board)
   renderGolden();
   const ds = (D.decisions||[]).slice().reverse();
