@@ -11,7 +11,9 @@ Every signal is an XML-style tag with a start and an end, so orch never has to g
     <verdict>PASS</verdict>            the critic's verdict
     <score>4.5</score>                 the manager's overall score (out of 5)
     <decision>ACCEPT</decision>        the manager's decision: ACCEPT, REVISE, PAUSE or CONTINUE
-    <no-wait pid="123"/>               the worker: don't hold the review for this process
+    <wait-job/>                        the critic: the work depends on a job still running; wait for it (all the
+                                       running jobs, or <wait-job pid="123 456"/> for some of them)
+    <no-wait pid="123"/>               older: a worker's helper process the review need not wait for (still read)
     <state>…</state>                   the manager's working state (saved to its state.md)
     <preference to="critic">…</preference>  the manager: one line added to that agent's preference.md
     <instruction>…</instruction>       what the next agent must act on: passed on whole, in place of the rest of the reply
@@ -29,7 +31,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
+NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "wait-job", "no-wait", "state", "preference",
          "instruction", "rubric", "summary", "workers", "to")
 _ALT = "|".join(re.escape(n) for n in NAMES)
 _OPEN = re.compile(rf"<({_ALT})((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)
@@ -55,7 +57,7 @@ def parse(text: str) -> List[Tuple[str, Dict[str, str], str, int, int]]:
         o = opens[i]
         name = o.group(1).lower()
         attrs = {a.group(1).lower(): next(g for g in a.groups()[1:] if g is not None) for a in _ATTR.finditer(o.group(2) or "")}
-        if o.group(3):  # <no-wait pid="1"/>
+        if o.group(3):  # <wait-job pid="1"/>
             out.append((name, attrs, "", o.start(), o.end()))
             i += 1
             continue

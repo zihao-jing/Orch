@@ -25,7 +25,8 @@ in the terminal.
 ```bash
 cd Orch
 pip install -e .            # or: pip install pyyaml  and use `python -m orch`
-python -m unittest discover tests     # mock backend, no API calls
+python tests/run.py                   # all tests in parallel (~25 s); mock backend, no API calls
+python tests/run.py routing opencode  # only tests whose id contains a word; --failed reruns last failures
 
 cd ~/code/my-project
 orch init . --project       # scaffolds .orch/agents/{manager,critic,worker}/
@@ -199,7 +200,7 @@ it. The critic and the worker read it as their user's standing rules; a board th
 The board page shows it in place of the decisions list.
 | `<score>x</score>` + `<decision>ACCEPT\|REVISE</decision>` | manager, milestone review | accepts the milestone or sends it back |
 | `<decision>PAUSE\|CONTINUE</decision>` | manager, on a proposed pause | stops the run, or sends the critic what to do meanwhile |
-| `<no-wait pid="…"/>` | worker | the review does not wait for that process (orch finds the worker's detached jobs itself) |
+| `<wait-job/>` | critic | in place of a verdict: the step waits for the worker's running job(s) (`pid="…"` for some) |
 
 The boundaries: the manager doesn't edit files and keeps milestones, rubric and scores to itself; the critic only
 reviews (no edits, no fixes written for the worker, no wider scope); the worker changes only what the work needs,
@@ -281,13 +282,13 @@ then tells the worker what to do next.
 
 **Waiting for the worker's own jobs.** orch finds them itself: a process that started during the worker's turn, is
 still running after the turn ends, runs inside the workspace and was detached from the agent (`nohup … &`, so its
-parent is the system's init process) is a job; processes of mine, an editor or a terminal never count. While a job
-runs, the critic's review is held (no review spent on unfinished work, and no rounds spent asking whether it still
-runs): the progress checks below watch it instead. When it exits, the worker gets the turn back to finish, and the
-critic then reviews both replies together. A message for the worker while the job runs gives the worker a turn
-now; the job is watched again afterwards, not reviewed half done. `job_wait: 0` turns job waiting off; any other value
-caps the wait (seconds) only when progress checks are off for that worker (`check_every: 0`). `job_ignore` (regexes
-on the command line) and a worker's `<no-wait pid="…"/>` exclude long-lived helpers.
+parent is the system's init process) is a job; processes of mine, an editor or a terminal never count. orch never
+holds a review on its own: the critic's review lists what still runs, and the critic decides. If the work depends on
+a job, it replies `<wait-job/>` (or `<wait-job pid="…"/>`) instead of a verdict; the step then waits, the progress
+checks below watch the job, and when it exits the worker gets the turn back to finish before the critic reviews.
+A message for the worker while the job runs gives the worker a turn now; the critic decides again afterwards.
+`job_wait: 0` turns job detection off; any other value caps a wait only when progress checks are off for that
+worker (`check_every: 0`). `job_ignore` (regexes on the command line) excludes long-lived helpers.
 **Review now** on the board skips the wait.
 
 **The board** — `orch run --serve [--open]`, or `orch serve` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Every message is on the dashboard (B9b): milestone → step → one block per level (you ↔ manager, manager ↔ critic, critic ↔ worker, monitor → critic), one line per message that unfolds to its full text (loaded on demand and cached), checks, jobs and system lines behind a filter, a search box over all messages, and what needs you pinned at the top. There is no separate log page any more; **📄 Report** opens the run's static `report.html` (on a large run it cuts long prompts and replies and says where the whole text is). Files under `.orch/runs/` are served read-only at their path below `/log/`; nothing outside that folder is. To look from another machine, start it with `--host 0.0.0.0` (it then prints your network address). There is no password, so anyone who can reach the port can also steer and stop the run: use it on a network you trust, or keep the default and tunnel in (`ssh -L 8765:127.0.0.1:8765 you@this-machine`). Without the board: `orch approve [--note … | --revise …]`, `orch answer . Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
@@ -543,7 +544,7 @@ monitors:
         task: ...                   # pipeline: the worker's round-1 task
         reviews: [..]               # verifier only
         feedback_to: [..]           # verifier only
-        backend: claude | qwen | codex | agy | command | mock
+        backend: claude | qwen | opencode | codex | agy | command | mock
         backend_options: {...}
         working_dir: ...
         timeout: 1800
@@ -587,6 +588,7 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
 
 * **claude**: runs `claude -p --output-format json` with the prompt on stdin. The first turn uses `--session-id <uuid>`, and later turns use `--resume <uuid>`. The system prompt is passed with `--append-system-prompt`, or with `--system-prompt` if you set `system_prompt_mode: replace`. Options: `model`, `effort`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `add_dirs`, `max_turns`, `mcp_config`, `extra_args`, `executable`. Cost, number of turns and error flags are recorded for each turn.
   Agents run with no one watching, so set `permission_mode` (for example `acceptEdits`) and `allowed_tools`. Use `bypassPermissions` only in a sandbox.
+* **opencode**: the OpenCode CLI (tested with 2.3.2). Runs `opencode run --format json` with the prompt on stdin, and continues sessions with `--session <id>` (the `ses_…` id is read from the events). Orch never uses the default connection, where `opencode run` talks to OpenCode's shared background service, which does not see the per-turn config Orch passes in `OPENCODE_CONFIG_CONTENT`. OpenCode has no system-prompt flag: by default the system prompt goes in front of a session's first message; with `system_prompt_mode: replace` it becomes the `system` of an agent defined for the run (`orch-<role>`), which replaces OpenCode's own built-in prompt. A turn shown on the board, and every worker turn, runs against a private `opencode serve` that Orch starts for that turn (with a password of its own): the board gets the text word by word from the server's event stream, and an update for a worker (an urgent message, a critic's check-in) is steered into its running turn, as with Codex's app-server. Such a message counts as delivered once OpenCode reports it delivered to the model; one that arrives as the turn ends is answered before the turn returns. Set `transport: run` for a plain `opencode run --standalone` instead (text a part at a time, updates at the next turn); Orch also falls back to that when the server does not start. Options: `model` (`provider/model#variant`; `opencode models` lists them), `agent` (one of your own OpenCode agents), `auto` (default true: `--auto` approves every permission not explicitly denied, so a turn never waits on a permission that asks; `auto: false` turns it off), `disallowed_tools` (deny rules, with OpenCode's action names: `shell`, `edit`, `read`, `webfetch`, ...), `add_dirs` (`external_directory` allow rules), `config` (any OpenCode config merged into the per-run config; your own `OPENCODE_CONFIG_CONTENT` is kept), `system_prompt_mode` (`prepend|replace`), `archived` (default true: new sessions stay out of your session list), `thinking`, `transport` (`serve`, the default, or `run`), `extra_args`, `executable`. Claude-only options (`effort`, `max_turns`, `allowed_tools`, `disable_hooks`, `mcp_config`) are ignored; put effort in the model variant. Tokens are summed over the turn's steps; cost is recorded when the provider reports one. Sessions are compacted through a private `opencode serve` (`POST /api/session/<id>/compact`). Deny rules (`disallowed_tools`) still apply with `auto`; use them for hard limits. Experimental: OpenCode's CLI changes quickly.
 * **codex**: runs `codex exec --json` and continues sessions with `codex exec resume <id>`. Options: `model`, `effort` (sent as `model_reasoning_effort`), `sandbox`, `full_auto`, `extra_args`. This backend is experimental: Codex flags change between versions, so check them with `codex exec --help`.
   For incremental text on the board, set `backend_options.transport: app-server` (tested with Codex CLI 0.167.0).
   This uses `codex app-server` with `thread/start`, `thread/resume` and `turn/start`; text deltas and tool activity
@@ -674,7 +676,7 @@ fallback_cooldown: 18000                     # seconds to stay on a backup that 
 
 ```
 orch/config.py      schema, defaults merging, *_file includes, validation
-orch/backends.py    claude / qwen / codex / agy / command / mock + process runner (timeouts, stop, kill process group)
+orch/backends.py    claude / qwen / opencode / codex / agy / command / mock + process runner (timeouts, stop, kill process group)
 orch/controller.py  MonitorRunner: pipeline + llm modes, sessions, routing, retries, parallel stages
 orch/recorder.py    run directory, state, events, turn and round records, inbox / STOP control files
 orch/report.py      static HTML viewers

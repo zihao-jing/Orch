@@ -165,7 +165,7 @@ class TestRoleViews(unittest.TestCase):
         self.assertIn('to="Sam"` is the address of the person you instruct', sp["critic"])
         self.assertIn("Possible, but not suggested", sp["boss"])
         self.assertIn("does not know that I exist", sp["boss"])
-        self.assertIn("there is nobody\nelse to address", sp["writer"])
+        self.assertIn("`.orch/` folder", sp["writer"])
 
 
 if __name__ == "__main__":

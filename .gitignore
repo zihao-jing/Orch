@@ -226,3 +226,7 @@ examples/demo-runs/
 examples/demo-workspace/*
 !examples/demo-workspace/.gitkeep
 .DS_Store
+
+# test runner caches (tests/run.py)
+tests/.durations.json
+tests/.last_failed

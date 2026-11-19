@@ -308,6 +308,12 @@ items). If it changes your verdict, end with a new `<verdict>`.
 Please tell me how things stand{{limit_note}}: what was asked, what was done, what is still
 open, any risks, and anything you assumed while a question was open. Tables are welcome; keep the prose short.
 """,
+    # added to a review prompt when processes the worker started are still running: the critic decides
+    "critic_jobs_running": """\
+Still running after {{who}}'s turn: {{jobs}}. If the work you are reviewing depends on one of them (its results,
+its logs), reply with `<wait-job/>` (or `<wait-job pid="123"/>` for some of them) instead of a verdict: the step
+waits, the job is checked on while it runs, and {{who}} picks up again when it ends; anything you write to {{who}}
+now reaches them then. A process the result does not depend on (a dev server, a monitor) needs nothing from you.""",
     "worker_job_done": """\
 {{human_messages}}
 
@@ -546,8 +552,7 @@ Running now: {{what}}, for {{minutes}} min, in `{{cwd}}`.
 
 {{step}}
 
-Look at the logs and outputs, run status commands if useful, and reply in a few lines of evidence: one line per item
-you can check, then one on activity. No verdict. End with `<status>ok|quiet|off-track|stopped</status>`.""",
+Reply in a few lines and end with `<status>ok|quiet|off-track|stopped</status>`.""",
     # B8: the worker's model changed (a retry fell back to a backup, or the settings changed); the critic is told once,
     # in one neutral line, at its next turn. {{who}}: "The person you instruct" (one worker) or that worker's name
     "worker_model_changed": "{{who}} is now on a different model; keep instructions short and explicit.",

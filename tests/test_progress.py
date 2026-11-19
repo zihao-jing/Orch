@@ -150,7 +150,7 @@ class TestProgressRun(unittest.TestCase):
         main = [t for t in ts if t["agent"] == "critic"]
         self.assertGreaterEqual(len(side), 2)
         self.assertTrue(all(t["role"] == "monitor" and t["purpose"] == "check" for t in side))
-        self.assertIn("How a quick check works", side[0]["system_prompt"])  # the monitor's protocol, not the critic's
+        self.assertIn("# Quick checks", side[0]["system_prompt"])  # the monitor's protocol, not the critic's
         self.assertEqual(len({t["session_id"] for t in side}), len(side))  # a fresh session for each check
         self.assertEqual(len({t["session_id"] for t in main}), 1)  # the critic's own conversation is untouched
         self.assertFalse(set(t["session_id"] for t in side) & set(t["session_id"] for t in main))
@@ -184,7 +184,7 @@ class TestProgressRun(unittest.TestCase):
         self.assertEqual(status, "completed")
         ts = turns(rec)
         seq = [(t["agent"], t["purpose"]) for t in ts if t["purpose"] in ("work", "verify", "incoming")]
-        self.assertEqual(seq[:3], [("writer", "work"), ("writer", "work"), ("critic", "verify")])
+        self.assertEqual(seq[:4], [("writer", "work"), ("critic", "verify"), ("writer", "work"), ("critic", "verify")])
         job_checks = [t for t in ts if t["purpose"] == "check" and t.get("watch_kind") == "job"]
         self.assertGreaterEqual(len(job_checks), 2)
         self.assertIn("background job", job_checks[0]["input"])

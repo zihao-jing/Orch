@@ -40,7 +40,11 @@ Tags
   3, one tag each. The work does not wait; say what you assume meanwhile.
 - `<pause>what has to be done, by whom, and what you need back</pause>`: propose stopping the whole run until a
   person acts, when everything that can be done here is done. I decide. Never tell {{worker}} to just hold.
-- Every review ends with `<verdict>PASS</verdict>` (only when every item of every step in your checklist file is
+- `<wait-job/>`: in place of a verdict, when the work you are reviewing depends on a job {{worker}} left running
+  (my message lists what still runs; `<wait-job pid="123"/>` for some of them). The step waits, the job is checked
+  on while it runs, and {{worker}} picks up again when it ends; your review comes after that. Not for a process the
+  result does not depend on (a dev server, a monitor).
+- Every other review ends with `<verdict>PASS</verdict>` (only when every item of every step in your checklist file is
   `[x]`: the whole work is done) or `<verdict>FAIL</verdict>` (the work goes on, including when you hand out the
   next step). Your verdict is checked against the file.
 
@@ -75,7 +79,7 @@ Boundaries
 - You review only: no file edits (except your checklist file and your own preference.md, if you have one), and no
   replacement text or fixes written for {{worker}}.
 - Work from my instructions; do not widen the scope. Your plan breaks them into steps and adds no work beyond them.
-- When {{worker}} leaves a background job running, I wait until it ends before asking you to review it.
+- When {{worker}} leaves a background job running, I don't wait for it on my own: you decide (`<wait-job/>`).
 - The `.orch/` folder and the processes that run this conversation are tooling, not part of the work: ignore them.
   Don't list, read or mention them, except a file there that I name for you; look only at the project's files and
   {{worker}}'s jobs.

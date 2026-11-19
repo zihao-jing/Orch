@@ -1049,6 +1049,7 @@ class TestManaged(unittest.TestCase):
         self.assertIn("Urgent check-in did not finish", (rec.run_dir / "progress.md").read_text())
 
     def _critic_codex_update(self, mode="steer"):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))  # found whether run from the repo root or tests/
         from test_codex_stream import PEER
         peer = self.tmp / "peer"
         peer.write_text("#!" + sys.executable + "\n" + PEER)
@@ -1707,8 +1708,10 @@ class TestManaged(unittest.TestCase):
                 self.assertEqual(state["managed"]["job"], before)
                 self.assertIsNone(jobs[0].poll())
                 self.assertFalse(holder)
-                self.assertFalse(any((read_json(p) or {}).get("purpose") == "verify"
-                                     for p in rd.glob("rounds/r*/t*.json")))
+                verifies = [read_json(p) for p in rd.glob("rounds/r*/t*.json")
+                            if (read_json(p) or {}).get("purpose") == "verify"]
+                self.assertEqual(len(verifies), 1)  # the review that chose to wait; none since
+                self.assertIn("<wait-job/>", verifies[0]["output"])
                 (rd / "inbox" / "release.json").write_text(json.dumps({"kind": "job"}))
                 th.join(10)
                 self.assertFalse(th.is_alive())
@@ -1755,7 +1758,7 @@ class TestManaged(unittest.TestCase):
         self.assertIn('<message to="you">', sp["critic"])
         self.assertNotRegex(sp["critic"], r"(?i)\b(manager|user|human|Alex)\b")
         self.assertNotRegex(sp["writer"], r"(?i)\b(manager|critic|user|human|Alex|Jordan)\b")
-        self.assertIn('<no-wait pid="123"/>', sp["writer"])
+        self.assertIn("nohup", sp["writer"])
         self.assertNotIn("{{", sp["writer"])
         off = managed(name="n", controller={"protocol": False}, mgr={"milestones": 1})
         (self.tmp / "b").mkdir()
@@ -1769,7 +1772,11 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(status, "completed")
         ts = turns(rec)
         seq = [(t["agent"], t["purpose"]) for t in ts if t["purpose"] in ("work", "verify")]
-        self.assertEqual(seq[:3], [("writer", "work"), ("writer", "work"), ("critic", "verify")])
+        # never waited on by itself: the critic sees the running job, waits for it, then reviews the result
+        self.assertEqual(seq[:4], [("writer", "work"), ("critic", "verify"), ("writer", "work"), ("critic", "verify")])
+        first = [t for t in ts if t["purpose"] == "verify"][0]
+        self.assertIn("sleep 2.31", first["input"])
+        self.assertIn("<wait-job/>", first["output"])
         done = [t for t in ts if t["purpose"] == "work"][1]["input"]
         self.assertIn("sleep 2.31", done)
         self.assertIn("has finished", done)
@@ -1787,7 +1794,7 @@ class TestManaged(unittest.TestCase):
         status, rec = run(make_cfg(self.tmp, [managed(controller={"tag_reminder": 1}, mgr={"milestones": 1})]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
-        self.assertTrue(all("protocol" in (t.get("reminders") or []) for t in ts if t["role"] != "auditor"))
+        self.assertTrue(all("protocol" in (t.get("reminders") or []) for t in ts if t["role"] in ("manager", "verifier")))
         crit = next(t for t in ts if t["agent"] == "critic")["input"]
         self.assertIn('<message to="you">', crit)
         status, rec = run(make_cfg(self.tmp / "x" if (self.tmp / "x").mkdir() is None else self.tmp,
@@ -1965,7 +1972,7 @@ class TestProjectFolder(unittest.TestCase):
         self.assertNotRegex(dsp.lower().replace("`.orch/`", ""), r"critic|manager|orch\b|agents")
         (d / "agents/worker/system_prompt.md").write_text("You are {{worker}}; {{critic}} reviews you.")
         wsp = load_config(str(d)).monitors[0].agent("worker").current_system_prompt()
-        self.assertTrue(wsp.startswith("You are the worker; the critic reviews you.\n\n# How we work"), wsp[:120])
+        self.assertTrue(wsp.startswith("You are the worker; the critic reviews you.\n\n- Start anything"), wsp[:120])
 
     def test_conflicting_workflow_setting_and_run(self):
         cli.main(["init", str(self.tmp), "--project"])
@@ -2548,6 +2555,412 @@ class TestQwen(unittest.TestCase):
         from orch.backends import BACKENDS, QwenBackend
         self.assertIsInstance(BACKENDS["qwen"], QwenBackend)
         self.assertEqual(BACKENDS["qwen"].name, "qwen")
+
+
+FAKE_OPENCODE = r'''#!/usr/bin/env python3
+"""Replays OpenCode 2.3.2: `run --format json` events (with --standalone, or against a server); `serve`, a server
+with the live event stream, steering (POST .../prompt, delivery steer), wait and the message list; and the `api`
+calls used to compact a session. A run against a server reports its live events to the server (/_emit), which
+broadcasts them, and takes steered messages from it (/_inbox) between its two steps, as OpenCode does."""
+import base64, json, os, sys, threading, time, urllib.request
+args = sys.argv[1:]
+with open(os.environ["FAKE_OC_LOG"], "a") as f:
+    f.write(json.dumps({"args": args, "stdin": "" if args[0] in ("api", "serve") else sys.stdin.read(),
+                        "config": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+                        "password": os.environ.get("OPENCODE_SERVER_PASSWORD")}) + "\n")
+mode = os.environ.get("FAKE_OC_MODE", "ok")
+if args[0] == "serve":
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    pw = os.environ.get("OPENCODE_SERVER_PASSWORD") or ""
+    lock = threading.Lock()
+    subs, inbox, pending = [], [], []   # event subscribers; steered texts; admitted, not yet delivered
+
+    def broadcast(ev):
+        with lock:
+            for q in subs:
+                q.append(ev)
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def body(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(n)) if n else None
+
+        def reply(self, code, obj):
+            raw = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def authed(self):
+            want = "Basic " + base64.b64encode(f"opencode:{pw}".encode()).decode()
+            if self.headers.get("Authorization") != want:
+                self.reply(401, {"error": "unauthorized"})
+                return False
+            return True
+
+        def do_GET(self):
+            if self.path == "/_pending":  # from the fake run
+                with lock:
+                    return self.reply(200, list(pending))
+            if self.path == "/_inbox":
+                with lock:
+                    out, pending[:] = list(pending), []
+                return self.reply(200, out)
+            if not self.authed():
+                return
+            if self.path == "/api/event":
+                q = []
+                with lock:
+                    subs.append(q)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(b'data: {"type":"server.connected","data":{}}\n\n')
+                self.wfile.flush()
+                while True:
+                    with lock:
+                        out, q[:] = list(q), []
+                    for ev in out:
+                        self.wfile.write(("data: " + json.dumps(ev) + "\n\n").encode())
+                    self.wfile.flush()
+                    time.sleep(0.01)
+            elif self.path.endswith("/message"):
+                self.reply(200, {"data": [{"id": "msg_f", "type": "assistant", "content": [
+                    {"type": "reasoning", "text": "hmm"}, {"type": "text", "text": "Answered late: " + inbox[-1]}]}
+                    if inbox else {"id": "m2", "type": "assistant", "content": []}]})
+            else:
+                self.reply(404, {})
+
+        def do_POST(self):
+            if self.path == "/_emit":  # from the fake run: what the real server would broadcast
+                broadcast(self.body())
+                return self.reply(200, {})
+            if not self.authed():
+                return
+            if self.path.endswith("/prompt"):
+                b = self.body()
+                with lock:
+                    inbox.append(b["text"])
+                    iid = f"msg_steer{len(inbox)}"
+                    pending.append({"id": iid, "text": b["text"], "delivery": b.get("delivery")})
+                self.reply(200, {"data": {"id": iid, "type": "user", "payload": {"text": b["text"]},
+                                          "delivery": b.get("delivery")}})
+            elif self.path.endswith("/wait"):
+                with lock:
+                    late, pending[:] = list(pending), []
+                sid = self.path.split("/")[4]
+                for item in late:  # the server answers what the run left undelivered
+                    broadcast({"type": "session.inbox.delivered", "data": {"sessionID": sid, "inboxID": item["id"]}})
+                    broadcast({"type": "session.step.ended", "data": {
+                        "sessionID": sid, "assistantMessageID": "msg_f",
+                        "tokens": {"input": 7, "output": 3, "reasoning": 0, "cache": {"read": 100, "write": 0}}}})
+                time.sleep(0.1)
+                self.reply(200, {})
+            else:
+                self.reply(404, {})
+
+    ThreadingHTTPServer(("127.0.0.1", int(args[args.index("--port") + 1])), H).serve_forever()
+if args[0] == "api":
+    path = next(a for a in args if a.startswith("/"))
+    if path.endswith("/compact"):
+        print(json.dumps({"data": {"id": "msg_c1", "type": "compaction", "payload": {}, "delivery": "steer"}}))
+    elif path.endswith("/wait"):
+        print("")
+    else:
+        status = "failed" if mode == "compact_fails" else "completed"
+        print(json.dumps({"data": [{"id": "msg_i", "type": "idle"},
+                                   {"id": "msg_c1", "type": "compaction", "status": status, "summary": "## Objective"},
+                                   {"id": "msg_u", "type": "user", "text": "hi"}], "cursor": None}))
+    sys.exit(0)
+server = args[args.index("--server") + 1] if "--server" in args else None
+
+
+def http(method, path, body=None):
+    req = urllib.request.Request(server + path, method=method, data=json.dumps(body).encode() if body else None,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5) as r:
+        return json.loads(r.read() or b"null")
+
+
+def live(kind, **data):
+    if server:
+        http("POST", "/_emit", {"type": kind, "data": {"sessionID": sid, **data}})
+
+
+sid = args[args.index("--session") + 1] if "--session" in args else "ses_new1"
+
+
+def ev(kind, msg, **part):
+    return {"type": kind, "timestamp": 1, "sessionID": sid, "part": {"sessionID": sid, "messageID": msg, **part}}
+
+
+def out(e):
+    print(json.dumps(e), flush=True)
+
+
+if mode == "error":
+    out({"type": "error", "timestamp": 1, "sessionID": sid, "error": {"type": "unknown", "message": 'Agent not found: "x"'}})
+    sys.exit(1)
+
+
+def step(msg, text, tokens, reason, tool=False):
+    out(ev("step_start", msg, type="step-start"))
+    live("session.step.started", assistantMessageID=msg, model={"id": "m", "providerID": "p", "variant": "high"})
+    live("session.text.started", assistantMessageID=msg, ordinal=0)
+    words = text.split(" ")
+    for i, w in enumerate(words if mode != "lossy" else words[:-1]):  # lossy: a slow stream lost the last delta
+        live("session.text.delta", assistantMessageID=msg, ordinal=0, delta=(w if i == 0 else " " + w))
+    live("session.text.ended", assistantMessageID=msg, ordinal=0, text=text)
+    time.sleep(0.2 if server else 0)  # the server's stream runs ahead of the run's own output, as in OpenCode
+    out(ev("text", msg, type="text", text=text))
+    if tool:
+        out(ev("tool_use", msg, type="tool", tool="shell",
+               state={"status": "completed", "input": {"command": "echo probe123"}, "output": "probe123\n"}))
+    live("session.step.ended", assistantMessageID=msg, tokens=tokens)
+    out(ev("step_finish", msg, type="step-finish", reason=reason, cost=0.001 if tool else 0.002, tokens=tokens))
+
+
+step("m1", "Let me check.", {"input": 52, "output": 34, "reasoning": 45, "cache": {"read": 8398, "write": 0}},
+     "tool-calls", tool=True)
+if mode == "cut":
+    sys.exit(0)
+final = "Output: probe123"
+if mode == "steer":  # the tool runs a while; a message steered meanwhile is delivered before the next step
+    end = time.time() + 8
+    while time.time() < end:
+        got = http("GET", "/_inbox")
+        if got:
+            live("session.inbox.delivered", inboxID=got[0]["id"])
+            final = "Steered: " + got[0]["text"]
+            break
+        time.sleep(0.05)
+step("m2", final, {"input": 103, "output": 27, "reasoning": 23, "cache": {"read": 8444, "write": 10}}, "stop")
+if mode == "late":  # a message admitted as the run ends: the run returns before it is delivered
+    end = time.time() + 8
+    while time.time() < end and not http("GET", "/_pending"):
+        time.sleep(0.05)
+'''
+
+
+class TestOpenCode(unittest.TestCase):
+    USAGE = {"input_tokens": 155, "output_tokens": 61, "reasoning_tokens": 68,
+             "cache_read_input_tokens": 16842, "cache_creation_input_tokens": 10}
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.exe = self.d / "opencode"
+        self.exe.write_text(FAKE_OPENCODE.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
+        self.exe.chmod(0o755)
+        self.log = self.d / "calls.jsonl"
+
+    def req(self, sid=None, opts=None, on_event=None, mode="ok", prompt="hello", poll=None, on_message=None):
+        from orch.backends import TurnRequest
+        return TurnRequest("oc", "worker", prompt, "be brief", sid, str(self.d), 30,
+                           {"executable": str(self.exe), **(opts or {})},
+                           env={"FAKE_OC_LOG": str(self.log), "FAKE_OC_MODE": mode}, on_event=on_event,
+                           poll_messages=poll, on_message=on_message)
+
+    def calls(self):
+        return [json.loads(x) for x in self.log.read_text().splitlines()]
+
+    def runs(self):
+        return [c for c in self.calls() if c["args"][0] == "run"]
+
+    @staticmethod
+    def pairs(events):
+        return [(e["k"], e.get("s")) for e in events]
+
+    def test_unwatched_turn_runs_standalone(self):
+        from orch.backends import OpenCodeBackend
+        res = OpenCodeBackend().run(self.req(opts={"model": "p/m#high"}), lambda: False)
+        self.assertEqual((res.status, res.output, res.session_id), ("ok", "Output: probe123", "ses_new1"))
+        self.assertEqual([c["args"][0] for c in self.calls()], ["run"])  # no server for a turn nobody watches
+        call = self.calls()[0]
+        self.assertEqual(call["args"][:5], ["run", "--standalone", "--format", "json", "--archived"])
+        self.assertIn("--model p/m#high", " ".join(call["args"]))
+        self.assertNotIn("--agent", call["args"])
+        self.assertIn("--auto", call["args"])  # on by default: no one answers a permission that asks
+        self.assertIsNone(call["config"])  # nothing to configure
+        self.assertTrue(call["stdin"].startswith("<system_instructions>\nbe brief"))
+        self.assertTrue(call["stdin"].endswith("hello"))
+        self.assertEqual(res.meta["usage"], self.USAGE)
+        self.assertAlmostEqual(res.meta["total_cost_usd"], 0.003)
+        self.assertEqual((res.meta["models"], res.meta["num_turns"]), (["p/m#high"], 2))
+        self.assertNotIn("transport", res.meta)
+
+    def test_watched_turn_streams_text_once_from_the_server(self):
+        from orch.backends import OpenCodeBackend
+        events = []
+        res = OpenCodeBackend().run(self.req(opts={"model": "p/m#high"}, on_event=events.append), lambda: False)
+        self.assertEqual((res.status, res.output, res.session_id), ("ok", "Output: probe123", "ses_new1"))
+        serve, run = self.calls()[0], self.runs()[0]
+        self.assertEqual(serve["args"][0], "serve")
+        port = serve["args"][serve["args"].index("--port") + 1]
+        self.assertEqual(run["args"][:5], ["run", "--server", f"http://127.0.0.1:{port}", "--format", "json"])
+        self.assertTrue(serve["password"])  # orch's own, per turn; the server refuses requests without it
+        kinds = self.pairs(events)
+        self.assertEqual(kinds[:2], [("session", "ses_new1"), ("input_accepted", None)])
+        self.assertEqual([k for k, _ in kinds].count("session"), 1)
+        self.assertIn(("tool", "shell: echo probe123"), kinds)
+        self.assertEqual([k for k, _ in kinds].count("break"), 2)
+        texts = [s for k, s in kinds if k == "text"]
+        self.assertEqual(texts, ["Let", " me", " check.", "Output:", " probe123"])  # word by word, each once
+        self.assertEqual(res.meta["usage"], self.USAGE)
+        self.assertEqual((res.meta["transport"], res.meta["text_deltas"]), ("serve", 5))
+        self.assertEqual(res.meta["models"], ["p/m"])  # the model that answered, from the server
+        self.assertNotIn("warning", res.meta)
+
+    def test_stream_gaps_are_filled_from_the_full_text(self):
+        from orch.backends import OpenCodeBackend
+        events = []
+        res = OpenCodeBackend().run(self.req(on_event=events.append, mode="lossy"), lambda: False)
+        self.assertEqual(res.output, "Output: probe123")
+        self.assertEqual("".join(e["s"] for e in events if e["k"] == "text"), "Let me check.Output: probe123")
+
+    def test_message_steered_into_the_running_turn(self):
+        from orch.backends import OpenCodeBackend
+        notes = [{"id": "wm1", "message": "Also add the missing case."}]
+        statuses = []
+        events = []
+        res = OpenCodeBackend().run(self.req(
+            mode="steer", on_event=events.append,
+            poll=lambda: [n for n in notes if n["id"] not in [s[0] for s in statuses]],
+            on_message=lambda i, s, d: statuses.append((i, s, d.get("via")))), lambda: False)
+        self.assertEqual((res.status, res.output), ("ok", "Steered: Also add the missing case."))
+        self.assertEqual(statuses, [("wm1", "sending", "steer"), ("wm1", "accepted", "steer")])
+        self.assertEqual(res.meta["steered"], 1)
+        self.assertNotIn("steer_followup", res.meta)
+        self.assertIn(("tool", "Additional instruction accepted; current tools continue."), self.pairs(events))
+        self.assertEqual(len(self.runs()), 1)  # the same run went on: never interrupted or restarted
+
+    def test_message_admitted_as_the_run_ends_is_answered_before_the_turn_returns(self):
+        from orch.backends import OpenCodeBackend
+        notes = []
+        statuses = []
+
+        def on_event(ev):
+            if ev["k"] == "text" and "probe123" in ev.get("s", "") and not notes:
+                notes.append({"id": "wm2", "message": "Reply again."})
+        res = OpenCodeBackend().run(self.req(
+            mode="late", on_event=on_event,
+            poll=lambda: [n for n in notes if n["id"] not in [s[0] for s in statuses]],
+            on_message=lambda i, s, d: statuses.append((i, s))), lambda: False)
+        self.assertEqual((res.status, res.output), ("ok", "Answered late: Reply again."))
+        self.assertTrue(res.meta["steer_followup"])
+        self.assertEqual(statuses, [("wm2", "sending"), ("wm2", "accepted")])
+        self.assertEqual(res.meta["usage"]["input_tokens"], 155 + 7)  # the follow-up step counts too
+
+    def test_unwatched_worker_turn_still_takes_messages(self):
+        from orch.backends import OpenCodeBackend
+        res = OpenCodeBackend().run(self.req(poll=lambda: [], on_message=lambda *a: None), lambda: False)
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(self.calls()[0]["args"][0], "serve")
+
+    def test_transport_run_and_a_server_that_does_not_start(self):
+        from orch.backends import OpenCodeBackend
+        events = []
+        res = OpenCodeBackend().run(self.req(opts={"transport": "run"}, on_event=events.append), lambda: False)
+        self.assertEqual(res.output, "Output: probe123")
+        self.assertEqual([c["args"][0] for c in self.calls()], ["run"])
+        self.assertIn(("text", "Let me check."), self.pairs(events))  # a part at a time
+        self.assertEqual(OpenCodeBackend().run(self.req(opts={"transport": "x"}), lambda: False).status, "error")
+        broken = self.d / "broken"
+        broken.write_text(f'#!/bin/sh\nif [ "$1" = serve ]; then echo boom >&2; exit 3; fi\nexec "{self.exe}" "$@"\n')
+        broken.chmod(0o755)
+        res = OpenCodeBackend().run(self.req(opts={"executable": str(broken)}, on_event=events.append), lambda: False)
+        self.assertEqual((res.status, res.output), ("ok", "Output: probe123"))  # ran without the live transport
+        self.assertIn("boom", res.meta["warning"])
+
+    def test_stop_ends_the_turn_and_the_server(self):
+        import socket
+        from orch.backends import OpenCodeBackend
+        t0 = time.monotonic()
+        res = OpenCodeBackend().run(self.req(mode="steer", poll=lambda: [], on_message=lambda *a: None),
+                                    lambda: time.monotonic() - t0 > 1.5)
+        self.assertEqual(res.status, "stopped")
+        self.assertLess(time.monotonic() - t0, 8)
+        port = int(self.calls()[0]["args"][self.calls()[0]["args"].index("--port") + 1])
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+
+    def test_resume_replace_mode_and_permissions(self):
+        from orch.backends import OpenCodeBackend
+        res = OpenCodeBackend().run(self.req(sid="ses_old", opts={
+            "system_prompt_mode": "replace", "disallowed_tools": "webfetch,websearch", "add_dirs": ["/x"],
+            "permission_mode": "bypassPermissions", "effort": "high", "config": {"compaction": {"auto": True}}},
+            on_event=lambda e: None), lambda: False)
+        self.assertEqual((res.status, res.session_id), ("ok", "ses_old"))
+        serve, call = self.calls()[0], self.runs()[0]
+        a = call["args"]
+        self.assertEqual(a[a.index("--session") + 1], "ses_old")
+        self.assertNotIn("--archived", a)
+        self.assertEqual(a[a.index("--agent") + 1], "orch-worker")
+        self.assertIn("--auto", a)
+        self.assertEqual(call["stdin"], "hello")  # the system prompt is the agent's, every turn
+        cfg = json.loads(serve["config"])  # the server runs the turn: it must know the agent
+        self.assertEqual(cfg["agents"]["orch-worker"], {"mode": "primary", "system": "be brief"})
+        self.assertEqual(cfg["permissions"], [
+            {"action": "webfetch", "resource": "*", "effect": "deny"},
+            {"action": "websearch", "resource": "*", "effect": "deny"},
+            {"action": "external_directory", "resource": "/x/*", "effect": "allow"}])
+        self.assertEqual(cfg["compaction"], {"auto": True})
+
+    def test_auto_can_be_turned_off(self):
+        from orch.backends import OpenCodeBackend
+        cmd, _, _ = OpenCodeBackend().build(self.req(opts={"auto": False}))
+        self.assertNotIn("--auto", cmd)
+
+    def test_user_config_content_is_kept(self):
+        from orch.backends import OpenCodeBackend
+        r = self.req(opts={"disallowed_tools": ["shell"]})
+        r.env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permissions": [{"action": "read", "resource": "*.env",
+                                                                         "effect": "deny"}], "theme": "x"})
+        _, env, _ = OpenCodeBackend().build(r)
+        cfg = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(cfg["theme"], "x")
+        self.assertEqual([p["action"] for p in cfg["permissions"]], ["read", "shell"])
+
+    def test_error_event_and_cut_off_turn(self):
+        from orch.backends import OpenCodeBackend
+        for watch in (None, lambda e: None):
+            res = OpenCodeBackend().run(self.req(mode="error", on_event=watch), lambda: False)
+            self.assertEqual((res.status, res.output), ("error", ""))
+            self.assertIn("Agent not found", res.meta["error"])
+            self.assertIn("Agent not found", res.stderr)
+            self.assertTrue(res.raw)  # the event stream is kept apart, never the reply
+            res = OpenCodeBackend().run(self.req(mode="cut", on_event=watch), lambda: False)
+            self.assertEqual((res.status, res.output), ("ok", "Let me check."))
+
+    def test_compact_goes_through_the_service_api(self):
+        from orch.backends import OpenCodeBackend
+        self.assertIsNone(OpenCodeBackend().compact(self.req(), lambda: False))
+        res = OpenCodeBackend().compact(self.req(sid="ses_9"), lambda: False)
+        self.assertEqual((res.status, res.output, res.session_id), ("ok", "## Objective", "ses_9"))
+        self.assertTrue(res.meta["compacted"])
+        calls = self.calls()
+        self.assertEqual(calls[0]["args"][0], "serve")  # a private server, with the turn's own config
+        port = calls[0]["args"][calls[0]["args"].index("--port") + 1]
+        self.assertEqual([c["args"][1:3] for c in calls[1:]], [["--server", f"http://127.0.0.1:{port}"]] * 3)
+        self.assertEqual([tuple(c["args"][3:5]) for c in calls[1:]],
+                         [("POST", "/api/session/ses_9/compact"), ("POST", "/api/experimental/session/ses_9/wait"),
+                          ("GET", "/api/session/ses_9/message")])
+        OpenCodeBackend().compact(self.req(sid="ses_9", opts={"system_prompt_mode": "replace"}), lambda: False)
+        serve = [c for c in self.calls() if c["args"][0] == "serve"][-1]
+        self.assertIn("orch-worker", json.loads(serve["config"])["agents"])  # the session's agent is known
+        res = OpenCodeBackend().compact(self.req(sid="ses_9", mode="compact_fails"), lambda: False)
+        self.assertEqual(res.status, "error")
+        self.assertIn("compaction failed", res.stderr)
+
+    def test_registered(self):
+        from orch.backends import BACKENDS, OpenCodeBackend
+        self.assertIsInstance(BACKENDS["opencode"], OpenCodeBackend)
 
 
 class TestManagerChatSession(unittest.TestCase):

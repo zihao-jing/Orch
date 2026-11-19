@@ -356,13 +356,14 @@ class ControllerConfig:
     approve_milestones: bool = True  # pause for my OK after the manager accepts each milestone
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
     protocol: bool = True  # managed mode: add orch's fixed protocol (signals, who reads what, boundaries) to each prompt
-    job_ignore: List[str] = field(default_factory=list)  # regexes: commands never waited on (e.g. a status loop)
+    job_ignore: List[str] = field(default_factory=list)  # regexes: commands never listed as running jobs (a status loop)
     # managed mode: older setting, the chance per turn of the protocol reminder (0 = off); now sets its schedule
     tag_reminder: Optional[float] = None
     # managed mode: short reminders at intervals (orch/reminders.py): [{id, text, to, every | random, skip}]
     reminders: List[Dict[str, Any]] = field(default_factory=lambda: R.parse(None))
-    # 0 = never hold a review for a job the worker left running; otherwise progress checks watch the job (B5), and this
-    # caps the wait (seconds) only for a worker whose checks are off
+    # 0 = don't look for jobs the worker left running. Otherwise the critic's review lists them and the critic decides
+    # whether the step waits (<wait-job/>); progress checks watch such a wait (B5), and this caps it (seconds) only for
+    # a worker whose checks are off
     job_wait: int = 21600
     checkin_every: int = 0  # every N rounds a short update for the manager: from the critic's plan when it has one (0 = off)
     # a reply holding a line like this sends questions one level up (worker -> critic -> manager -> me)

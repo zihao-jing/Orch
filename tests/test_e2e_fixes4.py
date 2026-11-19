@@ -152,10 +152,13 @@ class TestParallelReview(Base):
         status, rec = run(self.cfg(critic={"replies": {"brief": [
             'Plan.\n<workers n="3" steps="1,2,3">independent</workers>'], "par_assign": [ASSIGN],
             "par_review": rv, "verify": ["All hold. <verdict>PASS</verdict>"]},
-            "files": {"brief": [{str(self.ck): CK_OPEN}], "par_review": [{}, {str(self.ck): CK_DONE}]}}))
+            "files": {"brief": [{str(self.ck): CK_OPEN}], "par_review": [{}, {str(self.ck): CK_DONE}]}},
+            # Sam (writer) finishes first, so the first review (the one with the message to Sam) is of Sam's step
+            worker={"delay_for": {"writer-2": {"work": 1.2}, "writer-3": {"work": 1.2}}}))
         self.assertEqual(status, "completed")
         tt = turns(rec)
         first = next(t for t in tt if t["purpose"] == "par_review")
+        self.assertEqual(first["par_worker"], "writer")
         who = first["par_worker"]
         nxt = [t for t in tt if t["agent"] == who and t["purpose"] == "work"][1]["input"]
         self.assertEqual(nxt.count("Fix the caption of table A."), 1)
@@ -181,13 +184,16 @@ class TestParallelReview(Base):
         L = Live(self, cfg)
         L.until(lambda st: any(s.get("status") == "job" for s in ((st["managed"].get("par") or {}).get("slots")
                                                                     or {}).values()), "a job wait", timeout=20)
+        # the wait comes from the critic's review (<wait-job/>), not from orch on its own
         L.control({"to": ["writer"], "message": "Also note the seed in the log."}, "note")
         status, rec = L.done(timeout=40)
         self.assertEqual(status, "completed")
         tt = turns(rec)
         mine = [t for t in tt if t.get("par_worker") == "writer" or (t["agent"] == "writer" and t["purpose"] == "work")]
         reviews = [t for t in mine if t["purpose"] == "par_review"]
-        self.assertEqual(len(reviews), 1, [(t["agent"], t["purpose"]) for t in mine])
+        waits = [t for t in reviews if "<wait-job/>" in t["output"]]
+        self.assertGreaterEqual(len(waits), 1)  # the critic saw the running job and waited (again after the message turn)
+        self.assertEqual(len(reviews) - len(waits), 1, [(t["agent"], t["purpose"]) for t in mine])
         self.assertIn("has finished", [t for t in mine if t["purpose"] == "work"][-1]["input"])
         self.assertIn("Also note the seed in the log.", "\n".join(t["input"] for t in mine if t["purpose"] == "work"))
 

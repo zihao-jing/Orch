@@ -148,6 +148,8 @@ EVENT_KINDS: Dict[str, Callable[[Dict[str, Any], Callable[[Any], str]], Tuple[st
     "plan_step": lambda e, who: ("system", f"step {e.get('done')} of {e.get('total')} done"
                                            + (f"; next: {e.get('next')}" if e.get("next") else "")),
     "job_wait": lambda e, who: ("job", f"waiting for {who(e.get('agent'))}'s job: {e.get('jobs') or ''}".rstrip(": ")),
+    "job_running": lambda e, who: ("job", f"still running after {who(e.get('agent'))}'s turn: {e.get('jobs') or ''}"
+                                   .rstrip(": ")),
     "job_end": lambda e, who: ("job", f"job wait ended: {e.get('why') or ''}".rstrip(": ")),
     "review_requested": lambda e, who: ("system", "review file asked for"),
     "review_written": lambda e, who: ("system", "review file written"),
@@ -157,7 +159,7 @@ EVENT_KINDS: Dict[str, Callable[[Dict[str, Any], Callable[[Any], str]], Tuple[st
 }
 _EVENT_BLOCK = {"held": "user", "held_released": "user", "night": "user", "discussion": "user", "golden_changed": "user",
                 "gate": "user", "gate_decided": "user", "review_requested": "user", "review_written": "user",
-                "review_comments": "user", "plan_step": "cw", "job_wait": "cw", "job_end": "cw"}
+                "review_comments": "user", "plan_step": "cw", "job_wait": "cw", "job_running": "cw", "job_end": "cw"}
 
 
 class Builder:

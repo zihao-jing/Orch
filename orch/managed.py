@@ -2751,20 +2751,18 @@ class ManagedRunner(MonitorRunner):
                     x["cmds"][str(j["pid"])] = j["command"]
         carried = getattr(self, "_carry_since", None)
         self._carry_since = None
-        if jobs:
-            mg["job"] = {"agents": jobs, "since": (carried or {}).get("since") or now_iso(),
-                         "since_ts": (carried or {}).get("since_ts") or time.time()}
-            mg["work_earlier"] = {a: x.get("output") or "" for a, x in mg["work"].items()}
-            mg["phase"] = "job"
+        mg.pop("running_jobs", None)
+        if jobs:  # never waited on by itself: the critic is told in its review and decides (<wait-job/>)
+            mg["running_jobs"] = {"agents": jobs, "since": (carried or {}).get("since") or now_iso(),
+                                  "since_ts": (carried or {}).get("since_ts") or time.time()}
             pids = ", ".join(str(x) for j in jobs.values() for x in j["pids"])
-            self.rec.progress(f"⏳ waiting for the worker's job (pid {pids}) before {self.critic.name} reviews")
-            for a, j in jobs.items():  # B9b: a small job line on the board
-                self.rec.event("job_wait", agent=a, jobs="; ".join(j["lines"])[:300])
-            self.log(f"  ⏳ waiting for job pid {pids} (watched by progress checks; 'Review now' on the board skips)")
-            return None
+            self.rec.progress(f"⚙ still running after the worker's turn: pid {pids}; {self.critic.name} decides "
+                              "whether the review waits for it")
+            for a, j in jobs.items():  # a small job line on the board
+                self.rec.event("job_running", agent=a, jobs="; ".join(j["lines"])[:300])
         if any(self.rec.pending_worker_messages(w.name) for w in self.workers):
             # A check-in can finish after the worker's backend has already closed its turn. Deliver
-            # those instructions before reviewing the old result; a real job wait above still wins.
+            # those instructions before reviewing the old result.
             self.worker_feedback("Please continue with the additional instructions and check the resulting work.")
             mg["phase"] = "work"
             self.end_round(summary, "additional instructions pending → worker")
@@ -3636,30 +3634,29 @@ class ManagedRunner(MonitorRunner):
         if r.get("cut_short"):
             self.forward(w, self.mtpl("worker_after_cut").strip())
         procs = self._par_procs.pop(name, None)
+        running: Dict[str, Any] = {"pids": [], "lines": [], "cmds": {}}
         if c.job_wait > 0 and procs and not r.get("cut_short"):
             skip = {int(a["pid"]) for a, _b in T.blocks(out, "no-wait") if str(a.get("pid", "")).isdigit()}
-            found = [j for j in _jobs.detect(procs, {w.working_dir or m.working_dir}, c.job_ignore,
-                                             tags=[_jobs.tag_for(self.rec.run_dir.name, name)]) if j["pid"] not in skip]
-            if found:
-                lines = [f"pid {j['pid']}: {_clip(str(j['command']), 160)}" for j in found]
-                s.update(status=PW.JOB, job={"pids": [j["pid"] for j in found], "lines": lines,
-                                             "cmds": {str(j["pid"]): j["command"] for j in found},
-                                             "since_ts": time.time()}, earlier=out)
-                self.start_watch(w, "job", jobs=lines)
-                self.rec.event("job_wait", agent=name, jobs="; ".join(lines)[:300])
-                self.rec.progress(f"⏳ waiting for {name}'s job ({', '.join(lines)}) before its review")
-                self.write_work_board()
-                return
-        j = s.get("job") or {}
-        if j and not r.get("cut_short"):  # a message turn while its job ran: the job is watched again, not reviewed
-            alive = [x for x in j.get("pids") or [] if _jobs.alive(x, (j.get("cmds") or {}).get(str(x), ""))]
-            if alive:
-                s.update(status=PW.JOB, earlier=(s.get("earlier", "") + "\n\n" + out).strip())
-                self.start_watch(w, "job", jobs=j.get("lines") or [])
-                self.rec.event("job_wait", agent=name, jobs="; ".join(j.get("lines") or [])[:300])
-                self.write_work_board()
-                return
-            s.pop("job", None)
+            for j in _jobs.detect(procs, {w.working_dir or m.working_dir}, c.job_ignore,
+                                  tags=[_jobs.tag_for(self.rec.run_dir.name, name)]):
+                if j["pid"] not in skip:
+                    running["pids"].append(j["pid"])
+                    running["lines"].append(f"pid {j['pid']}: {_clip(str(j['command']), 160)}")
+                    running["cmds"][str(j["pid"])] = j["command"]
+        j = s.pop("job", None) or {}
+        if j and not r.get("cut_short"):  # a message turn while its job ran: still running, the critic decides again
+            for p, l in zip(j.get("pids") or [], j.get("lines") or []):
+                if p not in running["pids"]:
+                    running["pids"].append(p)
+                    running["lines"].append(l)
+                    running["cmds"][str(p)] = (j.get("cmds") or {}).get(str(p), "")
+        s.pop("running_jobs", None)
+        alive = self.alive_jobs({name: running}).get(name)
+        if alive:  # never waited on by itself: the critic is told in its review and decides (<wait-job/>)
+            s["running_jobs"] = {**alive, "since_ts": j.get("since_ts") or time.time()}
+            self.rec.event("job_running", agent=name, jobs="; ".join(alive["lines"])[:300])
+            self.rec.progress(f"⚙ still running after {name}'s turn: {', '.join(alive['lines'])}; "
+                              f"{self.critic.name} decides whether its review waits for it")
         if self.rec.pending_worker_messages(name):
             s.update(status=PW.READY, instr="Please continue with the additional instructions and check the "
                                             "resulting work.")
@@ -3670,6 +3667,37 @@ class ManagedRunner(MonitorRunner):
         s["status"] = PW.REVIEW
         par["reviews"].append(name)
         self.write_work_board()
+
+    @staticmethod
+    def alive_jobs(jobs: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """{agent: {pids, lines, cmds}} with only the processes still running (lines follow their pids)."""
+        out = {}
+        for name, j in (jobs or {}).items():
+            cmds = j.get("cmds") or {}
+            keep = [(p, l) for p, l in zip(j.get("pids") or [], j.get("lines") or [])
+                    if _jobs.alive(p, cmds.get(str(p), ""))]
+            if keep:
+                out[name] = {"pids": [p for p, _l in keep], "lines": [l for _p, l in keep],
+                             "cmds": {str(p): cmds.get(str(p), "") for p, _l in keep}}
+        return out
+
+    @staticmethod
+    def wait_job_choice(text: str, running: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """The running jobs a critic's `<wait-job/>` waits for: all of them, or those its pid attributes name
+        (a pid that is not one of them is ignored). Empty: no tag, or nothing it names still runs."""
+        tags = T.blocks(text or "", "wait-job")
+        if not tags or not running:
+            return {}
+        named = {int(x) for a, _b in tags for x in re.split(r"[\s,]+", str(a.get("pid") or "")) if x.isdigit()}
+        if not named:
+            return {n: dict(j) for n, j in running.items()}
+        out = {}
+        for name, j in running.items():
+            keep = [i for i, p in enumerate(j["pids"]) if p in named]
+            if keep:
+                out[name] = {"pids": [j["pids"][i] for i in keep], "lines": [j["lines"][i] for i in keep],
+                             "cmds": {str(j["pids"][i]): j["cmds"].get(str(j["pids"][i]), "") for i in keep}}
+        return out
 
     def message_for_job_turn(self, name: str) -> bool:
         """A message a worker's turn would carry while its job runs. A message a phase carries (in the critic's
@@ -3795,11 +3823,37 @@ class ManagedRunner(MonitorRunner):
         tail = (self.mtpl("critic_par_next", next_step=PW.step_title(ck, nxt)[1], who=f"`{name}`") if nxt
                 else self.mtpl("critic_par_last", who=f"`{name}`"))
         nudge = (self.st.get("nudge") or {}).get(v.name, "")
-        report = self.report_text({"output": s.pop("report", ""), "status": "ok"})
+        raw_report = s.pop("report", "")
+        report = self.report_text({"output": raw_report, "status": "ok"})
         prompt = self.mtpl("critic_par_review", human_messages=nudge, who=w.called, id=name, step=title,
                            report=report, next=tail.strip() and " " + tail.strip(), board=str(self.work_board_path()))
+        held = s.pop("running_jobs", None) or {}
+        running = self.alive_jobs({name: held}) if held else {}
+        if running:  # processes it left running: the critic decides whether its step waits for them
+            prompt = prompt.rstrip() + "\n\n" + self.mtpl(
+                "critic_jobs_running", who=w.called, jobs="; ".join(running[name]["lines"])).strip()
         r = self.say(v, prompt, "par_review", rnd=int(summary.get("round") or 0), extra={"par_worker": name})
         summary["turns"] = (summary.get("turns") or []) + [r["turn_id"]]
+        chosen = self.wait_job_choice(r.get("output") or "", running).get(name)
+        if chosen:  # the step waits for the job, watched by the progress checks (par_poll_jobs)
+            s.update(status=PW.JOB, job={**chosen, "since_ts": held.get("since_ts") or time.time()},
+                     earlier=raw_report)
+            feedback = self.clean_for(r.get("output") or "", w)
+            if feedback:  # reaches the worker at its turn after the job
+                self.forward(w, feedback)
+            others = [x for x in PW.to_sections(r.get("output") or "") if self.find_slot(x["worker"]) != name]
+            if others:
+                self.par_give(others, r["turn_id"])
+            self.start_watch(w, "job", jobs=chosen["lines"])
+            self.rec.event("job_wait", agent=name, jobs="; ".join(chosen["lines"])[:300])
+            self.rec.progress(f"⏳ {v.called} waits for {name}'s job ({', '.join(chosen['lines'])}) before reviewing")
+            self.par_questions_up(r)
+            self.end_round(summary, f"{name}: {v.name} waits for its job")
+            self.write_work_board()
+            return
+        if T.blocks(r.get("output") or "", "wait-job"):
+            self.rec.progress(f"{v.called} asked to wait for {name}'s job, but none of its processes is still "
+                              "running; the review counts as it is")
         vd = self.verdict(r)
         if vd in ("ERROR", "UNKNOWN") and c.stop_on_error and r["status"] != "ok":
             self.end_round(summary, "critic error → stop", verdicts={v.name: vd})
@@ -3922,10 +3976,39 @@ class ManagedRunner(MonitorRunner):
                               for k, x in work.items())
         nudge = (self.st.get("nudge") or {}).get(v.name, "")
         prompt = mg.pop("review_prompt", "")  # B11: after a parallel section, the critic takes stock of it
-        r = self.say(v, prompt or self.mtpl("critic_review", worker_report=reports, human_messages=nudge), "verify")
-        vd = self.verdict(r)
+        prompt = prompt or self.mtpl("critic_review", worker_report=reports, human_messages=nudge)
+        running = self.alive_jobs((mg.get("running_jobs") or {}).get("agents") or {})
+        if running:  # processes the worker left running: the critic decides whether the step waits for them
+            prompt = prompt.rstrip() + "\n\n" + self.mtpl(
+                "critic_jobs_running", who=" and ".join(self.mon.agent(a).called for a in running),
+                jobs="; ".join(l for j in running.values() for l in j["lines"])).strip()
+        r = self.say(v, prompt, "verify")
         summary = mg.get("summary") or {"round": self.st.get("round", 0), "turns": []}
         summary["turns"] = (summary.get("turns") or []) + [r["turn_id"]]
+        held = mg.pop("running_jobs", None) or {}
+        chosen = self.wait_job_choice(r.get("output") or "", running)
+        if chosen:  # the critic waits for the job: the step waits, watched by the progress checks (ph_job)
+            mg["job"] = {"agents": chosen, "since": held.get("since") or now_iso(),
+                         "since_ts": held.get("since_ts") or time.time()}
+            mg["work_earlier"] = {a: x.get("output") or "" for a, x in work.items()}
+            text = self.clean_critic(r.get("output") or "")
+            for name in chosen:  # what the critic wrote to the worker reaches it at its turn after the job
+                if text:
+                    self.forward(self.mon.agent(name), text)
+            pids = ", ".join(str(x) for j in chosen.values() for x in j["pids"])
+            self.rec.progress(f"⏳ {v.called} waits for the job (pid {pids}) before reviewing")
+            for a, j in chosen.items():
+                self.rec.event("job_wait", agent=a, jobs="; ".join(j["lines"])[:300])
+            self.log(f"  ⏳ waiting for job pid {pids} (watched by progress checks; 'Review now' on the board skips)")
+            mg["phase"] = "job"
+            asked = self.critic_asks(r, after="job")
+            self.end_round(summary, f"{v.name} waits for the job" + (" · question for the manager" if asked else ""))
+            mg["asks"] = 0
+            return None
+        if T.blocks(r.get("output") or "", "wait-job"):
+            self.rec.progress(f"{v.called} asked to wait for a job, but none of the processes is still running; "
+                              "the review counts as it is")
+        vd = self.verdict(r)
         if vd == "UNKNOWN":  # a review without its verdict tag: asked once for it before the run stops
             self.rec.progress(f"⚠ {v.called}'s review has no verdict; asked for it")
             r2 = self.say(v, self.mtpl("critic_verdict_missing").strip(), "verdict")

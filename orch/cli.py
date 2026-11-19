@@ -109,9 +109,9 @@ retries: 1
 checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
 milestone_rounds: 50        # rounds without a step of the critic's plan finishing before the manager and I look
 checkin_every: 2            # every 2 rounds, a status line for the manager (from the plan: no model turn; 0 = off)
-# job_wait: 21600           # 0 = never wait for a job the worker left running; caps the wait only when checks are off
+# job_wait: 21600           # 0 = don't look for jobs the worker left running; caps a wait the critic asks for only when checks are off
 # check_session: side       # without a monitor, the critic runs the checks: side (a fresh session) or own
-# job_ignore: ["status_loop"]  # commands that are never waited on (regexes), e.g. a long-lived helper
+# job_ignore: ["status_loop"]  # commands never listed as running jobs (regexes), e.g. a long-lived helper
 """,
         "agents/worker/agent.yaml": """\
 role: worker

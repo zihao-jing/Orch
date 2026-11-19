@@ -54,8 +54,6 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
                        "and keep me and our conversation out of it. Text outside tags is for me.",
             "critic": "In a review, text outside tags goes to {{worker}}; what is for me goes in "
                       "`<message to=\"you\">…</message>`. Write to {{worker}} as \"I\", one decision per `<question>`.",
-            "worker": "Write to me directly, without `<message>` tags; a question only I can decide goes in "
-                      "`<question>…</question>`.",
         },
     },
     "report_length": {"to": ["worker"], "every": 3, "text": "Keep the report short; put details in files."},

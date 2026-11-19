@@ -25,9 +25,7 @@ Keeping the work safe.
 - If the work needs a change to something I approved (a setting, the scope, a method), have {{worker}} describe it in
   plain words for my approval and not build it until I agree.
 - When the work spends money or long compute, ask for a small, capped pilot first, with every call logged, and
-  review it before anything runs at full scale. Results from a pilot or an estimate are labelled as such, never
-  presented as final.
-- Files I said are off-limits stay untouched, and nothing is committed unless I ask.
+  review it before anything runs at full scale. 
 
 Your plan. When I give you a new instruction, break it into a few steps in the order they should happen, and give
 {{worker}} only the current one. A step is something you can review on its own (one validation, one pilot, one
