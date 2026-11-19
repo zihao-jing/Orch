@@ -182,6 +182,10 @@ details.msinfo{border-top:1px solid var(--grid);padding:0 14px}details.msinfo>su
 .bcard.b-mon{padding:8px 14px}.bcard.b-mon>h2{margin-bottom:4px}
 .bcard details.stp:first-of-type{border-top:0}.bcard details.stp>summary{padding:7px 2px}.bcard .stb{padding:0 0 8px 14px}
 .bcard .lane{font-size:12px;color:var(--ink2);margin:8px 4px 2px;padding-top:4px;border-top:1px dashed var(--grid)}
+details.bcard>summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:center}details.bcard>summary::-webkit-details-marker{display:none}
+details.bcard>summary h2{margin:0;display:flex;gap:8px;align-items:center}details.bcard.b-user>summary h2{color:var(--you)}
+details.bcard>summary:before{content:"▸";color:var(--mute)}details.bcard[open]>summary:before{content:"▾"}details.bcard[open]>summary{margin-bottom:6px}
+.bmore{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--mute);padding:4px 4px 2px}
 .sz{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mute)}.sz.big{color:var(--warn-ink)}
 .rtag{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--mute)}
 details.inp{border:1px dashed var(--ring);border-radius:8px;margin:4px 0 8px;padding:0 8px}details.inp>summary{cursor:pointer;font-size:12px;color:var(--ink2);padding:4px 0}
@@ -232,6 +236,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
    <div class="card" id="tl-card"><h2>Milestones</h2><div class="steps" id="steps"></div><div id="msinfo"></div>
     <div class="tlbar" style="margin:10px 0 0"><input type="search" id="q" placeholder="Search all messages…" aria-label="Search all messages">
      <label title="Progress checks, jobs, reminders sent, retries, model switches, session resets and warnings"><input type="checkbox" id="other"> checks, jobs &amp; system lines</label></div>
+    <div class="tlbar" id="bfilter" style="margin:6px 0 0" title="Which conversations to show below"></div>
     <div id="sres" style="margin-top:10px"></div></div>
    <div id="timeline"></div>
    <div class="card"><h2 id="gold-h">Golden board</h2><div id="golden"></div>
@@ -628,6 +633,11 @@ const groupCache = new Map(), groupPending = new Set();  // group key -> {n, ite
 const msgCache = new Map(), msgPending = new Set();       // item id -> its full text (api/message)
 const openItems = new Set(), openG = new Set(), shutG = new Set(), openInfo = new Set();  // openG/shutG: "<block>|<step key>"
 let showOther = true; try { showOther = localStorage.getItem('orch-other') !== '0'; } catch(e){}
+// which conversation cards are hidden (filter) or folded; how many lines each step of a card shows (newest first)
+const PAGE = 10, shown = new Map();  // "<block>|<step key>" -> lines shown
+let hiddenB = new Set(), shutCard = new Set(), wantItem = null;
+try { hiddenB = new Set(JSON.parse(localStorage.getItem('orch-hidden-blocks') || '[]')); shutCard = new Set(JSON.parse(localStorage.getItem('orch-shut-cards') || '[]')); } catch(e){}
+const saveB = () => { try { localStorage.setItem('orch-hidden-blocks', JSON.stringify([...hiddenB])); localStorage.setItem('orch-shut-cards', JSON.stringify([...shutCard])); } catch(e){} };
 const enc = encodeURIComponent;
 function groupItems(g){
   if (g.key === D.tl_cur) return {items: D.tl_items || [], more: D.tl_more || 0};
@@ -705,30 +715,44 @@ function shownMs(){
   if (selMs !== null && (mss[selMs] || gs.some(g => g.ms === selMs))) return selMs;
   const c = curMs(); return c === undefined ? (mss.length ? 0 : -1) : c;
 }
-function stepItems(b, g){
+function stepItems(b, g){  // the step's lines in this card, newest first, PAGE at a time
   const got = groupItems(g);
   if (!got){ loadGroup(g.key); return '<div class="lmore">Loading…</div>'; }
-  const rows = got.items.filter(it => it.block === b);
-  const more = got.more ? `<div class="lmore">Older lines of this step not shown · <button class="more" data-gall="${esc(g.key)}">show all</button></div>` : '';
-  const lanes = b === 'cw' ? [...new Set(rows.map(it => it.lane).filter(Boolean))] : [];
-  return more + (lanes.length > 1 ? lanes.map(l => laneHTML(l, rows.filter(it => it.lane === l))).join('') + rows.filter(it => !it.lane).map(it => lineHTML(it)).join('')
-                                   : rows.map(it => lineHTML(it)).join(''));
+  const rows = got.items.filter(it => it.block === b && (showOther || !OTHER.has(it.kind))).reverse();
+  const k = b + '|' + g.key;
+  let n = shown.get(k) || PAGE;
+  const w = wantItem ? rows.findIndex(it => it.id === wantItem) : -1;
+  if (w >= n){ n = Math.ceil((w + 1) / PAGE) * PAGE; shown.set(k, n); }
+  const page = rows.slice(0, n), left = rows.length - page.length;
+  const lanes = b === 'cw' ? [...new Set(page.map(it => it.lane).filter(Boolean))] : [];
+  const body = lanes.length > 1 ? lanes.map(l => laneHTML(l, page.filter(it => it.lane === l))).join('') + page.filter(it => !it.lane).map(it => lineHTML(it)).join('')
+                                : page.map(it => lineHTML(it)).join('');
+  const more = left > 0 ? `<div class="bmore"><button class="sm" data-pmore="${esc(k)}">Show ${Math.min(PAGE, left)} more</button><span>${left} older line${left === 1 ? '' : 's'}</span>${left > PAGE ? `<button class="more" data-pall="${esc(k)}">show all</button>` : ''}</div>`
+    : got.more ? `<div class="bmore">Older lines of this step are not loaded · <button class="more" data-gall="${esc(g.key)}">load them</button></div>` : '';
+  return body + more;
 }
 function cardHTML(b, title, gsel){
+  if (hiddenB.has(b)) return '';
   const cnt = g => ((g.blocks||{})[b] || [0, 0])[showOther ? 1 : 0];
   const has = gsel.filter(g => cnt(g) > 0);
   if (!has.length) return '';
-  const n = has.reduce((a, g) => a + g.blocks[b][0], 0);
-  let body;
-  if (has.length === 1 && !has[0].step) body = stepItems(b, has[0]);
-  else body = has.map((g, i) => {
+  const n = has.reduce((a, g) => a + g.blocks[b][0], 0), open = !shutCard.has(b);
+  let body = '';
+  if (open && has.length === 1 && !has[0].step) body = stepItems(b, has[0]);
+  else if (open) body = has.map((g, i) => {
     const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
     return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : 'Before the steps'}</b><span class="lab">${esc(g.label || '')}</span>`
       + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
       + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
   }).join('');
-  return `<section class="card bcard b-${b}"><h2>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h2>${body}</section>`;
+  return `<details class="card bcard b-${b}" data-card="${b}"${open ? ' open' : ''}><summary><h2>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h2></summary>${body}</details>`;
 }
+function renderFilter(){
+  setHTML($('bfilter'), '<span class="mute" style="font-size:12px">Show:</span>' + BLOCKS.map(([b, title]) =>
+    `<label><input type="checkbox" data-bf="${b}"${hiddenB.has(b) ? '' : ' checked'}> ${esc(title())}</label>`).join(''));
+}
+$('bfilter').addEventListener('change', e => { const b = e.target.dataset.bf; if (!b) return;
+  e.target.checked ? hiddenB.delete(b) : hiddenB.add(b); saveB(); renderTimeline(); });
 function renderSteps(ms){
   const gs = D.tl_groups || [], mss = (D.managed||{}).milestones || [], cur = curMs();
   const keys = [...(gs.some(g => g.ms < 0) ? [-1] : []), ...mss.map((m, i) => i)];
@@ -746,7 +770,7 @@ function renderSteps(ms){
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
   const gs = D.tl_groups || [], ms = shownMs();
-  renderSteps(ms);
+  renderSteps(ms); renderFilter();
   if (!gs.length){ setHTML(el, '<div class="card"><div class="empty">No messages yet.</div></div>'); return; }
   const gsel = gs.filter(g => g.ms === ms).sort((a, b) => b.step - a.step);  // the newest step first
   const h = BLOCKS.map(([b, title]) => cardHTML(b, title, gsel)).join('');
@@ -766,6 +790,8 @@ document.addEventListener('toggle', e => {  // remember what is open; fetch what
   if (d.dataset.g !== undefined){ const k = d.dataset.g, has = !!d.querySelector(':scope>.stb');
     if (d.open){ openG.add(k); shutG.delete(k); } else { openG.delete(k); shutG.add(k); }
     if (d.open !== has) renderTimeline(); return; }
+  if (d.dataset.card !== undefined){ const b = d.dataset.card, has = !!d.querySelector(':scope>details,:scope>details.ln,:scope>.lmore,:scope>.bmore');
+    if (d.open) shutCard.delete(b); else shutCard.add(b); saveB(); if (d.open !== has) renderTimeline(); return; }
   if (d.dataset.info !== undefined){ const k = +d.dataset.info; if (d.open !== openInfo.has(k)){ d.open ? openInfo.add(k) : openInfo.delete(k); renderTimeline(); } }
 }, true);
 function findItem(id){
@@ -776,7 +802,10 @@ function findItem(id){
 }
 $('other').addEventListener('change', e => { showOther = e.target.checked; try { localStorage.setItem('orch-other', showOther ? '1' : '0'); } catch(err){}
   renderTimeline(); $('sres').classList.toggle('hide-other', !showOther); });
-$('timeline').addEventListener('click', e => { const b = e.target.closest('[data-gall]'); if (b){ b.disabled = true; loadGroup(b.dataset.gall, true); } });
+$('timeline').addEventListener('click', e => {
+  const m = e.target.closest('[data-pmore]'); if (m){ const k = m.dataset.pmore; shown.set(k, (shown.get(k) || PAGE) + PAGE); renderTimeline(); return; }
+  const a = e.target.closest('[data-pall]'); if (a){ shown.set(a.dataset.pall, 1e9); renderTimeline(); return; }
+  const b = e.target.closest('[data-gall]'); if (b){ b.disabled = true; loadGroup(b.dataset.gall, true); } });
 async function gotoItem(id){  // open the milestone and step that hold a message, unfold it and show it
   let it = findItem(id);
   if (!it){ try { const m = await getMsg(id); it = m.item; } catch(e){} }
@@ -784,6 +813,7 @@ async function gotoItem(id){  // open the milestone and step that hold a message
   const key = it.ms + '|' + it.step;
   selMs = it.ms === curMs() ? null : it.ms; openG.add(it.block + '|' + key); shutG.delete(it.block + '|' + key); openItems.add(id);
   if (OTHER.has(it.kind) && !showOther){ showOther = true; }
+  hiddenB.delete(it.block); shutCard.delete(it.block); saveB(); wantItem = id;
   const g = (D.tl_groups||[]).find(x => x.key === key);
   if (g && !groupItems(g)) await loadGroup(key, true); else renderTimeline();
   const el = document.querySelector(`#timeline details.ln[data-id="${CSS.escape(id)}"]`); if (!el) return;
