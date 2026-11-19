@@ -337,6 +337,7 @@ class Board:
                                              if isinstance(x, dict)) or None
             row["output"] = out[:PREVIEW_CHARS]
             row["output_len"] = len(out)
+            row["input_len"] = len(t.get("input") or "")
             row["revise"] = bool(re.search(r"<decision>\s*REVISE", out, re.I))
             row["cost"] = (t.get("meta") or {}).get("total_cost_usd")  # a session's running total; see _turn_costs
             row["session_id"] = t.get("session_id")

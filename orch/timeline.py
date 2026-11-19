@@ -241,7 +241,8 @@ class Builder:
             ts = t.get("started_at")
             self.add(f"t:{tid}", ts, agent, to, kind, line, status, tid=tid, purpose=purpose,
                      ms=t.get("milestone") if t.get("milestone") is not None else -1, _turn=True,
-                     len=t.get("output_len"), verdict=t.get("verdict"))
+                     len=t.get("output_len"), in_len=t.get("input_len"), verdict=t.get("verdict"),
+                     round=t.get("round"))
             for r in rows:  # each <message> it passed on to another level: an item in that block too
                 if r.get("status") == "you" or not r.get("to") or self.role_of(r.get("to")) == to_role:
                     continue
@@ -392,8 +393,11 @@ def groups(items: List[Dict[str, Any]], labels: Dict[int, List[str]]) -> Tuple[L
             s = it["step"]
             label = (ls[s - 1] if 0 < s <= len(ls) else "after the last step" if ls and s > len(ls) else "")
             g = out[k] = {"key": k, "ms": it["ms"], "step": s, "label": label[:LINE_CHARS], "n": 0, "needs": 0,
-                          "other": 0, "last": ""}
+                          "other": 0, "last": "", "blocks": {}}
         g["n"] += 1
+        b = g["blocks"].setdefault(it["block"], [0, 0])  # [messages, all lines] of each block in this step
+        b[1] += 1
+        b[0] += 0 if it["kind"] in OTHER_KINDS else 1
         g["needs"] += 1 if it.get("needs") else 0
         g["other"] += 1 if it["kind"] in OTHER_KINDS else 0
         g["last"] = max(g["last"], it["ts"])

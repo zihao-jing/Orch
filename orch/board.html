@@ -178,7 +178,14 @@ details.stp{border-top:1px solid var(--grid)}details.stp>summary{padding:7px 14p
 details.stp>summary .lab{color:var(--ink2);font-weight:400;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 120px}
 details.msinfo{border-top:1px solid var(--grid);padding:0 14px}details.msinfo>summary{padding:7px 0;font-size:12.5px;color:var(--ink2)}
 .msinfo .mi{padding:0 0 10px}
-.blocks{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:10px;padding:8px 12px 12px}
+.bcard{padding:12px 14px}.bcard>h2{display:flex;gap:8px;align-items:center}.bcard.b-user>h2{color:var(--you)}
+.bcard.b-mon{padding:8px 14px}.bcard.b-mon>h2{margin-bottom:4px}
+.bcard details.stp:first-of-type{border-top:0}.bcard details.stp>summary{padding:7px 2px}.bcard .stb{padding:0 0 8px 14px}
+.bcard .lane{font-size:12px;color:var(--ink2);margin:8px 4px 2px;padding-top:4px;border-top:1px dashed var(--grid)}
+.sz{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mute)}.sz.big{color:var(--warn-ink)}
+.rtag{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--mute)}
+details.inp{border:1px dashed var(--ring);border-radius:8px;margin:4px 0 8px;padding:0 8px}details.inp>summary{cursor:pointer;font-size:12px;color:var(--ink2);padding:4px 0}
+.step .cnt{font-size:11px;color:var(--mute);margin-top:4px}
 .blk{border:1px solid var(--ring);border-radius:10px;background:var(--surface);padding:6px 6px 4px;min-width:0}
 .blk h3{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink2);margin:2px 4px 6px;display:flex;gap:6px;align-items:center}
 .blk.b-user h3{color:var(--you)}.blk.b-mon{grid-column:1/-1;padding:3px 6px}.blk.b-mon h3{margin:2px 4px}
@@ -222,10 +229,11 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <main>
    <div id="needs"></div>
    <div class="card" id="now-card"><h2>Working now</h2><div class="nowl" id="now"></div><div class="stats" id="stats"></div></div>
-   <div class="card" id="tl-card"><h2>Messages</h2>
-    <div class="tlbar"><input type="search" id="q" placeholder="Search all messages…" aria-label="Search all messages">
+   <div class="card" id="tl-card"><h2>Milestones</h2><div class="steps" id="steps"></div><div id="msinfo"></div>
+    <div class="tlbar" style="margin:10px 0 0"><input type="search" id="q" placeholder="Search all messages…" aria-label="Search all messages">
      <label title="Progress checks, jobs, reminders sent, retries, model switches, session resets and warnings"><input type="checkbox" id="other"> checks, jobs &amp; system lines</label></div>
-    <div id="sres"></div><div id="timeline"></div></div>
+    <div id="sres" style="margin-top:10px"></div></div>
+   <div id="timeline"></div>
    <div class="card"><h2 id="gold-h">Golden board</h2><div id="golden"></div>
     <details class="fold" id="dec-fold"><summary><b id="dec-h">Decisions record</b></summary><div id="decs"></div></details></div>
    <details class="card ckp" id="qs-card"><summary><h2 id="qs-h">Questions</h2></summary><div id="qs"></div></details>
@@ -588,10 +596,10 @@ function promptBody(t){
   return `<pre>${esc(t.input || '(empty prompt)')}</pre>`
     + (t.system_prompt ? `<details><summary>System instructions</summary><pre>${esc(t.system_prompt)}</pre></details>` : '');
 }
-function promptPanel(t){
+function promptPanel(t, label){
   const key = promptKey(t.turn_id), saved = prompts.get(key);
   const open = promptOpen.has(key);
-  return `<details data-prompt="${esc(t.turn_id)}"${open ? ' open' : ''}><summary>Prompt</summary><div class="prompt-body">${saved ? promptBody(saved) : 'Loading prompt…'}</div></details>`;
+  return `<details class="inp" data-prompt="${esc(t.turn_id)}"${open ? ' open' : ''}><summary>${label || 'Prompt'}</summary><div class="prompt-body">${saved ? promptBody(saved) : 'Loading prompt…'}</div></details>`;
 }
 document.addEventListener('toggle', async e => {
   const d = e.target, id = d.dataset && d.dataset.prompt;
@@ -618,7 +626,7 @@ const BLOCKS = [['user', () => 'You ↔ ' + who('manager')], ['mc', () => who('m
 const OTHER = new Set(['system', 'warning', 'job', 'reminder', 'check']);  // small tagged lines; the filter hides them
 const groupCache = new Map(), groupPending = new Set();  // group key -> {n, items, more}
 const msgCache = new Map(), msgPending = new Set();       // item id -> its full text (api/message)
-const openItems = new Set(), openG = new Set(), shutG = new Set(), openMs = new Set(), shutMs = new Set(), openInfo = new Set();
+const openItems = new Set(), openG = new Set(), shutG = new Set(), openInfo = new Set();  // openG/shutG: "<block>|<step key>"
 let showOther = true; try { showOther = localStorage.getItem('orch-other') !== '0'; } catch(e){}
 const enc = encodeURIComponent;
 function groupItems(g){
@@ -653,11 +661,13 @@ function itemBody(it){
   const text = m.text || '';
   if (it.id.startsWith('t:') && m.turn && it.id === 't:' + m.turn){  // a whole reply: its words, each message it passed on, its prompt
     const {plain} = routedBlocks(text);
-    return receivedLine(m.received) + heldLine(m.held)
+    return promptPanel({turn_id: m.turn}, `Input to this turn · ${(m.input_len||0).toLocaleString()} chars`)
+      + receivedLine(m.received) + heldLine(m.held)
       + `<div class="md">${md(plain || ((m.routes||[]).length ? '' : text) || '(empty)')}</div>` + routeCards(text, m.routes, m.turn)
-      + `<div class="mute" style="font-size:12px;margin-top:4px">${m.model ? esc(m.model) + ' · ' : ''}${(text.length).toLocaleString()} chars · prompt ${(m.input_len||0).toLocaleString()} chars</div>`
-      + promptPanel({turn_id: m.turn});
+      + `<div class="mute" style="font-size:12px;margin-top:4px">${m.model ? esc(m.model) + ' · ' : ''}output ${(text.length).toLocaleString()} chars</div>`;
   }
+  if (it.id.startsWith('t:') && m.turn)  // a message one turn passed on: the input of that turn, then the message
+    return promptPanel({turn_id: m.turn}, 'Input to the turn that wrote this') + `<div class="md">${md(text || '(empty)')}</div>`;
   if (it.id.startsWith('c:') && !/:\d+$/.test(it.id.slice(2)))
     return (m.problems||[]).map(p => `<div class="w" style="color:var(--warn-ink)">⚠ ${esc(p)}</div>`).join('') + routedHTML(text, chatRoutes(it.id.slice(2), m.relays), it.id);
   return `<div class="md">${md(text || '(empty)')}</div>`;
@@ -671,64 +681,79 @@ function lineHTML(it, where){  // one message: time, sender → recipient, statu
   const extra = (it.urgent ? '<span class="st running">⚡</span>' : '') + (it.verdict ? pill(it.verdict === 'PASS' ? 'p-good' : 'p-crit', it.verdict === 'PASS' ? '✓ pass' : '✕ fail') : '')
     + (it.purpose && it.kind === 'msg' ? `<span class="mute" style="font-size:11px">${esc(it.purpose)}</span>` : '');
   const wh = where ? `<span class="ktag">${esc(groupName(it.ms, it.step))}</span>` : '';
-  return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${extra}${wh}<span class="pv">${esc(it.line || '')}</span></summary>`
+  const whole = it.tid && it.id === 't:' + it.tid;  // a turn's reply: its round and how much went in and came out
+  const rd = whole && it.round != null ? `<span class="rtag" title="round ${esc(it.round)}">R${esc(it.round)}</span>` : '';
+  const sz = whole && it.in_len != null && it.kind === 'msg' ? `<span class="sz${it.in_len > SZ_BIG ? ' big' : ''}" title="characters in the input to this turn → in its reply">${kchars(it.in_len)} → ${kchars(it.len||0)}</span>` : '';
+  return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${rd}${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${extra}${wh}<span class="pv">${esc(it.line || '')}</span>${sz}</summary>`
     + (open ? `<div class="fb">${itemBody(it)}</div>` : '') + '</details>';
 }
-function laneHTML(lane, rows){  // B11: one worker's lane in the critic ↔ worker block
+const SZ_BIG = 30000;  // an input above this is marked
+const kchars = n => n < 1000 ? String(n) : (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+function laneHTML(lane, rows){  // B11: one worker's lane in the critic ↔ worker card
   const mg = D.managed || {}, par = (mg.par && mg.par.slots) ? mg.par : (mg.par_last || {}), s = (par.slots || {})[lane] || {};
   const head = [s.step ? 'step ' + s.step : '', s.status || '', s.check ? 'monitor: ' + s.check : ''].filter(Boolean).map(esc).join(' · ');
   const nm = called(lane);  // a copy without a name of its own is called by its id: shown once
   return `<div class="lane"><b>${esc(nm)}</b>${nm !== lane ? ` <span class="mute">${esc(lane)}</span>` : ''}${head ? ' — ' + head : ''}</div>` + rows.map(it => lineHTML(it)).join('');
 }
 function groupName(ms, step){ return (ms < 0 ? 'plan' : 'M' + (ms + 1)) + (step ? ' · step ' + step : ''); }
-function blocksHTML(items){  // one block per level of communication, messages in order
-  const by = {}; items.forEach(it => (by[it.block] = by[it.block] || []).push(it));
-  return '<div class="blocks">' + BLOCKS.filter(([b]) => by[b]).map(([b, title]) => {
-    const rows = by[b], n = rows.filter(it => !OTHER.has(it.kind)).length;
-    // critic ↔ worker: one lane per worker when several work at once (B11): status, step, the monitor's last report
-    const lanes = b === 'cw' ? [...new Set(rows.map(it => it.lane).filter(Boolean))] : [];
-    const body = lanes.length > 1 ? lanes.map(l => laneHTML(l, rows.filter(it => it.lane === l))).join('')
-      + rows.filter(it => !it.lane).map(it => lineHTML(it)).join('') : rows.map(it => lineHTML(it)).join('');
-    return `<section class="blk b-${b}"><h3>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h3>${body}</section>`;
-  }).join('') + '</div>';
+// One milestone at a time (picked in the Milestones card; the current one by default). Below it, one card per level of
+// communication, stacked at full width; in each card the steps of that milestone, the newest open, older ones folded.
+let selMs = null;  // the milestone picked; null follows the current one
+const curMs = () => ((D.tl_groups||[]).find(g => g.key === D.tl_cur) || {}).ms;
+function shownMs(){
+  const gs = D.tl_groups || [], mss = (D.managed||{}).milestones || [];
+  if (selMs !== null && (mss[selMs] || gs.some(g => g.ms === selMs))) return selMs;
+  const c = curMs(); return c === undefined ? (mss.length ? 0 : -1) : c;
 }
-function groupBody(g){
+function stepItems(b, g){
   const got = groupItems(g);
   if (!got){ loadGroup(g.key); return '<div class="lmore">Loading…</div>'; }
-  const more = got.more ? `<div class="lmore">${got.more} older message${got.more === 1 ? '' : 's'} in this step not shown · <button class="more" data-gall="${esc(g.key)}">show all</button></div>` : '';
-  return more + blocksHTML(got.items);
+  const rows = got.items.filter(it => it.block === b);
+  const more = got.more ? `<div class="lmore">Older lines of this step not shown · <button class="more" data-gall="${esc(g.key)}">show all</button></div>` : '';
+  const lanes = b === 'cw' ? [...new Set(rows.map(it => it.lane).filter(Boolean))] : [];
+  return more + (lanes.length > 1 ? lanes.map(l => laneHTML(l, rows.filter(it => it.lane === l))).join('') + rows.filter(it => !it.lane).map(it => lineHTML(it)).join('')
+                                   : rows.map(it => lineHTML(it)).join(''));
+}
+function cardHTML(b, title, gsel){
+  const cnt = g => ((g.blocks||{})[b] || [0, 0])[showOther ? 1 : 0];
+  const has = gsel.filter(g => cnt(g) > 0);
+  if (!has.length) return '';
+  const n = has.reduce((a, g) => a + g.blocks[b][0], 0);
+  let body;
+  if (has.length === 1 && !has[0].step) body = stepItems(b, has[0]);
+  else body = has.map((g, i) => {
+    const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
+    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : 'Before the steps'}</b><span class="lab">${esc(g.label || '')}</span>`
+      + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
+      + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
+  }).join('');
+  return `<section class="card bcard b-${b}"><h2>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h2>${body}</section>`;
+}
+function renderSteps(ms){
+  const gs = D.tl_groups || [], mss = (D.managed||{}).milestones || [], cur = curMs();
+  const keys = [...(gs.some(g => g.ms < 0) ? [-1] : []), ...mss.map((m, i) => i)];
+  if (!mss.length) gs.forEach(g => { if (!keys.includes(g.ms)) keys.push(g.ms); });
+  const of = k => gs.filter(g => g.ms === k);
+  setHTML($('steps'), keys.map(k => {
+    const m = mss[k], st = m ? (MS_ST[m.status] || ['', m.status]) : null;
+    const n = of(k).reduce((a, g) => a + g.n - g.other, 0), x = of(k).reduce((a, g) => a + g.needs, 0);
+    return `<div class="step${k === ms ? ' sel' : ''}" data-selms="${k}" title="Show this milestone's messages"><div class="n"><span>${k < 0 ? (mss.length ? 'Before milestone 1' : 'The run') : 'Milestone ' + (k + 1)}</span>${k === cur ? '<span style="color:var(--s1)">now</span>' : ''}</div>`
+      + `<div class="t">${esc(k < 0 ? 'The plan' : (m ? m.title : ''))}</div>${st ? pill(st[0], st[1]) : ''}${m && m.score != null ? ` <span class="ink2" style="font-size:12px">${m.score}/5</span>` : ''}`
+      + `<div class="cnt">${n} message${n === 1 ? '' : 's'}${x ? ` · <b style="color:var(--you)">${x} for you</b>` : ''}</div></div>`;
+  }).join(''));
+  setHTML($('msinfo'), mss[ms] ? `<details class="msinfo" data-info="${ms}"${openInfo.has(ms) ? ' open' : ''} style="border-top:0;padding:0;margin-top:8px"><summary>Report, checklist and scores</summary>${openInfo.has(ms) ? `<div class="mi">${msInfoHTML(ms)}</div>` : ''}</details>` : '');
 }
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
-  const gs = D.tl_groups || [], mss = (D.managed||{}).milestones || [], cur = (gs.find(g => g.key === D.tl_cur) || {});
-  if (!gs.length){ setHTML(el, '<div class="empty">No messages yet.</div>'); return; }
-  const byMs = new Map(); gs.forEach(g => { if (!byMs.has(g.ms)) byMs.set(g.ms, []); byMs.get(g.ms).push(g); });
-  const order = [...byMs.keys()].sort((a, b) => b - a);  // the newest milestone first
-  const coming = mss.map((m, i) => i).filter(i => !byMs.has(i) && i > Math.max(...order));
-  let h = order.map(ms => {
-    const groups = byMs.get(ms).slice().sort((a, b) => b.step - a.step), isCur = ms === cur.ms;
-    const open = openMs.has(ms) || (isCur && !shutMs.has(ms)), m = mss[ms];
-    const n = groups.reduce((a, g) => a + g.n - g.other, 0), needs = groups.reduce((a, g) => a + g.needs, 0);
-    const st = m ? (MS_ST[m.status] || ['', m.status]) : null;
-    const title = ms < 0 ? (mss.length ? 'The plan' : 'The run') : `Milestone ${ms + 1} · ${esc(m ? m.title : '')}`;
-    let body = '';
-    if (open){
-      if (m) body += `<details class="msinfo" data-info="${ms}"${openInfo.has(ms) ? ' open' : ''}><summary>Report, checklist and scores</summary>${openInfo.has(ms) ? `<div class="mi">${msInfoHTML(ms)}</div>` : ''}</details>`;
-      if (groups.length === 1 && !groups[0].step) body += groupBody(groups[0]);
-      else body += groups.map(g => {
-        const go = openG.has(g.key) || (g.key === D.tl_cur && !shutG.has(g.key));
-        const label = g.step ? `Step ${g.step}` : 'Before the steps';
-        return `<details class="stp" data-g="${esc(g.key)}"${go ? ' open' : ''}><summary><b>${label}</b><span class="lab">${esc(g.label || '')}</span>`
-          + `<span class="mute" style="font-size:12px">${g.n - g.other} message${g.n - g.other === 1 ? '' : 's'}</span>${g.needs ? pill('p-you', g.needs + ' for you') : ''}${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
-          + (go ? groupBody(g) : '') + '</details>';
-      }).join('');
-    }
-    return `<details class="ms" data-ms="${ms}"${open ? ' open' : ''}><summary>${title}${st ? pill(st[0], st[1]) : ''}${m && m.score != null ? `<span class="ink2">${m.score}/5</span>` : ''}`
-      + `<span class="mute" style="font-weight:400;font-size:12px">${n} message${n === 1 ? '' : 's'}</span>${needs ? pill('p-you', needs + ' for you') : ''}</summary>${body}</details>`;
-  }).join('');
-  if (coming.length) h = `<div class="mute" style="font-size:12px;margin:4px 2px">Still to come: ${coming.map(i => `M${i + 1} ${esc(mss[i].title)}`).join(' · ')}</div>` + h;
-  setHTML(el, h);
+  const gs = D.tl_groups || [], ms = shownMs();
+  renderSteps(ms);
+  if (!gs.length){ setHTML(el, '<div class="card"><div class="empty">No messages yet.</div></div>'); return; }
+  const gsel = gs.filter(g => g.ms === ms).sort((a, b) => b.step - a.step);  // the newest step first
+  const h = BLOCKS.map(([b, title]) => cardHTML(b, title, gsel)).join('');
+  setHTML(el, h || '<div class="card"><div class="empty">No messages in this milestone yet.</div></div>');
 }
+$('steps').addEventListener('click', e => { const t = e.target.closest('[data-selms]'); if (!t) return;
+  const k = +t.dataset.selms; selMs = k === curMs() ? null : k; renderTimeline(); });
 document.addEventListener('toggle', e => {  // remember what is open; fetch what an opened fold needs
   const d = e.target; if (!d.dataset) return;
   if (d.dataset.id){ const id = d.dataset.id;
@@ -738,11 +763,9 @@ document.addEventListener('toggle', e => {  // remember what is open; fetch what
       const it = findItem(id); fb.innerHTML = it ? itemBody(it) : ''; if (!d.querySelector(':scope>.fb')) d.appendChild(fb); paintLive((it||{}).tid); }
     else { const fb = d.querySelector(':scope>.fb'); if (fb) fb.remove(); }
     return; }
-  const flip = (set, shut, k, isOpen) => { if (isOpen){ set.add(k); shut.delete(k); } else { set.delete(k); shut.add(k); } };
-  if (d.dataset.g !== undefined){ const want = d.open; const was = openG.has(d.dataset.g) || (d.dataset.g === D.tl_cur && !shutG.has(d.dataset.g));
-    if (want !== was){ flip(openG, shutG, d.dataset.g, want); renderTimeline(); } return; }
-  if (d.dataset.ms !== undefined && d.classList.contains('ms')){ const k = +d.dataset.ms, cur = ((D.tl_groups||[]).find(g => g.key === D.tl_cur) || {}).ms;
-    const was = openMs.has(k) || (k === cur && !shutMs.has(k)); if (d.open !== was){ flip(openMs, shutMs, k, d.open); renderTimeline(); } return; }
+  if (d.dataset.g !== undefined){ const k = d.dataset.g, has = !!d.querySelector(':scope>.stb');
+    if (d.open){ openG.add(k); shutG.delete(k); } else { openG.delete(k); shutG.add(k); }
+    if (d.open !== has) renderTimeline(); return; }
   if (d.dataset.info !== undefined){ const k = +d.dataset.info; if (d.open !== openInfo.has(k)){ d.open ? openInfo.add(k) : openInfo.delete(k); renderTimeline(); } }
 }, true);
 function findItem(id){
@@ -759,7 +782,7 @@ async function gotoItem(id){  // open the milestone and step that hold a message
   if (!it){ try { const m = await getMsg(id); it = m.item; } catch(e){} }
   if (!it) return;
   const key = it.ms + '|' + it.step;
-  openMs.add(it.ms); shutMs.delete(it.ms); openG.add(key); shutG.delete(key); openItems.add(id);
+  selMs = it.ms === curMs() ? null : it.ms; openG.add(it.block + '|' + key); shutG.delete(it.block + '|' + key); openItems.add(id);
   if (OTHER.has(it.kind) && !showOther){ showOther = true; }
   const g = (D.tl_groups||[]).find(x => x.key === key);
   if (g && !groupItems(g)) await loadGroup(key, true); else renderTimeline();

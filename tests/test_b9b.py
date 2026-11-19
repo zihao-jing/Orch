@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from orch.timeline import OTHER_KINDS
 import urllib.request
 from pathlib import Path
 
@@ -118,6 +119,15 @@ class TimelineTest(unittest.TestCase):
             self.assertNotIn("text", it)
         blocks = {it["block"] for it in st["tl_items"]}
         self.assertTrue({"user", "mc", "cw"} <= blocks, blocks)
+        # each step counts its lines per block, so the page shows one card per block without loading every step
+        g = next(g for g in st["tl_groups"] if g["key"] == cur)
+        for blk in blocks:
+            mine = [it for it in st["tl_items"] if it["block"] == blk]
+            self.assertEqual(g["blocks"][blk][1], len(mine))
+            self.assertEqual(g["blocks"][blk][0], sum(it["kind"] not in OTHER_KINDS for it in mine))
+        # a turn's reply carries its round and the sizes of its input and output (communication efficiency)
+        whole = [it for it in b.items("0|1")["items"] if it.get("tid") and it["id"] == "t:" + it["tid"]]
+        self.assertTrue(whole and all("in_len" in it and "round" in it for it in whole), whole)
         gate = next(it for it in st["tl_items"] if it["kind"] == "gate")
         self.assertTrue(gate["needs"])
         q = next(it for it in st["tl_items"] if it["id"] == "q:Q1")
