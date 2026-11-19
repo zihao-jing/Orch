@@ -2445,6 +2445,111 @@ class TestAgy(unittest.TestCase):
         self.assertEqual(res.status, "error")
 
 
+FAKE_QWEN = r'''#!/usr/bin/env python3
+"""Replays Qwen Code 0.28's headless output: stream-json lines, or one json array."""
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_QWEN_LOG"], "a") as f:
+    f.write(json.dumps({"args": args, "stdin": sys.stdin.read()}) + "\n")
+sid = args[args.index("--resume") + 1] if "--resume" in args else args[args.index("--session-id") + 1]
+def ev(**k):
+    return {"session_id": sid, **k}
+def msg(content, usage):
+    return ev(type="assistant", parent_tool_use_id=None, message={"role": "assistant", "model": "qwen4-max",
+                                                                 "content": content, "usage": usage})
+events = [
+    ev(type="system", subtype="init", tools=["read_file"], model="qwen4-max"),
+    ev(type="stream_event", parent_tool_use_id=None, event={"type": "goal_state"}),
+    ev(type="stream_event", parent_tool_use_id=None, event={"type": "message_start"}),
+    ev(type="stream_event", parent_tool_use_id=None,
+       event={"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}}),
+    msg([{"type": "tool_use", "name": "read_file", "input": {"file_path": "a.py"}}],
+        {"input_tokens": 9000, "output_tokens": 20}),
+    ev(type="stream_event", parent_tool_use_id=None,
+       event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": "done"}}),
+    msg([{"type": "text", "text": "done"}], {"input_tokens": 9500, "output_tokens": 10}),
+    # the result's usage is the session's running total once resumed
+    ev(type="result", subtype="success", is_error=False, num_turns=2, result="done",
+       usage={"input_tokens": 50000, "output_tokens": 300}),  # stream-json's result has no `stats`
+]
+if "stream-json" in args:
+    for e in events:
+        print(json.dumps(e))
+else:
+    print(json.dumps(events))
+'''
+
+
+class TestQwen(unittest.TestCase):
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.exe = self.d / "qwen"
+        self.exe.write_text(FAKE_QWEN.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
+        self.exe.chmod(0o755)
+        self.log = self.d / "calls.jsonl"
+
+    def req(self, sid=None, opts=None, on_event=None, prompt="hello"):
+        from orch.backends import TurnRequest
+        return TurnRequest("q", "worker", prompt, "be brief", sid, str(self.d), 20,
+                           {"executable": str(self.exe), **(opts or {})}, env={"FAKE_QWEN_LOG": str(self.log)},
+                           on_event=on_event)
+
+    def calls(self):
+        return [json.loads(x) for x in self.log.read_text().splitlines()]
+
+    def test_command_drops_claude_only_flags_and_maps_the_rest(self):
+        from orch.backends import QwenBackend
+        cmd, sid = QwenBackend().build_command(self.req(opts={
+            "model": "qwen4-max", "permission_mode": "acceptEdits", "effort": "low", "max_turns": 3,
+            "disable_hooks": True, "allowed_tools": ["read_file", "glob"], "disallowed_tools": "run_shell_command",
+            "add_dirs": ["/x"]}, on_event=lambda e: None))
+        self.assertEqual(cmd[1:5], ["-p", "--output-format", "stream-json", "--include-partial-messages"])
+        for flag in ("--verbose", "--effort", "--permission-mode", "--max-turns", "--settings", "--allowedTools"):
+            self.assertNotIn(flag, cmd)
+        self.assertIn(["--session-id", sid], [cmd[i:i + 2] for i in range(len(cmd))])
+        joined = " ".join(cmd)
+        for part in ("--append-system-prompt be brief", "--model qwen4-max", "--approval-mode auto-edit",
+                     "--allowed-tools read_file --allowed-tools glob", "--exclude-tools run_shell_command",
+                     "--include-directories /x"):
+            self.assertIn(part, joined)
+        cmd, _ = QwenBackend().build_command(self.req(sid="s-1", opts={"approval_mode": "yolo", "stream": False},
+                                                      on_event=lambda e: None))
+        self.assertIn("json", cmd[cmd.index("--output-format") + 1])
+        self.assertNotIn("stream-json", cmd)
+        self.assertEqual(cmd[cmd.index("--resume") + 1], "s-1")
+        self.assertEqual(cmd[cmd.index("--approval-mode") + 1], "yolo")
+
+    def test_streamed_turn(self):
+        from orch.backends import QwenBackend
+        events = []
+        res = QwenBackend().run(self.req(on_event=events.append), lambda: False)
+        self.assertEqual((res.status, res.output), ("ok", "done"))
+        self.assertEqual(res.session_id, self.calls()[0]["args"][self.calls()[0]["args"].index("--session-id") + 1])
+        self.assertEqual(self.calls()[0]["stdin"], "hello")
+        kinds = [(e["k"], e["s"]) for e in events]
+        self.assertEqual(kinds[0], ("session", res.session_id))  # known before the reply, for interrupted turns
+        self.assertIn(("tool", "read_file: a.py"), kinds)
+        self.assertIn(("text", "done"), kinds)
+        self.assertNotIn("hmm", [s for _, s in kinds])  # thinking is not the reply
+        self.assertEqual(res.meta["usage"], {"input_tokens": 18500, "output_tokens": 30})  # this turn's own
+        self.assertEqual(res.meta["session_usage"]["input_tokens"], 50000)
+        self.assertEqual(res.meta["models"], ["qwen4-max"])
+        self.assertNotIn("total_cost_usd", res.meta)
+
+    def test_json_turn_resumes_and_compacts_with_compress(self):
+        from orch.backends import QwenBackend
+        res = QwenBackend().run(self.req(sid="s-9"), lambda: False)
+        self.assertEqual((res.status, res.output, res.session_id), ("ok", "done", "s-9"))
+        self.assertEqual(res.meta["usage"]["input_tokens"], 18500)
+        QwenBackend().compact(self.req(sid="s-9", opts={"compact_instructions": "keep the plan"}), lambda: False)
+        self.assertEqual(self.calls()[-1]["stdin"], "/compress keep the plan")
+
+    def test_config_accepts_qwen(self):
+        from orch.backends import BACKENDS, QwenBackend
+        self.assertIsInstance(BACKENDS["qwen"], QwenBackend)
+        self.assertEqual(BACKENDS["qwen"].name, "qwen")
+
+
 class TestManagerChatSession(unittest.TestCase):
     """A board chat with the critic must not move the manager into the critic's session."""
 

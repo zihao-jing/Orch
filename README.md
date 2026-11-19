@@ -543,7 +543,7 @@ monitors:
         task: ...                   # pipeline: the worker's round-1 task
         reviews: [..]               # verifier only
         feedback_to: [..]           # verifier only
-        backend: claude | codex | agy | command | mock
+        backend: claude | qwen | codex | agy | command | mock
         backend_options: {...}
         working_dir: ...
         timeout: 1800
@@ -598,6 +598,7 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
   `extra_args`. Exec-only flags such as `--ignore-user-config` and `--full-auto` are not supported by app-server.
   App-server reads normal Codex configuration plus these overrides, uses `approval_policy="never"`, and defaults
   to `workspace-write` if `sandbox` is omitted. It does not automatically approve tool requests.
+* **qwen**: the Qwen Code CLI (`npm i -g @qwen-code/qwen-code`). Its headless mode follows Claude Code's, so it runs the same way: `qwen -p --output-format stream-json --include-partial-messages` (live text on the board) or `--output-format json` with `stream: false`, sessions via `--session-id` / `--resume`, and the system prompt via `--append-system-prompt` (`system_prompt_mode: replace` for `--system-prompt`). Options: `model` (an id from your `~/.qwen/settings.json` model providers), `approval_mode` (`plan|default|auto-edit|auto|yolo`; Claude's `permission_mode` names are mapped), `allowed_tools`, `disallowed_tools` (passed as `--exclude-tools`), `add_dirs`, `mcp_config`, `compact_instructions`, `stream`, `extra_args`, `executable`. Claude-only options (`effort`, `max_turns`, `disable_hooks`) are ignored. Sessions are compacted with `/compress`. Qwen reports tokens but no dollar cost; a turn's `usage` is that turn's own (Qwen's running session total is kept as `session_usage`). Set the provider and key up once in Qwen Code itself. Qwen's background memory extractor adds about 6K tokens to every resumed turn; turn it off with `"memory": {"enableManagedAutoMemory": false}` in `~/.qwen/settings.json` or the workspace's `.qwen/settings.json`.
 * **agy**: the Antigravity CLI, for Gemini models. Runs `agy --output-format json -p <prompt>` and continues sessions with `--conversation <id>` (the id is read from the JSON output). There is no system-prompt flag, so the system prompt goes in front of a session's first message. Options: `model`, `effort`, `mode` (`accept-edits|auto|plan`), `dangerously_skip_permissions`, `sandbox`, `add_dirs`, `agent`, `project`, `settings`, `print_timeout`, `prompt_via` (`arg`, the default, or `stdin`), `extra_args`, `executable`. Sign in once by running `agy` interactively; `agy models` lists the model names. Experimental: the JSON field names are read leniently (`result`/`response`/`text`, `conversation_id`/`session_id`).
 * **command**: wraps any CLI. Options:
   * `command` and an optional `resume_command`, with the placeholders `{session_id} {cwd} {agent} {prompt} {prompt_file} {system_prompt} {system_prompt_file}`
@@ -673,7 +674,7 @@ fallback_cooldown: 18000                     # seconds to stay on a backup that 
 
 ```
 orch/config.py      schema, defaults merging, *_file includes, validation
-orch/backends.py    claude / codex / agy / command / mock + process runner (timeouts, stop, kill process group)
+orch/backends.py    claude / qwen / codex / agy / command / mock + process runner (timeouts, stop, kill process group)
 orch/controller.py  MonitorRunner: pipeline + llm modes, sessions, routing, retries, parallel stages
 orch/recorder.py    run directory, state, events, turn and round records, inbox / STOP control files
 orch/report.py      static HTML viewers

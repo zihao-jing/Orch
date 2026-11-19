@@ -6,6 +6,7 @@ Sessions are continued by passing back the ``session_id`` a previous turn return
 Built-in backends
 -----------------
 claude   Claude Code CLI (``claude -p``), sessions via --session-id / --resume.
+qwen     Qwen Code CLI (``qwen -p``), same event format as Claude Code; sessions via --session-id / --resume.
 codex    OpenAI Codex CLI (``codex exec`` / ``codex exec resume``). Experimental.
 agy      Antigravity CLI (``agy -p``) for Gemini models, sessions via --conversation. Experimental.
 command  Any CLI, described with a command template. Use this to wrap other agents.
@@ -278,6 +279,7 @@ class ClaudeBackend(Backend):
                 meta["usage"] = {k: v for k, v in usage.items() if isinstance(v, (int, float))}
             if isinstance(data.get("modelUsage"), dict) and data["modelUsage"]:
                 meta["models"] = sorted(data["modelUsage"])  # the models that actually answered
+            self._result_meta(data, out, meta)
             if data.get("is_error") and status == "ok":
                 status = "error"
             if '"compact_boundary"' in out:  # the CLI compacted the session during the turn (auto-compact)
@@ -293,6 +295,9 @@ class ClaudeBackend(Backend):
                 meta["partial"] = True
             return TurnResult(status, output, sid, rc, err, _redact(cmd, req), meta, raw=raw)
         return TurnResult(status, output, sid, rc, err, _redact(cmd, req), meta)
+
+    def _result_meta(self, data: Dict[str, Any], out: str, meta: Dict[str, Any]) -> None:
+        """Backend-specific additions to a turn's meta, from the final result and the raw output."""
 
     COMPACT = "/compact"
 
@@ -407,6 +412,99 @@ def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
         if d.get("type") == "result" or "result" in d:
             return d
     return None
+
+
+class QwenBackend(ClaudeBackend):
+    """Qwen Code CLI in headless mode (``qwen -p``).
+
+    Its print mode follows Claude Code's: the same json / stream-json events (the json output is a list of them),
+    --session-id / --resume, --system-prompt / --append-system-prompt. What differs is handled here: it has no
+    --verbose, --effort, --permission-mode, --disallowedTools or --settings; it compacts with /compress; it reports
+    no dollar cost; and on a resumed session its result `usage` is the session's running total, so a turn's own
+    tokens are summed from that turn's assistant messages instead (`session_usage` keeps the running total).
+
+    options: executable, model, approval_mode (plan|default|auto-edit|auto|yolo; or permission_mode with Claude's
+             names, mapped), allowed_tools, disallowed_tools (-> --exclude-tools), add_dirs, mcp_config,
+             system_prompt_mode (append|replace), stream (default true), compact_instructions, extra_args.
+             Claude-only options (effort, max_turns, disable_hooks) are ignored.
+    """
+
+    name = "qwen"
+    COMPACT = "/compress"
+    #: Claude Code permission modes -> Qwen Code approval modes; other values are passed through as they are
+    APPROVAL_MODES = {"default": "default", "acceptEdits": "auto-edit", "plan": "plan", "auto": "auto",
+                      "bypassPermissions": "yolo"}
+
+    def build_command(self, req: TurnRequest) -> Tuple[List[str], str]:
+        o = req.options
+        cmd = [str(o.get("executable", "qwen")), "-p"]  # the prompt itself goes on stdin
+        if req.on_event is not None and o.get("stream", True):
+            cmd += ["--output-format", "stream-json", "--include-partial-messages"]
+        else:
+            cmd += ["--output-format", "json"]
+        if req.session_id:
+            cmd += ["--resume", req.session_id]
+            sid = req.session_id
+        else:
+            sid = str(uuid.uuid4())
+            cmd += ["--session-id", sid]
+        if req.system_prompt:
+            flag = "--system-prompt" if o.get("system_prompt_mode") == "replace" else "--append-system-prompt"
+            cmd += [flag, req.system_prompt]
+        if o.get("model"):
+            cmd += ["--model", str(o["model"])]
+        mode = o.get("approval_mode") or o.get("permission_mode")
+        if mode:
+            cmd += ["--approval-mode", self.APPROVAL_MODES.get(str(mode), str(mode))]
+        for key, flag in (("allowed_tools", "--allowed-tools"), ("disallowed_tools", "--exclude-tools")):
+            v = o.get(key)
+            for t in (v if isinstance(v, list) else str(v or "").split(",")):
+                if str(t).strip():
+                    cmd += [flag, str(t).strip()]  # one flag per tool: a list flag would swallow what follows
+        for d in _opt_list(o.get("add_dirs")):
+            cmd += ["--include-directories", os.path.expanduser(d)]
+        if o.get("mcp_config"):
+            cmd += ["--mcp-config", os.path.expanduser(str(o["mcp_config"]))]
+        cmd += _opt_list(o.get("extra_args"))
+        return cmd, sid
+
+    def _result_meta(self, data: Dict[str, Any], out: str, meta: Dict[str, Any]) -> None:
+        if "usage" in meta:
+            meta["session_usage"] = meta.pop("usage")
+        turn, models = _qwen_turn_usage(out)
+        if turn:
+            meta["usage"] = turn
+        if models:  # the models that answered (only the json result has `stats`; every assistant message names one)
+            meta["models"] = models
+
+
+def _qwen_turn_usage(out: str) -> Tuple[Dict[str, Any], List[str]]:
+    """(this turn's tokens, the models that answered): the sum of the usage on each assistant message the turn
+    printed (one per model request, subagents' included), and the models those messages name. Qwen's own result
+    total also counts the session's earlier turns once it is resumed."""
+    events: List[Any] = []
+    try:
+        parsed = json.loads(out)
+        events = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    total: Dict[str, Any] = {}
+    models: List[str] = []
+    for ev in events:
+        if isinstance(ev, dict) and ev.get("type") == "assistant":
+            m = ev.get("message") or {}
+            if m.get("model") and m["model"] not in models:
+                models.append(str(m["model"]))
+            for k, v in (m.get("usage") or {}).items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    total[k] = total.get(k, 0) + v
+    return (total if any(total.values()) else {}), sorted(models)
 
 
 class CodexBackend(Backend):
@@ -907,6 +1005,7 @@ def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
 
 BACKENDS: Dict[str, Backend] = {
     "claude": ClaudeBackend(),
+    "qwen": QwenBackend(),
     "codex": CodexBackend(),
     "agy": AgyBackend(),
     "command": CommandBackend(),
