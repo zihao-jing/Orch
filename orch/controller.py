@@ -862,6 +862,7 @@ class MonitorRunner:
         attempt, urgent_send, entering, got_there = 0, "", True, False
         waited, fixes = 0, 0  # B8: retries of the current model after a wait, and immediate corrections
         last_pe = ""  # the provider's message from the last attempt, if it refused the request
+        recovery_note = ""
         while True:
             if entering:  # the primary model, or a backup taking over this turn
                 entering = False
@@ -874,6 +875,8 @@ class MonitorRunner:
                     old_sid, sid = sid, None
                     if cut:  # the new session has none of it: the whole message goes again
                         prompt = "\n\n".join(x for x in [m["message"] for m in updates] + fwd + [base] if x.strip())
+                        if recovery_note:
+                            prompt += "\n\n" + recovery_note
                         cut = None
                     note = self.fresh_session_note(agent)
                     if note:
@@ -946,10 +949,15 @@ class MonitorRunner:
                 self.log(f"r{rnd} ⚡ {agent.name}: ended early for an urgent message")
             st_, reason = classify(self.mon.controller, res)
             reason = pe or reason
+            stalled = res.status == "error" and res.meta.get("error_kind") == "provider_stall"
+            if stalled:
+                reason = res.meta.get("error") or "OpenCode provider recovery window expired"
             if st_ != res.status:
                 res = dataclasses.replace(res, status=st_)
             attempts.append({"attempt": attempt + 1, "model": v.label, "status": res.status, "exit_code": res.exit_code,
                              "reason": reason})
+            if res.meta.get("provider_recovery"):
+                attempts[-1]["provider_recovery"] = res.meta["provider_recovery"]
             if res.status == "needs_human" and not self.questions_pause:
                 res = dataclasses.replace(res, status="ok")  # handled by the caller (goes one level up)
                 record["asked"] = reason
@@ -973,7 +981,16 @@ class MonitorRunner:
             # the `retries` immediate corrections. Then the backups take over in order.
             waits = list(getattr(agent, "retry_waits", []) or [])
             transient = bool(pe) or not reason
-            if transient and waits:
+            if stalled:
+                # OpenCode has already spent its bounded recovery window retrying internally. Use the next
+                # configured variant, retaining the original task and evidence of potentially completed work.
+                note = res.meta.get("recovery_note") or ""
+                if res.output:
+                    note += "\nPartial reply from the previous attempt:\n" + res.output
+                recovery_note = "\n\n".join(x for x in (recovery_note, note) if x)
+                sid = res.session_id or record.get("session_id") or sid
+                prompt = "\n\n".join(x for x in (prompt, note) if x)
+            elif transient and waits:
                 if waited < len(waits):
                     secs = waits[waited]
                     waited += 1
@@ -993,6 +1010,10 @@ class MonitorRunner:
             if vi + 1 >= len(chain):
                 break
             nxt = chain[vi + 1]
+            if stalled and sid and nxt.session_key == v.session_key:
+                urgent_send = (self.tpl("turn_continue").strip() or "continue") + "\n\n" + recovery_note
+            if stalled:
+                record["input"] = urgent_send or prompt
             record.setdefault("fallbacks", []).append({"at": now_iso(), "from": v.label, "to": nxt.label,
                                                        "reason": reason or res.status})
             rec.event("fallback", turn=record["turn_id"], agent=agent.name, old=v.label, new=nxt.label,
