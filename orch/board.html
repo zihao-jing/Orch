@@ -759,7 +759,7 @@ function lineHTML(it, where){  // one message: time, sender → recipient, statu
   const to = it.to ? `<span class="to mute">→ ${esc(called(it.to))}</span>` : '';
   const st = it.status ? `<span class="st ${esc(it.status)}">${esc(ST_LABEL[it.status] || it.status)}</span>` : '';
   const kt = it.kind !== 'msg' ? `<span class="ktag ${esc(it.kind)}">${esc(it.kind)}</span>` : '';
-  const extra = (it.urgent ? '<span class="st running">⚡</span>' : '') + (it.verdict ? pill(it.verdict === 'PASS' ? 'p-good' : 'p-crit', it.verdict === 'PASS' ? '✓ pass' : '✕ fail') : '')
+  const extra = (it.urgent ? '<span class="st running">⚡</span>' : '') + (it.verdict ? pill(it.verdict === 'PASS' ? 'p-good' : 'p-warn', it.verdict === 'PASS' ? '✓ pass' : '↻ needs work') : '')
     + (it.purpose && it.kind === 'msg' ? `<span class="mute" style="font-size:11px">${esc(it.purpose)}</span>` : '');
   const wh = where ? `<span class="ktag">${esc(groupName(it.ms, it.step))}</span>` : '';
   const whole = it.tid && it.id === 't:' + it.tid;  // a turn's reply: its round and how much went in and came out

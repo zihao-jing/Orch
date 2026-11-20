@@ -61,7 +61,7 @@ th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);verti
 tr:last-child td{border-bottom:0}
 .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
 .ok,.completed,.PASS{color:var(--ok);background:var(--ok-bg)}.error,.failed,.FAIL,.ERROR{color:var(--err);background:var(--err-bg)}
-.timeout,.stopped,.max_rounds_reached,.UNKNOWN,.starting{color:var(--warn);background:var(--warn-bg)}.running,.done{color:var(--run);background:var(--run-bg)}
+.timeout,.stopped,.max_rounds_reached,.UNKNOWN,.starting,.needs_work{color:var(--warn);background:var(--warn-bg)}.running,.done{color:var(--run);background:var(--run-bg)}
 details{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:8px 0}
 details>summary{cursor:pointer;padding:10px 12px;list-style:none;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 details>summary::-webkit-details-marker{display:none}details>summary:before{content:"▸";color:var(--mute)}details[open]>summary:before{content:"▾"}
@@ -283,8 +283,8 @@ def _turn_html(t: Dict[str, Any], cut: bool = False) -> str:
     if t.get("role") == "verifier":
         m = re.findall(r"<verdict>\s*(PASS|FAIL)|VERDICT:\s*\**\s*(PASS|FAIL)", out, re.I)
         if m:
-            v = [a or b for a, b in m][-1].upper()
-            verdict = pill(v)
+            v = [a or b for a, b in m][-1].upper()  # a FAIL is a review outcome, not an error: shown as "needs work"
+            verdict = pill(v) if v == "PASS" else '<span class="pill needs_work">needs work</span>'
     head = (f'<summary>{pill(t.get("status"))}<b>{e(t.get("agent"))}</b>'
             f'<span class="tag">{e(t.get("purpose"))}</span>{verdict}'
             + (f'<span class="tag">❓ {e(t.get("asked"))}</span>' if t.get("asked") else "")
