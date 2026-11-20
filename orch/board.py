@@ -1264,6 +1264,11 @@ def _handler(boards: Dict[str, Board]):
                     self.js(b.state())
             elif u.path == "/api/items":
                 self.js(self.board(q).items((q.get("g") or [""])[0], all_=(q.get("all") or [""])[0] == "1"))
+            elif u.path == "/api/version":  # the update check: fetches only at a safe point (orch/update.py)
+                from . import update
+                b = self.board(q)
+                st = (read_json(b.run_dir / "state.json", {}) or {}) if b.run_dir else {}
+                self.js(update.check(str(st.get("status") or "")))
             elif u.path == "/api/message":
                 self.js(self.board(q).message((q.get("id") or [""])[0]))
             elif u.path == "/api/search":

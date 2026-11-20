@@ -25,6 +25,16 @@
  --good:#0ca30c;--good-ink:#0ca30c;--good-bg:#132a13;--warn:#fab219;--warn-ink:#fab219;--warn-bg:#33270c;
  --crit:#d03b3b;--crit-ink:#ff8a8a;--crit-bg:#3a1717;--you:#9085e9;--you-bg:#24203f}
 *{box-sizing:border-box}
+/* the board's own confirm dialog (the browser's confirm() adds its own header and can't be styled) */
+dialog.ask{border:1px solid var(--ring);border-radius:14px;padding:20px 22px 16px;width:min(420px,calc(100vw - 32px));
+ background:var(--panel);color:var(--ink);box-shadow:0 18px 50px rgba(0,0,0,.22)}
+dialog.ask::backdrop{background:rgba(0,0,0,.38)}
+dialog.ask[open]{animation:askin .14s ease-out}@keyframes askin{from{opacity:0;transform:translateY(6px) scale(.98)}}
+dialog.ask h3{margin:0 0 6px;font-size:16px;font-weight:650}
+dialog.ask p{margin:0;color:var(--ink2);font-size:13.5px;line-height:1.5}
+dialog.ask .acts{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+dialog.ask .acts button{min-width:84px}
+button.danger{background:var(--crit);border-color:var(--crit);color:#fff}
 html,body{margin:0;background:var(--page);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 .wrap{max-width:1400px;margin:0 auto;padding:18px 16px 60px}
 header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin-bottom:14px}
@@ -56,6 +66,7 @@ button{font:inherit;border-radius:8px;border:1px solid var(--ring);background:va
 button:hover{border-color:var(--axis)}button.pri{background:var(--s1);border-color:var(--s1);color:#fff}
 a.btn{display:inline-block;font:inherit;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:2px 9px;font-size:12px;text-decoration:none}a.btn:hover{text-decoration:none;filter:brightness(.97)}
 button.ok{background:var(--good);border-color:var(--good);color:#fff}button.sm{padding:2px 9px;font-size:12px}
+select.sm{font:inherit;font-size:12px;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:2px 9px;max-width:45%;cursor:pointer}select.sm:hover{border-color:var(--axis)}
 button:disabled{opacity:.5;cursor:default}
 textarea,input[type=text]{font:inherit;width:100%;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:8px 10px;resize:vertical}
 textarea:focus,input:focus{outline:2px solid var(--s1);outline-offset:-1px}
@@ -211,6 +222,10 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
 .st.running{color:var(--s1)}.st.failed,.st.error,.st.unseen,.st.unknown,.st.timeout{color:var(--crit-ink)}
 .lmore{font-size:12px;color:var(--mute);padding:2px 4px}
 @media (max-width:600px){.wrap{padding:12px 16px 40px}.tile .v{font-size:18px}.blocks{padding:6px 6px 8px}details.ln>summary .to{display:none}}
+/* phones: the chat fills the screen (no resize handle); inputs at 16px so iOS does not zoom on focus; touch-size buttons */
+@media (max-width:600px){.side{padding:0}.side .chat{width:100%;height:100%;max-height:100%;resize:none;border-radius:0;padding:12px 14px}
+ textarea,input[type=text],input[type=search],select{font-size:16px}}
+@media (pointer:coarse){button,a.btn{min-height:44px;min-width:44px;padding:8px 12px}}
 </style>
 </head>
 <body>
@@ -220,6 +235,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <span id="status"></span>
   <span class="mute mono" id="runid"></span>
   <span style="flex:1"></span>
+  <span class="mute mono" id="ver" style="font-size:12px"></span> <button class="sm" id="verbtn" title="Compare this orch with origin/main (checks only when the run is at a gate, waiting for you, or ended)">Check for update</button>
   <select id="mon" style="display:none"></select>
   <a class="sm btn" id="replink" href="report" target="_blank" title="The run's static report (report.html): every turn's input and output, to keep or share">📄 Report</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
@@ -247,7 +263,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   </main>
   <aside class="side">
    <div class="card chat">
-    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" title="Who to talk to" style="font-size:13px;max-width:45%"></select><button class="sm" id="discuss" title="Discussion: while it is on, the manager sends nothing to the critic; when you end it, it sends one message with the new directions">💬 Discuss</button><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
+    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" class="sm" title="Who to talk to"></select><button class="sm" id="discuss" title="Discussion: while it is on, the manager sends nothing to the critic; when you end it, it sends one message with the new directions">💬 Discuss</button><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
     <div class="chatlog" id="chatlog"></div>
     <div class="row"><textarea id="chatin" rows="2" placeholder="Ask anything or give direction… (Enter to send, Shift+Enter for a new line)"></textarea></div>
     <div class="row" style="justify-content:space-between;align-items:center"><span class="mute" style="font-size:12px" id="chat-hint"></span><button class="pri" id="chatsend">Send</button></div>
@@ -255,6 +271,8 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   </aside>
  </div>
 </div>
+<dialog class="ask" id="askdlg"><form method="dialog"><h3 id="ask-t"></h3><p id="ask-b"></p>
+<div class="acts"><button value="no" id="ask-no">Cancel</button><button value="yes" id="ask-ok" class="pri">OK</button></div></form></dialog>
 <script>
 (function(){
 const MONS = __MONITORS__;
@@ -455,7 +473,7 @@ function fullC(c){ const m = c.len > (c.text||'').length && msgCache.get('c:' + 
 const clipNote = c => c.len > (c.text||'').length ? `<button class="more" data-chatfull="${esc(c.id)}">Show the whole message (${Math.round(c.len/1000)}k characters)</button>` : '';
 function renderNeeds(mg){
   const QA = D.queued_answers || {};
-  const g = mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !QA[q.id]);  // settled ones leave
+  const g = mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !QA[q.id] && !qThread(q.id).some(c => c.settle && c.status === 'running'));  // settled ones leave; so does one the manager is writing up
   const threads = Object.fromEntries(mine.map(q => [q.id, qThread(q.id)]));
   const revs = (D.review_files||[]).filter(r => r.status === 'written' && r.exists);  // B9: a review file to comment in
   const job = mg.job, sig = JSON.stringify([job && job.since, g && g.key, discussWanted(), !!(mg.discussion_batch||{}).gate, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status)), revs.map(r => r.path)]);
@@ -508,11 +526,12 @@ function renderNeeds(mg){
       h += `<div class="mute" style="font-size:12px;margin-top:6px">${esc(called(q.from))} is writing up what we agreed…</div>`;
     } else if (!D.can_chat){
       h += `<div class="mute" style="font-size:12px;margin-top:6px">Talking needs the board started with the run (\`orch run --serve\`); or answer with \`orch answer\`.</div>`;
+    } else if (D.discussion || D.discussion_pending){  // nothing settles while a discussion is open
+      h += `<div class="mute" style="font-size:12px;margin-top:6px">A discussion is open. End it in the discussion panel first; then you can answer here.</div>`;
     } else {
-      h += ((q.options||[]).length && !th.length ? '<div class="opts">' + q.options.map(o => `<button class="sm" data-qo="${esc(q.id)}" data-a="${esc(o[0] + ') ' + o[1])}">${esc(o[0])}) ${esc(o[1])}</button>`).join('') + '</div>' : '') +
-        `<div class="row"><textarea id="qa-${esc(q.id)}" rows="2" placeholder="${th.length ? 'Reply…' : 'Talk it through with ' + esc(called(q.from)) + '…'} (Enter to send)"></textarea></div>
-        <div class="row" style="justify-content:space-between;align-items:center"><span class="mute" style="font-size:12px">${busy ? esc(called(q.from)) + ' is replying…' : 'Settle it when you agree; ' + esc(called(q.from)) + ' writes up the outcome for ' + esc(called('critic')) + '.'}</span>
-        <span><button class="pri" data-qs="${esc(q.id)}"${busy ? ' disabled' : ''}>Send</button> <button class="ok" data-qd="${esc(q.id)}"${busy ? ' disabled' : ''}>✓ Settle it</button></span></div>`;
+      h += ((q.options||[]).length ? '<div class="opts">' + q.options.map(o => `<button class="sm" data-qo="${esc(q.id)}" data-a="${esc(o[0] + ') ' + o[1])}">${esc(o[0])}) ${esc(o[1])}</button>`).join('') + '</div>' : '') +
+        `<div class="row"><textarea id="qa-${esc(q.id)}" rows="2" placeholder="Your answer… (Enter to send)"></textarea></div>
+        <div class="row" style="justify-content:flex-end"><button class="pri" data-qs="${esc(q.id)}">Send</button></div>`;
     }
     h += '</div>';
   });
@@ -522,31 +541,48 @@ function renderNeeds(mg){
 }
 // what follows a question that is meant for me, up to a divider or the part addressed to the critic
 function forMe(t){ return String(t||'').replace(TAGBLOCK, '').replace(/\n{3,}/g, '\n\n').trim(); }  // outside the tags
-async function qSend(qid, text){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('api/chat', {qid, message: text}); }
+async function qSend(qid, text){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('api/chat', {qid, message: text, settle: true}); }  // my answer: the manager writes it up for the critic
 document.addEventListener('keydown', e => { const t = e.target;
   if (t.id && t.id.startsWith('qa-') && e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); qSend(t.id.slice(3), t.value.trim()); } });
+// ask({title, body, ok, tone}): the board's confirm dialog; resolves true when confirmed. Esc, Cancel or a click
+// outside it cancel; Enter confirms (cancels for 'danger'). tone: 'pri' (default), 'ok' (green) or 'danger' (red)
+function ask({title, body = '', ok = 'OK', tone = 'pri'}){
+  const d = $('askdlg'), okb = $('ask-ok');
+  if (!d.showModal) return Promise.resolve(confirm(title + (body ? '\n\n' + body : '')));  // very old browsers
+  $('ask-t').textContent = title; $('ask-b').textContent = body; $('ask-b').hidden = !body;
+  okb.textContent = ok; okb.className = tone; d.returnValue = 'no';
+  return new Promise(res => {
+    d.addEventListener('close', () => res(d.returnValue === 'yes'), {once: true});
+    d.showModal(); (tone === 'danger' ? $('ask-no') : okb).focus();  // Enter never confirms a stop by accident
+  });
+}
+$('askdlg').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close('no'); });  // the backdrop
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.job){ b.disabled = true; await post('api/job', {}); }
   if (b.dataset.gate){ const msg = ($('gate-msg')||{}).value || '';
-    if (b.dataset.gate === 'revise' && !msg.trim() && !confirm('Send it back without a note?')) return;
-    if (b.dataset.gate === 'revise' && (D.managed.gate||{}).kind === 'wait' && !confirm('Send the pause back to the manager? It decides again with your note.')) return;
+    if (b.dataset.gate === 'revise' && !msg.trim() && !(await ask({title: 'Send it back without a note?', body: 'The manager decides what still needs work.', ok: 'Send back'}))) return;
+    if (b.dataset.gate === 'revise' && (D.managed.gate||{}).kind === 'wait' && !(await ask({title: 'Send the pause back?', body: 'The manager decides again, with your note.', ok: 'Send back'}))) return;
     b.disabled = true; await post('api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}); }
-  else if (b.dataset.qo){ b.disabled = true; await qSend(b.dataset.qo, b.dataset.a); }
+  else if (b.dataset.qo){ b.disabled = true; await post('api/chat', {qid: b.dataset.qo, message: b.dataset.a, settle: true}); }  // a pick: the manager writes it up for the critic
   else if (b.dataset.qs){ const v = (($('qa-'+b.dataset.qs)||{}).value || '').trim(); if (!v) return; b.disabled = true; await qSend(b.dataset.qs, v); }
-  else if (b.dataset.qd){ const v = (($('qa-'+b.dataset.qd)||{}).value || '').trim();
-    if (!qThread(b.dataset.qd).length && !v && !confirm('Settle without talking? The manager writes up its current assumption as the answer.')) return;
-    b.disabled = true; const ta = $('qa-' + b.dataset.qd); if (ta) ta.value = '';
-    await post('api/chat', {qid: b.dataset.qd, message: v, settle: true}); }
   else if (b.dataset.reopen != null && b.dataset.reopen !== undefined){
-    if (!confirm('Move milestone ' + (+b.dataset.reopen + 1) + ' back to open? Its checklist gets an open item; the manager is not prompted.')) return;
+    if (!(await ask({title: 'Reopen milestone ' + (+b.dataset.reopen + 1) + '?', body: 'Its checklist gets an open item. The manager is not prompted.', ok: 'Reopen'}))) return;
     b.disabled = true; await post('api/milestone', {ms: +b.dataset.reopen}); }
   else if (b.dataset.chatfull){ b.disabled = true; try { await getMsg('c:' + b.dataset.chatfull); } catch(err){} $('needs')._sig = null; render(); }
-  else if (b.dataset.rc){ if (!confirm('Send your comments in this file to the manager?')) return;
+  else if (b.dataset.rc){ if (!(await ask({title: 'Send your comments?', body: 'The manager gets what you wrote in the review file.', ok: 'Send'}))) return;
     b.disabled = true; await post('api/review_comments', {path: b.dataset.rc}); }
 });
 async function post(url, body){ try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json(); if (j.error) alert(j.error); soon(); return j; } catch(e){ alert('Could not reach the board server.'); } }
 
+// the update check: the commit this orch runs from, and whether main has a newer one (orch/update.py)
+$('verbtn').addEventListener('click', async () => {
+  const v = $('ver'); v.textContent = 'checking…';
+  try { const j = await (await fetch('api/version?m=' + encodeURIComponent(M), {cache:'no-store'})).json();
+    v.textContent = j.error ? j.error : !j.checked ? `running ${j.current} · ${j.reason}`
+      : j.update ? `running ${j.current} · new version ${j.latest} on main (${j.behind} commit${j.behind > 1 ? 's' : ''} ahead)`
+      : `running ${j.current} · up to date`;
+  } catch(e){ v.textContent = 'Could not reach the board server.'; } });
 const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started'], open:['p-warn','↺ open again']};
 
 // ---------------------------------------------------------------- charts (inline SVG)
@@ -1115,7 +1151,7 @@ $('chattoggle').addEventListener('click', () => setChat(!chatOpen));
 $('discpill').addEventListener('click', () => { if (chatWith && chatWith !== mgrName()){ chatWith = null; const cl = $('chatlog'); cl._first = undefined; } setChat(true); render(); });
 $('chatclose').addEventListener('click', () => setChat(false));
 document.querySelector('.side').addEventListener('mousedown', e => { if (e.target === e.currentTarget) setChat(false); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen) setChat(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen && !$('askdlg').open) setChat(false); });
 $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
 function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_pending; }
@@ -1123,17 +1159,18 @@ function discussWanted(){ return D.discussion_pending == null ? !!D.discussion :
 // a plan or milestone gate open: a discussion ended there waits for my decision, then goes in one message with it
 function gateTakesDiscussion(){ const g = (D.managed||{}).gate; return !!g && (g.kind === 'plan' || g.kind === 'milestone'); }
 $('discuss').addEventListener('click', async () => { const on = !discussWanted(), atGate = gateTakesDiscussion();
-  if (!confirm(on ? 'Start a discussion? The manager sends nothing to the critic until you end it; then it sends one message with the new directions.'
-      : atGate ? 'End the discussion? Nothing is sent yet: next, approve or send back at the gate, and the manager sends the critic one message with the discussion and your decision.'
-      : 'End the discussion? The manager sends the critic one message with the new directions.')) return;
+  if (!(await ask(on ? {title: 'Start a discussion?', body: 'The manager sends nothing to the critic until you end it.', ok: 'Start'}
+      : atGate ? {title: 'End the discussion?', body: 'Nothing is sent yet. Approve or send back at the gate next; the manager then sends one message with both.', ok: 'End discussion', tone: 'ok'}
+      : {title: 'End the discussion?', body: 'The manager sends the critic one message with the new directions.', ok: 'End discussion', tone: 'ok'}))) return;
   D.discussion_pending = on; render(); await post('api/discussion', {on});
   if (!on && atGate){ setChat(false); const n = $('needs'); if (n) n.scrollIntoView({behavior: 'smooth', block: 'start'});
     setTimeout(() => { const t = $('gate-msg'); if (t) t.focus(); }, 300); } });
-$('reviewbtn').addEventListener('click', async () => { if (!confirm('Ask the manager for a review file you can comment in?')) return;
+$('reviewbtn').addEventListener('click', async () => { if (!(await ask({title: 'Ask for a review file?', body: 'The manager writes a file you can comment in.', ok: 'Ask'}))) return;
   $('reviewbtn').disabled = true; await post('api/review', {}); });
-$('night').addEventListener('click', () => { const on = !nightWanted();
-  if (confirm(on ? 'Turn night mode on? The manager answers your questions and passes gates itself until you turn it off; its choices are recorded in Questions and Decisions.' : 'Turn night mode off?')) post('api/night', {on}); });
-$('stop').addEventListener('click', () => { if (confirm('Stop the run after the current turn? You can resume it later.')) post('api/stop', {}); });
+$('night').addEventListener('click', async () => { const on = !nightWanted();
+  if (await ask(on ? {title: 'Turn on night mode?', body: 'The manager answers your questions and passes gates by itself. Its choices are recorded in Questions and Decisions.', ok: 'Turn on'}
+      : {title: 'Turn off night mode?', body: 'Questions and gates come back to you.', ok: 'Turn off'})) post('api/night', {on}); });
+$('stop').addEventListener('click', async () => { if (await ask({title: 'Stop the run?', body: 'It stops after the current turn. You can resume it later.', ok: 'Stop', tone: 'danger'})) post('api/stop', {}); });
 $('theme').addEventListener('click', () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('orch-theme', r.dataset.theme); } catch(e){} });
 try { const t = localStorage.getItem('orch-theme'); if (t) document.documentElement.dataset.theme = t; } catch(e){}
