@@ -2639,6 +2639,13 @@ class ManagedRunner(MonitorRunner):
             self.par_start(req)
             mg["phase"] = "parallel"
             return None
+        if not redo:
+            missing = [w.called for w in self.workers
+                       if not self.for_worker((mg.get("feedback") or {}).get(w.name) or "")]
+            if missing:
+                self.missing_instructions(missing)
+                return None
+            mg.pop("instruction_retry", None)
         # milestone_rounds counts rounds without progress: a step of the critic's plan finishing starts it again
         # (without a plan, every round of the milestone counts, as before)
         if not redo and self.stalled() >= c.milestone_rounds:
@@ -2692,6 +2699,23 @@ class ManagedRunner(MonitorRunner):
             if block:
                 self.new_question(m.agent(r["agent"]), self.critic.name, block, r["turn_id"])
         return self.after_work(recs, summary)
+
+    def missing_instructions(self, missing: List[str]) -> None:
+        """Ask the manager once for direction; another empty instruction waits for the human."""
+        mg = self.mg
+        retried = bool(mg.get("instruction_retry"))
+        text = (f"No next-step instruction was supplied for {', '.join(missing)}. "
+                "No further worker turn has been started for them. An unfinished plan or FAIL verdict alone "
+                "does not assign work. Confirm whether execution should remain paused or give the critic "
+                "a concrete authorized next step, resolving any closure, scope or deadline conflict.")
+        if retried:
+            text += " The manager's continuation was followed by another empty instruction; your direction is needed."
+        mg.update(instruction_retry=True,
+                  wait={"who": "missing worker instructions", "text": text, "proposal": text},
+                  phase="wait" if retried else "pause")
+        self.rec.event("missing_worker_instruction", workers=missing, awaiting_human=retried)
+        self.rec.progress("No worker instruction: " + ("waiting for your direction" if retried
+                                                       else "asking the manager whether to pause"))
 
     def after_work(self, recs: List[Dict[str, Any]], summary: Dict[str, Any]) -> Optional[str]:
         """After the workers' turns: hand the work to the critic, or first wait for a job the worker is waiting on."""
@@ -3472,6 +3496,11 @@ class ManagedRunner(MonitorRunner):
                 running = set(futs.values())
                 for n, s in slots.items():
                     if s["status"] == PW.READY and n not in running and self.par_can_turn():
+                        if not s.get("prompt") and not self.for_worker(s.get("instr") or ""):
+                            s["status"] = PW.BLOCKED
+                            self.rec.progress(f"No next-step instruction for {n}: no further turn starts; "
+                                              "the manager decides when the other assigned work has finished")
+                            continue
                         futs[self.par_dispatch(ex, n)] = n
                 busy = futs or any(s["status"] in (PW.WORKING, PW.JOB, PW.REVIEW) for s in slots.values())
                 ready = any(s["status"] == PW.READY for s in slots.values()) and self.par_can_turn()
@@ -3543,13 +3572,14 @@ class ManagedRunner(MonitorRunner):
         self.cur()["rounds"] = mg["ms_round"]
         prompt = s.get("prompt")
         if not prompt:
-            fb = self.for_worker(s.pop("instr", "") or "") or "Please carry on."
+            fb = self.for_worker(s.pop("instr", "") or "")
             if not self.has_session(w):
                 prompt = self.mtpl("worker_start", task=w.task or "", feedback=fb, human_messages="",
                                    cwd=w.working_dir, decisions="")
             else:
                 prompt = self.mtpl("worker_next", feedback=fb, human_messages="", round=rnd, cwd=w.working_dir)
             s["prompt"] = prompt  # kept until the turn ends: a restart runs it again
+        mg.pop("instruction_retry", None)
         prompt = s["prompt"] = self.par_leaks(w, prompt)
         for m in self.ledger.waiting(name):  # as it will be found in the prompt
             m["text"] = self.scrub_others(w, m.get("text") or "")[0]
@@ -3664,6 +3694,7 @@ class ManagedRunner(MonitorRunner):
             return
         earlier = s.pop("earlier", "")
         s["report"] = (earlier + "\n\n**Later, after the job it was waiting on:**\n\n" + out) if earlier else out
+        s["report_status"] = r["status"]
         s["status"] = PW.REVIEW
         par["reviews"].append(name)
         self.write_work_board()
@@ -3752,7 +3783,7 @@ class ManagedRunner(MonitorRunner):
                                 reason="names no worker of the parallel section")
                 continue
             s = par["slots"][name]
-            if s["status"] in (PW.IDLE, PW.DONE) or name == reviewed:
+            if s["status"] in (PW.IDLE, PW.DONE, PW.BLOCKED) or name == reviewed:
                 step = sec["step"] or (par["queue"][0] if par["queue"] else None)
                 if step in par["queue"]:
                     par["queue"].remove(step)
@@ -3824,7 +3855,7 @@ class ManagedRunner(MonitorRunner):
                 else self.mtpl("critic_par_last", who=f"`{name}`"))
         nudge = (self.st.get("nudge") or {}).get(v.name, "")
         raw_report = s.pop("report", "")
-        report = self.report_text({"output": raw_report, "status": "ok"})
+        report = self.report_text({"output": raw_report, "status": s.get("report_status", "ok")})
         prompt = self.mtpl("critic_par_review", human_messages=nudge, who=w.called, id=name, step=title,
                            report=report, next=tail.strip() and " " + tail.strip(), board=str(self.work_board_path()))
         held = s.pop("running_jobs", None) or {}
@@ -3895,7 +3926,7 @@ class ManagedRunner(MonitorRunner):
                 self.par_give(mine, r["turn_id"], reviewed=name)
                 s["instr"] = "\n\n".join(x for x in [feedback, s.get("instr", "")] if x).strip()
             else:
-                s.update(status=PW.READY, instr=feedback or "Please carry on.")
+                s.update(status=PW.READY, instr=feedback)
             s.pop("prompt", None)
             if s.get("step_turns", 0) >= c.milestone_rounds:
                 s["status"] = PW.STALLED
@@ -3956,6 +3987,10 @@ class ManagedRunner(MonitorRunner):
         summary = "\n".join(lines)
         self.rec.event("parallel_end", turns=par.get("turns", 0), max_rounds=bool(par.get("max_rounds")))
         self.rec.progress(f"👥 parallel section ends after {par.get('turns', 0)} worker turns")
+        missing = [n for n, s in par.get("slots", {}).items() if s.get("status") == PW.BLOCKED]
+        if missing:
+            self.missing_instructions(missing)
+            return None
         if par.get("max_rounds"):
             return "max_rounds_reached"
         if any(s.get("status") == PW.STALLED for s in par.get("slots", {}).values()):
@@ -4077,10 +4112,13 @@ class ManagedRunner(MonitorRunner):
         """The manager's PAUSE (the run waits for me) or CONTINUE (the critic gets work meanwhile)."""
         mg = self.mg
         out = r.get("output") or ""
-        if T.value(out, "decision") == "PAUSE" or (T.bodies(out, "pause") and T.value(out, "decision") != "CONTINUE"):
+        decision = T.value(out, "decision")
+        if decision != "CONTINUE":
+            # An absent or malformed decision must not implicitly authorize more worker turns.
             self.after_manager(r)
             msg = "\n\n".join(T.bodies(out, "pause")) or self.for_me(out)
-            mg["wait"] = {**w, "who": "the manager agrees", "text": msg or w.get("text", ""), "proposal": w.get("text", ""),
+            who = "the manager agrees" if decision == "PAUSE" or T.bodies(out, "pause") else "manager decision unclear"
+            mg["wait"] = {**w, "who": who, "text": msg or w.get("text", ""), "proposal": w.get("text", ""),
                           "turn": r["turn_id"]}
             mg["phase"] = "wait"
             return None

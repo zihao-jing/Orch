@@ -38,9 +38,11 @@ BOARD_HEAD = ("# Work board\n\n"
 
 # slot statuses
 IDLE, READY, WORKING, JOB, REVIEW, DONE, STALLED = "idle", "ready", "working", "job", "review", "done", "stalled"
+BLOCKED = "blocked"
 BUSY = (READY, WORKING, JOB, REVIEW)
 STATUS_TEXT = {IDLE: "waiting for a step", READY: "about to start", WORKING: "working", JOB: "background job running",
-               REVIEW: "waiting for review", DONE: "finished (no step left)", STALLED: "stopped: too many turns on one step"}
+               REVIEW: "waiting for review", DONE: "finished (no step left)", STALLED: "stopped: too many turns on one step",
+               BLOCKED: "waiting for a next-step instruction"}
 
 
 def _int(v: Any, default: int = 0) -> int:
