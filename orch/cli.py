@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
 import json
 import re
 import shlex
@@ -12,7 +13,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__
 from .config import Config, ConfigError, is_config, load_config, validate
@@ -372,11 +373,12 @@ def cmd_run(a: argparse.Namespace) -> int:
 
     results = {}
     runners = [MonitorRunner(m, stop, resume=a.resume, log=log, max_rounds_given=bool(a.max_rounds)) for m in selected]
+    srv = None
     if a.serve:
         from .board import Board, serve
         boards = {r.mon.name: Board(r.mon.name, (lambda r=r: getattr(r, "rec", None) and r.rec.run_dir), r.mon)
                   for r in runners}
-        _, url = serve(boards, host=a.host, port=a.port)
+        srv, url = serve(boards, host=a.host, port=a.port)
         log(f"board: {url}  (live progress, your questions and approvals, chat with the manager; logs at {url}log/)")
         if a.open:
             import webbrowser
@@ -386,9 +388,23 @@ def cmd_run(a: argparse.Namespace) -> int:
         t = threading.Thread(target=lambda r=r: results.__setitem__(r.mon.name, r.run()), name=r.mon.name, daemon=True)
         t.start()
         threads.append(t)
+    restart: Dict[str, Any] = {}
+    if getattr(a, "update_every", 0) and not a.dry_run:
+        threading.Thread(target=_auto_update, args=(a, runners, threads, stop, restart, log), name="auto-update",
+                         daemon=True).start()
     while any(t.is_alive() for t in threads):
         for t in threads:
             t.join(timeout=0.3)
+    if restart:  # a newer orch was taken in while every run waited: carry on in it, from where each run stopped
+        from . import update
+        argv = update.restart_argv(sys.argv)
+        log(f"restarting with orch {restart['new']}: {' '.join(argv[1:])}")
+        if srv is not None:
+            srv.shutdown()
+            srv.server_close()  # the new process takes the same port
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(argv[0], argv)
     print("\nsummary:")
     for r in runners:
         rd = getattr(r, "rec", None)
@@ -403,6 +419,64 @@ def cmd_run(a: argparse.Namespace) -> int:
         except (KeyboardInterrupt, SystemExit):
             pass
     return 0 if all(v == "completed" for v in results.values()) else 2
+
+
+def _update_ready(runners: List[Any]) -> bool:
+    """Every run of this process waits for me (a gate, a job, a pause), with no turn and no audit running."""
+    from . import update
+    for r in runners:
+        rec = getattr(r, "rec", None)
+        if rec is None or str(rec.state.get("status") or "") not in update.RESTART_STATUSES:
+            return False
+        if rec.state.get("auditing") or any(rec.agent_busy(ag.name) for ag in r.mon.agents):
+            return False
+    return bool(runners)
+
+
+def _auto_update(a: argparse.Namespace, runners: List[Any], threads: List[threading.Thread], stop: threading.Event,
+                 restart: Dict[str, Any], log: Callable[[str], None]) -> None:
+    """Every `--update-every` minutes, at a point where every run waits for me: take in a newer orch from origin/main
+    and stop the runs, so that cmd_run restarts as `orch run … --resume`. Code that changed on disk since this process
+    started (taken in earlier while a turn ran, or pulled by hand) restarts it too, once it passes `orch validate`.
+    A failed update is logged once per commit."""
+    from . import update
+    config = str(Path(a.config).resolve())
+    started = update.head()
+    told = set()
+
+    def say(text: str) -> None:
+        log(text)
+        for r in runners:
+            if getattr(r, "rec", None) is not None:
+                r.rec.progress(text)
+
+    while not stop.wait(max(60.0, float(a.update_every) * 60)):
+        if not started or not any(t.is_alive() for t in threads) or not _update_ready(runners):
+            continue
+        res = update.apply(config)
+        if not res.get("ok"):
+            if res.get("new") not in told:
+                told.add(res.get("new"))
+                say(f"⬆ a newer orch may be on main, but it was not taken in: {res.get('error')}")
+            continue
+        now = update.head()
+        if not now or now == started:
+            continue
+        if not res.get("updated"):  # changed on disk outside this check: the code must still pass
+            bad = update.validate_code(config)
+            if bad:
+                if now not in told:
+                    told.add(now)
+                    say(f"⬆ the orch checkout moved to {now[:7]}, but it fails `orch validate`; not restarting: {bad}")
+                continue
+        if not _update_ready(runners):  # a turn started meanwhile: the next quiet moment restarts
+            continue
+        restart.update(old=started[:7], new=now[:7])
+        for r in runners:
+            r.rec.event("orch_update", old=started[:7], new=now[:7])
+        say(f"⬆ orch updated {started[:7]} → {now[:7]}; the run restarts and carries on where it stopped")
+        stop.set()
+        return
 
 
 def cmd_serve(a: argparse.Namespace) -> int:
@@ -695,6 +769,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="board address (default 127.0.0.1, this machine only; 0.0.0.0 opens it to your network, "
                         "with no password: anyone who reaches it can steer the run)")
     p.add_argument("--open", action="store_true", help="open the board in the browser")
+    p.add_argument("--update-every", type=float, default=10, metavar="MIN",
+                   help="minutes between checks for a newer orch on origin/main, taken in (and the run restarted with "
+                        "--resume) only while every run waits for you with nothing running (default 10)")
+    p.add_argument("--no-auto-update", dest="update_every", action="store_const", const=0,
+                   help="never update orch by itself")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("serve", help="start the board for existing runs (config: chat with the manager enabled)")
