@@ -482,13 +482,13 @@ orch audit .                           # audit the last audit_every rounds now (
 - **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` continues it in the same session
   with `continue` (the session has the message), so a restart costs at most part of one turn. The cheapest moment is just after a worker turn ends with nothing
   waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
-- **Updating orch.** `orch run` updates itself (`--no-auto-update` turns it off): each time the runs of the process
-  stop to wait for you (a gate, a job) with no turn, board chat or audit running, it checks origin/main once for that
-  stop (a stop reached during a board chat is checked when the chat ends). A newer commit is taken in only on a clean `main` that fast-forwards, and only if the new code
-  passes `orch validate` on your config (otherwise the checkout goes back); then the process restarts as
-  `orch run … --resume` on the same board port and carries on where it stopped. A change to `pyproject.toml` is left
-  to you (pull and reinstall). Code changed on disk by hand (a `git pull`) restarts it the same way. Only the code
-  this process runs from is updated; another run started from the same checkout picks it up at its own restart.
+- **Updating orch.** Each time the run stops to wait for you (a gate, a job, the end), the board checks origin/main
+  (as *Check for update* does) and shows **Update and restart** when a newer orch is there. Nothing changes until you
+  click it. Then, as soon as every run of the process waits for you with no turn, board chat or audit running, the new
+  commits are taken in (only on a clean `main` that fast-forwards, and only if the new code passes `orch validate` on
+  your config; otherwise the checkout goes back) and the process restarts as `orch run … --resume` on the same board
+  port, carrying on where it stopped. A change to `pyproject.toml` is left to you (pull and reinstall); code pulled by
+  hand is restarted into the same way. Another run started from the same checkout picks it up at its own restart.
 - **Cost.** Long sessions get dearer per turn because each turn re-reads the history: milestone starts compact
   the sessions (or `fresh_session: milestone` for a clean start), a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
 - **Idle rounds.** If the work waits on people, make sure the pause gets used (the board's *Needs you* shows it);

@@ -235,7 +235,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <span id="status"></span>
   <span class="mute mono" id="runid"></span>
   <span style="flex:1"></span>
-  <span class="mute mono" id="ver" style="font-size:12px"></span> <button class="sm" id="verbtn" title="Compare this orch with origin/main (checks only when the run is at a gate, waiting for you, or ended)">Check for update</button>
+  <span class="mute mono" id="ver" style="font-size:12px"></span> <button class="sm" id="verbtn" title="Compare this orch with origin/main (checks only when the run is at a gate, waiting for you, or ended)">Check for update</button> <button class="sm" id="updbtn" hidden title="Take in the new orch and restart this run; it carries on where it stopped. Starts when the run waits for you with nothing running.">Update and restart</button>
   <select id="mon" style="display:none"></select>
   <a class="sm btn" id="replink" href="report" target="_blank" title="The run's static report (report.html): every turn's input and output, to keep or share">📄 Report</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
@@ -415,6 +415,7 @@ function render(){
   document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderNow(mg); renderTimeline(); renderQs(); renderReviews(mg); renderDecisions(); renderAudit(); renderChat();
   Object.keys(live).forEach(paintLive);
+  versionAtStop();
 }
 
 const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milestone', brief:'briefing', work:'working',
@@ -576,13 +577,34 @@ document.addEventListener('click', async e => {
 async function post(url, body){ try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json(); if (j.error) alert(j.error); soon(); return j; } catch(e){ alert('Could not reach the board server.'); } }
 
 // the update check: the commit this orch runs from, and whether main has a newer one (orch/update.py)
-$('verbtn').addEventListener('click', async () => {
-  const v = $('ver'); v.textContent = 'checking…';
+// checked by hand, and by itself each time the run stops to wait for me; updating needs the Update button
+let verLatest = '', verStop = '', verBusy = false, verTimer = 0;
+async function checkVersion(){
+  const v = $('ver'), u = $('updbtn'); v.textContent = 'checking…';
   try { const j = await (await fetch('api/version?m=' + encodeURIComponent(M), {cache:'no-store'})).json();
-    v.textContent = j.error ? j.error : !j.checked ? `running ${j.current} · ${j.reason}`
+    const p = j.progress || {}, busy = p.state === 'requested' || p.state === 'waiting' || p.state === 'restarting';
+    verLatest = j.latest || '';
+    let t = j.error ? j.error : !j.checked ? `running ${j.current} · ${j.reason}`
       : j.update ? `running ${j.current} · new version ${j.latest} on main (${j.behind} commit${j.behind > 1 ? 's' : ''} ahead)`
       : `running ${j.current} · up to date`;
-  } catch(e){ v.textContent = 'Could not reach the board server.'; } });
+    if (p.state === 'restarting' && p.new && j.current === p.new) t = `updated to ${j.current} · ` + t.replace(/^running \S+ · /, '');
+    else if (busy) t += ' · ' + (p.message || 'update requested').replace(/^⬆ /, '');
+    else if (p.state === 'failed' && p.error) t += ' · last update failed: ' + p.error;
+    v.textContent = t;
+    u.hidden = !(j.checked && j.update) || busy;
+    verBusy = busy && !(p.state === 'restarting' && j.current === p.new);
+  } catch(e){ v.textContent = verBusy ? 'restarting…' : 'Could not reach the board server.'; u.hidden = true; }
+  clearTimeout(verTimer); if (verBusy) verTimer = setTimeout(checkVersion, 5000); }  // follow the update through the restart
+$('verbtn').addEventListener('click', checkVersion);
+$('updbtn').addEventListener('click', async () => {
+  if (!confirm(`Update orch to ${verLatest || 'the newest version on main'} and restart this run? It carries on where it stopped; the board reconnects by itself.`)) return;
+  $('updbtn').hidden = true;
+  await post('api/update', {});
+  checkVersion(); });
+function versionAtStop(){  // once per stop (a gate, a job, the end), like the button would
+  const g = ((D.managed || {}).gate || {}).key || '', stop = ['awaiting_approval', 'waiting_job', 'done', 'stopped'].includes(D.status) ? D.status + '|' + g : '';
+  if (stop && stop !== verStop) checkVersion();
+  verStop = stop; }
 const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started'], open:['p-warn','↺ open again']};
 
 // ---------------------------------------------------------------- charts (inline SVG)

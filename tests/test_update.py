@@ -122,88 +122,93 @@ class TestReady(unittest.TestCase):
         self.assertFalse(_update_ready([]))
 
 
-class TestCheckAtEachStop(unittest.TestCase):
-    """The watcher fetches once per stop (a gate, a job), not on a timer, and restarts only while nothing runs."""
+class TestUpdateButton(unittest.TestCase):
+    """Nothing is updated until the board's Update button asks; then it waits for a quiet moment and restarts."""
 
     def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
         self.busy = set()
-        self.state = {"status": "running", "managed": {"gate": None}, "round": 1}
-        rec = SimpleNamespace(state=self.state, agent_busy=lambda n: n in self.busy, event=lambda *a, **k: None,
-                              progress=lambda *a, **k: None)
+        self.state = {"status": "awaiting_approval", "managed": {"gate": {"key": "plan-0-0"}}, "round": 1}
+        self.progress = []
+        rec = SimpleNamespace(state=self.state, run_dir=self.tmp, agent_busy=lambda n: n in self.busy,
+                              event=lambda *a, **k: None, progress=self.progress.append)
         self.runners = [SimpleNamespace(rec=rec, mon=SimpleNamespace(agents=[SimpleNamespace(name="boss")]))]
-        self.alive = threading.Event()
-        self.alive.set()
-        self.thread = SimpleNamespace(is_alive=self.alive.is_set)
-        self.stop, self.restart, self.applied = threading.Event(), {}, []
+        self.thread = SimpleNamespace(is_alive=lambda: True)
+        self.stop, self.restart, self.applied = threading.Event(), {}, 0
         self.heads = ["aaaaaaa1"]
 
-    def watch(self, results):
+    def watch(self, result=None):
+        result = result or {"ok": True, "updated": True, "old": "aaaaaaa", "new": "bbbbbbb"}
+
         def apply(config):
-            self.applied.append(dict(self.state, gate=(self.state["managed"]["gate"] or {}).get("key")))
-            res = results.pop(0) if results else {"ok": True, "updated": False}
-            if res.get("updated"):
+            self.applied += 1
+            if result.get("updated"):
                 self.heads[0] = "bbbbbbb2"
-            return res
-        a = SimpleNamespace(config=".")
-        for p in (patch.object(cli, "POLL_STOP", 0.01), patch("orch.update.apply", apply),
+            return result
+        for p in (patch.object(cli, "POLL_UPDATE", 0.01), patch("orch.update.apply", apply),
                   patch("orch.update.head", lambda repo=None: self.heads[0]),
                   patch("orch.update.validate_code", lambda config, repo=None, python=None: "")):
             p.start()
             self.addCleanup(p.stop)
-        self.addCleanup(self.stop.set)  # the watcher thread ends with the test, before the patches go
-        th = threading.Thread(target=cli._auto_update,
-                              args=(a, self.runners, [self.thread], self.stop, self.restart, lambda s: None))
+        self.addCleanup(self.stop.set)
+        th = threading.Thread(target=cli._auto_update, args=(SimpleNamespace(config="."), self.runners, [self.thread],
+                                                             self.stop, self.restart, lambda s: None))
         th.start()
         return th
 
-    def at_gate(self, key):
-        self.state.update(status="awaiting_approval", managed={"gate": {"key": key}})
+    def status(self):
+        return update.read_status(self.tmp).get("state")
 
-    def settle(self):
+    def test_nothing_happens_without_the_button(self):
+        self.watch()
         time.sleep(0.15)
+        self.assertEqual((self.applied, self.restart), (0, {}))
 
-    def test_one_fetch_per_stop_and_none_while_running(self):
-        th = self.watch([])
-        self.settle()
-        self.assertEqual(self.applied, [])  # running: no fetch
-        self.at_gate("plan-0-0")
-        self.settle()
-        self.settle()
-        self.assertEqual(len(self.applied), 1)  # the same stop: once
-        self.state.update(status="running")
-        self.settle()
-        self.at_gate("milestone-1-1")
-        self.settle()
-        self.assertEqual(len(self.applied), 2)  # the next stop: again
-        self.stop.set()
+    def test_the_button_updates_and_restarts_when_the_run_waits(self):
+        th = self.watch()
+        update.request(self.tmp)
         th.join(2)
-        self.assertEqual(self.restart, {})
-
-    def test_a_stop_reached_during_a_chat_is_checked_when_it_ends(self):
-        th = self.watch([{"ok": True, "updated": True, "old": "aaaaaaa", "new": "bbbbbbb"}])
-        self.busy.add("boss")
-        self.at_gate("plan-0-0")
-        self.settle()
-        self.assertEqual(self.applied, [])
-        self.busy.clear()
-        th.join(2)
-        self.assertEqual(len(self.applied), 1)
+        self.assertEqual(self.applied, 1)
         self.assertEqual(self.restart, {"old": "aaaaaaa", "new": "bbbbbbb"})
         self.assertTrue(self.stop.is_set())
+        self.assertFalse((self.tmp / update.REQUEST).exists())
+        self.assertEqual(self.status(), "restarting")
 
-    def test_new_code_taken_in_just_before_a_chat_restarts_after_it(self):
-        th = self.watch([{"ok": True, "updated": True, "old": "aaaaaaa", "new": "bbbbbbb"}])
-        real = cli._update_ready
-        calls = []
-
-        def ready(runners):  # quiet for the stop check, then a chat starts before the restart, then it ends
-            calls.append(1)
-            return real(runners) and len(calls) != 2
-        with patch.object(cli, "_update_ready", ready):
-            self.at_gate("plan-0-0")
-            th.join(2)
-        self.assertEqual(len(self.applied), 1)  # no second fetch for the same stop
+    def test_while_something_runs_it_waits(self):
+        th = self.watch()
+        self.busy.add("boss")  # a board chat
+        update.request(self.tmp)
+        time.sleep(0.15)
+        self.assertEqual((self.applied, self.status()), (0, "waiting"))
+        self.busy.clear()
+        th.join(2)
         self.assertEqual(self.restart["new"], "bbbbbbb")
+
+    def test_a_failed_update_is_shown_and_nothing_restarts(self):
+        self.watch({"ok": False, "updated": False, "error": "the orch checkout has uncommitted changes"})
+        update.request(self.tmp)
+        time.sleep(0.15)
+        self.assertEqual((self.applied, self.restart), (1, {}))
+        self.assertEqual(self.status(), "failed")
+        self.assertIn("uncommitted", update.read_status(self.tmp)["error"])
+        self.assertFalse((self.tmp / update.REQUEST).exists())  # one try per click
+
+    def test_the_board_button_writes_the_request(self):
+        from orch.board import Board, serve
+        import json
+        import urllib.request
+        rd = self.tmp / "run"
+        rd.mkdir()
+        mon = SimpleNamespace(name="m", agents=[], controller=SimpleNamespace(), working_dir=str(self.tmp))
+        srv, url = serve({"m": Board("m", lambda: rd, mon)}, port=8897)
+        try:
+            urllib.request.urlopen(urllib.request.Request(url + "api/update?m=m", data=b"{}"))
+            self.assertTrue((rd / update.REQUEST).exists())
+            j = json.loads(urllib.request.urlopen(url + "api/version?m=m").read())
+            self.assertEqual(j["progress"]["state"], "requested")
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 if __name__ == "__main__":

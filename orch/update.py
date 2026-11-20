@@ -3,12 +3,15 @@
 The board asks for a check only at a safe point (the run waits at a gate or a human task, or has ended), so a fetch
 never happens during a turn. The check reports the commit orch runs from and whether origin/main is ahead of it.
 
-`orch run` also updates itself (cli.py, unless --no-auto-update): every few minutes, when every run of the process
-waits for me (a gate, a job, a pause) with no turn and no audit running, it checks; when main is ahead it takes the new
-commits in (`apply`) and restarts as `orch run … --resume`, which carries on where it stopped.
+When a newer one is there, the board offers an Update button. It writes REQUEST into the run folder; `orch run`
+(cli.py) then waits until every run of the process waits for me with no turn, chat or audit running, takes the new
+commits in (`apply`) and restarts as `orch run … --resume`, which carries on where it stopped. Nothing is updated
+without the button. Each step goes to STATUS in the run folder for the board.
 """
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -48,6 +51,28 @@ def check(status: str) -> Dict[str, Any]:
                 "error": f"could not reach origin: {e}"}
     return {"ok": True, "checked": True, "current": current, "branch": branch, "dirty": dirty,
             "latest": latest, "behind": behind, "update": behind > 0}
+
+
+REQUEST = "UPDATE"  # in the run folder: the board's Update button was clicked
+STATUS = "update.json"  # in the run folder: where the update stands (state: waiting, failed, current, restarting)
+
+
+def request(run_dir: Path) -> None:
+    """The board's Update button: ask the run's process to update and restart at its next quiet moment."""
+    (Path(run_dir) / REQUEST).write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+    write_status(run_dir, {"state": "requested", "message": "update requested"})
+
+
+def write_status(run_dir: Path, status: Dict[str, Any]) -> None:
+    (Path(run_dir) / STATUS).write_text(json.dumps({**status, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}),
+                                        encoding="utf-8")
+
+
+def read_status(run_dir: Optional[Path]) -> Dict[str, Any]:
+    try:
+        return json.loads((Path(run_dir) / STATUS).read_text(encoding="utf-8")) if run_dir else {}
+    except (OSError, ValueError):
+        return {}
 
 
 # a run waiting for me, where a restart loses nothing (an ended run is not restarted: there is nothing to carry on)

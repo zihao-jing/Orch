@@ -1268,7 +1268,7 @@ def _handler(boards: Dict[str, Board]):
                 from . import update
                 b = self.board(q)
                 st = (read_json(b.run_dir / "state.json", {}) or {}) if b.run_dir else {}
-                self.js(update.check(str(st.get("status") or "")))
+                self.js({**update.check(str(st.get("status") or "")), "progress": update.read_status(b.run_dir)})
             elif u.path == "/api/message":
                 self.js(self.board(q).message((q.get("id") or [""])[0]))
             elif u.path == "/api/search":
@@ -1375,6 +1375,9 @@ def _handler(boards: Dict[str, Board]):
                            **({"urgent": True} if body.get("urgent") else {})})
             elif u.path == "/api/stop":
                 (b.run_dir / "STOP").write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+            elif u.path == "/api/update":  # the Update button: the run's process updates and restarts when quiet
+                from . import update
+                update.request(b.run_dir)
             else:
                 return self.js({"error": "unknown"}, 404)
             self.js({"ok": True})
