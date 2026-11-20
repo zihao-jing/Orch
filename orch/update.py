@@ -110,9 +110,19 @@ def head(repo: Optional[Path] = None) -> str:
         return ""
 
 
-def restart_argv(argv: List[str]) -> List[str]:
-    """The command to restart `orch run` with after an update: the same arguments, with --resume."""
+def restart_argv(argv: List[str], port: Optional[int] = None) -> List[str]:
+    """The command to restart `orch run` with after an update: the same arguments, with --resume, and the board on the
+    port it has now (it may have moved past a busy one)."""
     args = list(argv[1:])
     if "run" in args and "--resume" not in args:
         args.insert(args.index("run") + 1, "--resume")
+    if port:
+        for i, x in enumerate(args):
+            if x == "--port" and i + 1 < len(args):
+                del args[i:i + 2]
+                break
+            if x.startswith("--port="):
+                del args[i]
+                break
+        args += ["--port", str(port)]
     return [sys.executable, "-m", "orch", *args]

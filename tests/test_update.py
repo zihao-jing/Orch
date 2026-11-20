@@ -10,6 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from orch import update  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+from orch import cli  # noqa: E402
 from orch.cli import _update_ready  # noqa: E402
 
 
@@ -95,6 +100,9 @@ class TestApply(unittest.TestCase):
         argv = update.restart_argv(["/bin/orch", "run", ".", "--serve", "--host", "0.0.0.0"])
         self.assertEqual(argv[1:], ["-m", "orch", "run", "--resume", ".", "--serve", "--host", "0.0.0.0"])
         self.assertEqual(update.restart_argv(["orch", "run", "--resume", "."]).count("--resume"), 1)
+        moved = update.restart_argv(["orch", "run", ".", "--port", "8899", "--serve"], port=8900)
+        self.assertEqual(moved[3:], ["run", "--resume", ".", "--serve", "--port", "8900"])
+        self.assertEqual(update.restart_argv(["orch", "run", "--port=8899"], port=8900)[-2:], ["--port", "8900"])
 
 
 class TestReady(unittest.TestCase):
@@ -112,6 +120,90 @@ class TestReady(unittest.TestCase):
         self.assertFalse(_update_ready([self.runner("completed")]))  # nothing to carry on
         self.assertFalse(_update_ready([SimpleNamespace(rec=None, mon=None)]))  # not started yet
         self.assertFalse(_update_ready([]))
+
+
+class TestCheckAtEachStop(unittest.TestCase):
+    """The watcher fetches once per stop (a gate, a job), not on a timer, and restarts only while nothing runs."""
+
+    def setUp(self):
+        self.busy = set()
+        self.state = {"status": "running", "managed": {"gate": None}, "round": 1}
+        rec = SimpleNamespace(state=self.state, agent_busy=lambda n: n in self.busy, event=lambda *a, **k: None,
+                              progress=lambda *a, **k: None)
+        self.runners = [SimpleNamespace(rec=rec, mon=SimpleNamespace(agents=[SimpleNamespace(name="boss")]))]
+        self.alive = threading.Event()
+        self.alive.set()
+        self.thread = SimpleNamespace(is_alive=self.alive.is_set)
+        self.stop, self.restart, self.applied = threading.Event(), {}, []
+        self.heads = ["aaaaaaa1"]
+
+    def watch(self, results):
+        def apply(config):
+            self.applied.append(dict(self.state, gate=(self.state["managed"]["gate"] or {}).get("key")))
+            res = results.pop(0) if results else {"ok": True, "updated": False}
+            if res.get("updated"):
+                self.heads[0] = "bbbbbbb2"
+            return res
+        a = SimpleNamespace(config=".")
+        for p in (patch.object(cli, "POLL_STOP", 0.01), patch("orch.update.apply", apply),
+                  patch("orch.update.head", lambda repo=None: self.heads[0]),
+                  patch("orch.update.validate_code", lambda config, repo=None, python=None: "")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.stop.set)  # the watcher thread ends with the test, before the patches go
+        th = threading.Thread(target=cli._auto_update,
+                              args=(a, self.runners, [self.thread], self.stop, self.restart, lambda s: None))
+        th.start()
+        return th
+
+    def at_gate(self, key):
+        self.state.update(status="awaiting_approval", managed={"gate": {"key": key}})
+
+    def settle(self):
+        time.sleep(0.15)
+
+    def test_one_fetch_per_stop_and_none_while_running(self):
+        th = self.watch([])
+        self.settle()
+        self.assertEqual(self.applied, [])  # running: no fetch
+        self.at_gate("plan-0-0")
+        self.settle()
+        self.settle()
+        self.assertEqual(len(self.applied), 1)  # the same stop: once
+        self.state.update(status="running")
+        self.settle()
+        self.at_gate("milestone-1-1")
+        self.settle()
+        self.assertEqual(len(self.applied), 2)  # the next stop: again
+        self.stop.set()
+        th.join(2)
+        self.assertEqual(self.restart, {})
+
+    def test_a_stop_reached_during_a_chat_is_checked_when_it_ends(self):
+        th = self.watch([{"ok": True, "updated": True, "old": "aaaaaaa", "new": "bbbbbbb"}])
+        self.busy.add("boss")
+        self.at_gate("plan-0-0")
+        self.settle()
+        self.assertEqual(self.applied, [])
+        self.busy.clear()
+        th.join(2)
+        self.assertEqual(len(self.applied), 1)
+        self.assertEqual(self.restart, {"old": "aaaaaaa", "new": "bbbbbbb"})
+        self.assertTrue(self.stop.is_set())
+
+    def test_new_code_taken_in_just_before_a_chat_restarts_after_it(self):
+        th = self.watch([{"ok": True, "updated": True, "old": "aaaaaaa", "new": "bbbbbbb"}])
+        real = cli._update_ready
+        calls = []
+
+        def ready(runners):  # quiet for the stop check, then a chat starts before the restart, then it ends
+            calls.append(1)
+            return real(runners) and len(calls) != 2
+        with patch.object(cli, "_update_ready", ready):
+            self.at_gate("plan-0-0")
+            th.join(2)
+        self.assertEqual(len(self.applied), 1)  # no second fetch for the same stop
+        self.assertEqual(self.restart["new"], "bbbbbbb")
 
 
 if __name__ == "__main__":

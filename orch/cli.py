@@ -389,7 +389,7 @@ def cmd_run(a: argparse.Namespace) -> int:
         t.start()
         threads.append(t)
     restart: Dict[str, Any] = {}
-    if getattr(a, "update_every", 0) and not a.dry_run:
+    if getattr(a, "auto_update", True) and not a.dry_run:
         threading.Thread(target=_auto_update, args=(a, runners, threads, stop, restart, log), name="auto-update",
                          daemon=True).start()
     while any(t.is_alive() for t in threads):
@@ -397,7 +397,7 @@ def cmd_run(a: argparse.Namespace) -> int:
             t.join(timeout=0.3)
     if restart:  # a newer orch was taken in while every run waited: carry on in it, from where each run stopped
         from . import update
-        argv = update.restart_argv(sys.argv)
+        argv = update.restart_argv(sys.argv, srv.server_address[1] if srv is not None else None)
         log(f"restarting with orch {restart['new']}: {' '.join(argv[1:])}")
         if srv is not None:
             srv.shutdown()
@@ -421,6 +421,15 @@ def cmd_run(a: argparse.Namespace) -> int:
     return 0 if all(v == "completed" for v in results.values()) else 2
 
 
+def _stop_point(runners: List[Any]) -> Optional[tuple]:
+    """Where the runs stand when every one of them waits for me with nothing running (see _update_ready): one value
+    per stop (its status, gate and round), so a new stop is told apart from the same one; None while any is busy."""
+    if not _update_ready(runners):
+        return None
+    return tuple((r.rec.state.get("status"), ((r.rec.state.get("managed") or {}).get("gate") or {}).get("key"),
+                  r.rec.state.get("round")) for r in runners)
+
+
 def _update_ready(runners: List[Any]) -> bool:
     """Every run of this process waits for me (a gate, a job, a pause), with no turn and no audit running."""
     from . import update
@@ -433,10 +442,14 @@ def _update_ready(runners: List[Any]) -> bool:
     return bool(runners)
 
 
+POLL_STOP = 2.0  # seconds between looks at the runs' state (local reads only; a fetch happens once per stop)
+
+
 def _auto_update(a: argparse.Namespace, runners: List[Any], threads: List[threading.Thread], stop: threading.Event,
                  restart: Dict[str, Any], log: Callable[[str], None]) -> None:
-    """Every `--update-every` minutes, at a point where every run waits for me: take in a newer orch from origin/main
-    and stop the runs, so that cmd_run restarts as `orch run … --resume`. Code that changed on disk since this process
+    """Each time the runs stop to wait for me (a gate, a job) with nothing running, once per stop: take in a newer orch
+    from origin/main and stop the runs, so that cmd_run restarts as `orch run … --resume`. A stop reached while a board
+    chat or an audit runs is checked as soon as that ends. Code that changed on disk since this process
     started (taken in earlier while a turn ran, or pulled by hand) restarts it too, once it passes `orch validate`.
     A failed update is logged once per commit."""
     from . import update
@@ -450,27 +463,35 @@ def _auto_update(a: argparse.Namespace, runners: List[Any], threads: List[thread
             if getattr(r, "rec", None) is not None:
                 r.rec.progress(text)
 
-    while not stop.wait(max(60.0, float(a.update_every) * 60)):
-        if not started or not any(t.is_alive() for t in threads) or not _update_ready(runners):
+    checked = None  # the stop last checked: one fetch per stop
+    pending = ""  # new code on disk that passed, waiting for a quiet moment to restart into
+    while not stop.wait(POLL_STOP):
+        point = _stop_point(runners) if started and any(t.is_alive() for t in threads) else None
+        if point is None or (point == checked and not pending):
             continue
-        res = update.apply(config)
-        if not res.get("ok"):
-            if res.get("new") not in told:
-                told.add(res.get("new"))
-                say(f"⬆ a newer orch may be on main, but it was not taken in: {res.get('error')}")
-            continue
-        now = update.head()
-        if not now or now == started:
-            continue
-        if not res.get("updated"):  # changed on disk outside this check: the code must still pass
-            bad = update.validate_code(config)
-            if bad:
-                if now not in told:
-                    told.add(now)
-                    say(f"⬆ the orch checkout moved to {now[:7]}, but it fails `orch validate`; not restarting: {bad}")
+        if not pending:
+            checked = point
+            res = update.apply(config)
+            if not res.get("ok"):
+                if res.get("new") not in told:
+                    told.add(res.get("new"))
+                    say(f"⬆ a newer orch may be on main, but it was not taken in: {res.get('error')}")
                 continue
-        if not _update_ready(runners):  # a turn started meanwhile: the next quiet moment restarts
+            now = update.head()
+            if not now or now == started:
+                continue
+            if not res.get("updated"):  # changed on disk outside this check: the code must still pass
+                bad = update.validate_code(config)
+                if bad:
+                    if now not in told:
+                        told.add(now)
+                        say(f"⬆ the orch checkout moved to {now[:7]}, but it fails `orch validate`; not restarting: "
+                            f"{bad}")
+                    continue
+            pending = now
+        if not _update_ready(runners):  # a chat or turn started meanwhile: restart at the next quiet moment
             continue
+        now = pending
         restart.update(old=started[:7], new=now[:7])
         for r in runners:
             r.rec.event("orch_update", old=started[:7], new=now[:7])
@@ -769,11 +790,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="board address (default 127.0.0.1, this machine only; 0.0.0.0 opens it to your network, "
                         "with no password: anyone who reaches it can steer the run)")
     p.add_argument("--open", action="store_true", help="open the board in the browser")
-    p.add_argument("--update-every", type=float, default=10, metavar="MIN",
-                   help="minutes between checks for a newer orch on origin/main, taken in (and the run restarted with "
-                        "--resume) only while every run waits for you with nothing running (default 10)")
-    p.add_argument("--no-auto-update", dest="update_every", action="store_const", const=0,
-                   help="never update orch by itself")
+    p.add_argument("--no-auto-update", dest="auto_update", action="store_false",
+                   help="never update orch by itself (by default, each time the run stops to wait for you with nothing "
+                        "running, a newer orch on origin/main is taken in and the run restarts with --resume)")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("serve", help="start the board for existing runs (config: chat with the manager enabled)")

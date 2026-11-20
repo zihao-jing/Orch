@@ -482,9 +482,9 @@ orch audit .                           # audit the last audit_every rounds now (
 - **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` continues it in the same session
   with `continue` (the session has the message), so a restart costs at most part of one turn. The cheapest moment is just after a worker turn ends with nothing
   waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
-- **Updating orch.** `orch run` updates itself: every 10 minutes (`--update-every MIN`; `--no-auto-update` turns it
-  off), when every run of the process waits for you (a gate, a job) with no turn, board chat or audit running, it
-  checks origin/main. A newer commit is taken in only on a clean `main` that fast-forwards, and only if the new code
+- **Updating orch.** `orch run` updates itself (`--no-auto-update` turns it off): each time the runs of the process
+  stop to wait for you (a gate, a job) with no turn, board chat or audit running, it checks origin/main once for that
+  stop (a stop reached during a board chat is checked when the chat ends). A newer commit is taken in only on a clean `main` that fast-forwards, and only if the new code
   passes `orch validate` on your config (otherwise the checkout goes back); then the process restarts as
   `orch run … --resume` on the same board port and carries on where it stopped. A change to `pyproject.toml` is left
   to you (pull and reinstall). Code changed on disk by hand (a `git pull`) restarts it the same way. Only the code
