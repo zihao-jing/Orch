@@ -92,6 +92,7 @@ class AgentConfig:
     memory_heading: str = "Things to keep in mind:"
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
+    writing_path: str = ""  # managed mode: the writing rules (orch/prompts/writing.md or the project's), added after it
     # at each milestone start (managed mode): "compact" summarises the session in place (a new session when the
     # backend can't compact), "milestone" starts a new session, "never" keeps it; "" = the role's default (the critic
     # and workers compact, the manager keeps its session)
@@ -178,6 +179,13 @@ class AgentConfig:
             if proto:
                 from .templates import render
                 sp = (sp + "\n\n" if sp else "") + render(proto, **(self.prompt_vars or {})).strip()
+        if self.writing_path:  # read each time, so an edit reaches the agent with its next system prompt
+            try:
+                rules = re.sub(r"<!--.*?-->", "", Path(self.writing_path).read_text(encoding="utf-8"), flags=re.S).strip()
+            except OSError:
+                rules = ""
+            if rules:
+                sp = (sp + "\n\n" if sp else "") + rules
         if notes:
             sp = (sp + "\n\n" if sp else "") + (self.memory_heading + "\n\n" if self.memory_heading else "") \
                 + "\n\n".join(notes)
@@ -383,6 +391,9 @@ class ControllerConfig:
     # managed mode: the golden board (orch/boards.py): rules, preferences and key decisions every agent reads; the
     # manager owns it. "" = `.orch/golden.md` in a project folder, else golden.md beside the monitor's runs
     golden_board: str = ""
+    # managed mode: the writing rules added to the manager's, critic's and workers' system prompts. "" = the project's
+    # `.orch/writing.md` when there is one, else orch's own (orch/prompts/writing.md); a path; "off" = none
+    writing: str = ""
     golden_limit: int = 8000  # characters; above it the board warns and the manager is asked once to prune
     large_text: int = 50000  # B8: characters; a larger reply, input or raw stream gets a board warning (never cut)
     # B11 parallel workers (orch/parallel.py): the manager approves alone up to max_workers (the first worker counts);
@@ -613,7 +624,7 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
              "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "reminders", "audit_every", "audit_points",
-             "terminal_busy_timeout", "golden_board", "golden_limit", "large_text", "max_workers", "workers_hard_cap",
+             "terminal_busy_timeout", "golden_board", "writing", "golden_limit", "large_text", "max_workers", "workers_hard_cap",
              "parallel_turns", "worker_worktrees")
 
 
@@ -652,6 +663,17 @@ def _agent_folder(d: Path) -> Dict[str, Any]:
     raw.setdefault("memory_files", [])  # notes read into the prompt; preference.md is read on demand instead
     raw.setdefault("state_file", str(d / "state.md"))
     return raw
+
+
+def _writing_file(value: Any, base: Path, proj: Optional[Path]) -> str:
+    """The writing rules file: "off" for none, a path as given, else the project's `.orch/writing.md` or orch's own."""
+    v = str(value or "").strip()
+    if v.lower() in ("off", "none", "false"):
+        return ""
+    if v:
+        return _expand(v, base)
+    own = proj / "writing.md" if proj else None
+    return str(own) if own and own.is_file() else str(PROMPTS_DIR / "writing.md")
 
 
 def _project_raw(orch_dir: Path) -> Dict[str, Any]:
@@ -763,7 +785,7 @@ def load_config(path: str) -> Config:
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
                       "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
-                      "reminders", "audit_every", "audit_points", "terminal_busy_timeout", "golden_board",
+                      "reminders", "audit_every", "audit_points", "terminal_busy_timeout", "golden_board", "writing",
                       "golden_limit", "large_text", "max_workers", "workers_hard_cap", "parallel_turns",
                       "worker_worktrees"}
         unknown = set(craw) - ctrl_known
@@ -807,6 +829,7 @@ def load_config(path: str) -> Config:
             terminal_busy_timeout=float(craw.get("terminal_busy_timeout", ControllerConfig.terminal_busy_timeout) or 0),
             golden_board=(_expand(craw["golden_board"], base) if craw.get("golden_board")
                           else str(proj / "golden.md") if proj else ""),
+            writing=_writing_file(craw.get("writing"), base, proj),
             golden_limit=int(craw.get("golden_limit", ControllerConfig.golden_limit) or 0),
             large_text=int(craw.get("large_text", ControllerConfig.large_text) or 0),
             max_workers=int(craw.get("max_workers", ControllerConfig.max_workers) or 1),
@@ -827,6 +850,8 @@ def load_config(path: str) -> Config:
             proto = {"manager": "manager", "verifier": "critic", "worker": "worker", "monitor": "monitor"}.get(a.role)
             if controller.mode == "managed" and controller.protocol and proto:
                 a.protocol_path = str(PROMPTS_DIR / "protocol" / f"{proto}.md")
+            if controller.mode == "managed" and controller.writing and a.role in ("manager", "verifier", "worker"):
+                a.writing_path = controller.writing
         m_known = {"name", "workspace", "working_dir", "goal", "max_rounds", "controller", "agents",
                    "defaults", "output_dir", "enabled"}
         unknown = set(mraw) - m_known
