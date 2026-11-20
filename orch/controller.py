@@ -453,6 +453,7 @@ class MonitorRunner:
         """On resume: turns left 'running' were cut off by the restart. Keep each agent's session (found in
         the live log, or in Claude's own transcript for older runs) and tell the agent to pick up from there."""
         rec, out = self.rec, []
+        rec.state.pop("auditing", None)  # an audit cut off by the restart is run again later; not shown as running
         rec.recover_worker_messages()
         for p in sorted((rec.run_dir / "rounds").glob("r*/t*.json")):
             if p.name.endswith(".input.json"):

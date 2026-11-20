@@ -2543,11 +2543,17 @@ class ManagedRunner(MonitorRunner):
         lo = max(through + 1, done - span + 1)  # at most one span: a long run audited for the first time
         self.rec.progress(f"🔎 the auditor reads rounds {lo}–{done}")
         self.log(f"  🔎 audit of rounds {lo}–{done}")
+        # shown on the board while the auditor works (it is not a round's turn, so it has no row in the turn list)
+        self.st["auditing"] = {"lo": lo, "hi": done, "since": now_iso(), "agent": a.name}
+        self.rec.event("audit_started", rounds=[lo, done], agent=a.name)
+        self.rec.save()
         try:
             res = _audit.run_audit(self.mon, a, self.rec.run_dir, lo, done, au.get("prompts"),
                                    should_stop=self.should_stop, log=self.log)
         except Exception as e:  # an audit never stops the run
             res = {"status": "error", "error": f"{type(e).__name__}: {e}", "points": ""}
+        finally:
+            self.st.pop("auditing", None)
         if res.get("status") == "stopped":
             return  # audited again after the restart
         au.update(through=done, prompts=res.get("prompts") or au.get("prompts") or {}, last=now_iso(),

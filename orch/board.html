@@ -422,6 +422,9 @@ function renderNow(mg){  // the switches, and the status area: only the agents w
     lines.push(`<div class="${bad ? 'bad' : ''}" title="${esc(x.checked_at ? 'last check ' + x.checked_at : 'no check yet')}"><span class="dot live"></span> <b>${esc(called(x.agent))}</b>: ${x.step ? esc(x.step) + ', ' : ''}${x.kind === 'job' ? 'job running' : 'running'} ${m} min — ${esc(x.summary||'')}</div>`); });
   (D.running||[]).forEach(t => { if (lined.has(t.agent)) return; lined.add(t.agent);
     lines.push(`<div><span class="dot live"></span> <b>${esc(called(t.agent))}</b>: ${esc(DOING[t.purpose]||t.purpose)}, running ${mins(t.started_at)} min</div>`); });
+  if (D.auditing) {  // the auditor reads how the agents talked (not the task): shown so the run does not look idle
+    const au = D.auditing;
+    lines.push(`<div><span class="dot live"></span> <b>${esc(called(au.agent || 'auditor'))}</b>: reading how the agents talked, rounds ${au.lo}–${au.hi}, running ${mins(au.since)} min</div>`); }
   Object.entries(D.reliability||{}).forEach(([n, x]) => {  // B8: a retry waiting, or a backup in use
     const what = x.state === 'retrying' ? `${esc(x.model)} failed (${esc(x.reason||'error')}); retry ${x.retry}/${x.of} in ${x.wait_s}s`
       : x.state === 'switched' ? `switched to backup ${esc(x.model)} (${esc(x.reason||'error')})`

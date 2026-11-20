@@ -267,6 +267,7 @@ class Board:
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
             "audit": self._audit(rd),
+            "auditing": st.get("auditing") or None,
         }
 
     def audit(self) -> Dict[str, Any]:
@@ -422,7 +423,7 @@ class Board:
             "monitor", "run_id", "status", "mode", "round", "max_rounds", "cost", "cost_estimate", "turn_counts",
             "updated_at", "started_at", "error", "night", "night_pending", "discussion", "discussion_pending",
             "review_files", "golden", "status_lines", "reliability", "stop_reason", "reviews", "agents", "series",
-            "chat", "chat_more", "terminal", "live", "queued_answers", "min_score", "can_chat", "audit")}
+            "chat", "chat_more", "terminal", "live", "queued_answers", "min_score", "can_chat", "audit", "auditing")}
         out["managed"] = _slim_managed(mg)
         qa = d.get("queued_answers") or {}
         out["questions"] = [q if q.get("status") == "open" and not qa.get(q.get("id")) else
