@@ -226,7 +226,7 @@ class TestCriticMessageTurn(unittest.TestCase):
         r.mg.update(phase="gate", gate={"kind": "milestone", "key": "milestone-0-1"})
         p = r.critic_turn_prompt("wait")
         self.assertIn("Sam is not working right now: the run is waiting for my decision at a gate", p)
-        self.assertIn("don't write to Sam now", p)
+        self.assertIn("Don't write to Sam now", p)
         self.assertNotIn('<message to="Sam">', p)
         self.assertNotIn("may still be working", p)
         r.mg.update(phase="job", gate=None, job={"since": "x"})

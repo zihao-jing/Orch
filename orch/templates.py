@@ -339,6 +339,8 @@ right, write for me, in a few plain lines, what I need to do and what to send ba
 About your proposal to pause: not yet. {{guidance}}
 
 Please tell {{worker}} what to do next: the current step of your plan, or a new one if this changes the plan.
+Don't write back to me to confirm. Write to me only if you disagree or need a decision from me, and put that in a
+`<question>`.
 """,
     "critic_resume": """\
 {{human_messages}}
@@ -350,6 +352,8 @@ The work was paused while waiting for this:
 That is done now. My message: {{message}}
 
 Please check where things stand, update your checklist file if needed, and give {{worker}} the next step.
+Don't write back to me to confirm. Write to me only if you disagree or need a decision from me, and put that in a
+`<question>`.
 """,
     "critic_guidance": """\
 {{human_messages}}
@@ -359,7 +363,8 @@ I read your report, and more is needed:
 {{guidance}}
 
 Please add what is needed to your checklist file `{{checklist_path}}` (new steps, or a step reopened, with their
-items) and give {{worker}} the next step.
+items) and give {{worker}} the next step. Don't write back to me to confirm. Write to me only if you disagree or
+need a decision from me, and put that in a `<question>`.
 """,
     "critic_checkin": """\
 {{human_messages}}
@@ -378,20 +383,23 @@ it was acted on before you see evidence. No checklist or verdict is needed.
     # a turn started only because a message arrived for an idle agent (delivery is activation); for the critic, one
     # of three by what the worker is doing: in a turn now, about to start one with the step already given, or neither
     "critic_message_turn": """\
-Please answer my message above now. {{worker}} is working: leave that work running and don't start a new review.
-Reply to me inside `<message to="you">…</message>`. If it changes what {{worker}} should do, also send a short,
+Please deal with my message above now. {{worker}} is working: leave that work running and don't start a new review.
+If my message asks you something or you disagree with it, reply to me inside `<message to="you">…</message>`; if it
+only tells you something, write nothing for me. If it changes what {{worker}} should do, also send a short,
 self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you", saying what it replaces. No
 checklist or verdict is needed.
 """,
     "critic_message_turn_next": """\
-Please answer my message above now. {{worker}} is not working right now; its next turn starts with the step you
-already gave. Reply to me inside `<message to="you">…</message>`. If my message changes that step, also send a
-short, self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you", saying what it
-replaces; it goes with that step. No checklist or verdict is needed.
+Please deal with my message above now. {{worker}} is not working right now; its next turn starts with the step you
+already gave. If my message asks you something or you disagree with it, reply to me inside
+`<message to="you">…</message>`; if it only tells you something, write nothing for me. If my message changes that
+step, also send a short, self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you",
+saying what it replaces; it goes with that step. No checklist or verdict is needed.
 """,
     "critic_message_turn_idle": """\
-Please answer my message above now. {{worker}} is not working right now: {{why}}. Reply to me inside
-`<message to="you">…</message>`, and don't write to {{worker}} now: if my message changes what {{worker}} should
+Please deal with my message above now. {{worker}} is not working right now: {{why}}. If my message asks you something
+or you disagree with it, reply to me inside `<message to="you">…</message>`; if it only tells you something, write
+nothing for me. Don't write to {{worker}} now: if my message changes what {{worker}} should
 do, say so to me and put it in the next step you give {{worker}}, in your next regular turn. No checklist or verdict
 is needed.
 """,
