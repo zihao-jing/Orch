@@ -598,6 +598,17 @@ discussion; carry over what in them still applies.
 If nothing changes for {{critic}}, write no message; one line for me is enough. Anything settled that should hold
 beyond this goes on the golden board.
 """,
+    # a discussion I closed while a plan or milestone gate was open: added to the manager's turn after my decision
+    "manager_discussion_at_gate": """\
+We closed our discussion before this decision, and nothing from it has reached {{critic}} yet. Fold everything we
+settled there that changes the work into what you write now, together with the above, so that {{critic}} gets one
+message, complete on its own. It replaces the messages held during the discussion; carry over what in them still
+applies.
+
+{{held}}
+
+Anything settled that should hold beyond this goes on the golden board.
+""",
     "discussion_held_none": "Nothing was held during the discussion.",
     "discussion_held": "Held during the discussion (not sent):\n\n{{messages}}",
     # B9: a pause sent back from the wait gate

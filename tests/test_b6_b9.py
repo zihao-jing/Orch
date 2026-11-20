@@ -122,39 +122,83 @@ class TestRubrics(unittest.TestCase):
 
 
 class TestDiscussion(unittest.TestCase):
-    def test_hold_then_one_batch_that_supersedes(self):
-        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(controller={"approve_plan": True}, mgr={"milestones": 1, "replies": {
-            "discussion": ['We agreed on short tables.\n\n<message to="Jordan">BATCH-MARK: keep every table short; '
-                           'this replaces my earlier notes.</message>']}})])
-        L = Live(self, cfg)
-        _st, rd = L.gate("plan")
+    @staticmethod
+    def discuss_with_a_held_message(tc, L):
+        """Open a discussion, have the manager write to the critic from a board chat (held), and end it."""
         L.control({"kind": "discussion", "on": True}, "discussion-on")
         L.until(lambda st: st.get("discussion"), "the discussion switch")
-        # the manager writes to the critic from a board chat while we discuss
         L.control({"to": ["critic"], "message": "HELD-MARK: use long tables.", "from": "boss", "via": "chat",
                    "source": "chat-001"}, "board-note")
-        st, _ = L.until(lambda st: any(m.get("reason") == RT.DISCUSSION for m in st.get("messages") or []), "a held message")
+        st, rd = L.until(lambda st: any(m.get("reason") == RT.DISCUSSION for m in st.get("messages") or []),
+                         "a held message")
         held = next(m for m in st["messages"] if m.get("reason") == RT.DISCUSSION)
-        self.assertEqual((held["status"], held["to"]), ("held", "critic"))
-        self.assertTrue((rd / "inbox" / "held").is_dir())
+        tc.assertEqual((held["status"], held["to"]), ("held", "critic"))
+        tc.assertTrue((rd / "inbox" / "held").is_dir())
         L.control({"kind": "discussion", "on": False}, "discussion-off")
-        st, _ = L.until(lambda st: any(e.get("from") == "boss" and "BATCH-MARK" in e.get("body", "")
-                                       and e["status"] == "delivered" for e in st.get("messages") or []),
-                        "the batch delivered to the critic")
-        old = next(m for m in st["messages"] if m["id"] == held["id"])
-        new = next(m for m in st["messages"] if "BATCH-MARK" in m.get("body", ""))
-        self.assertEqual((old["status"], old.get("by")), ("superseded", new["id"]))
+        st, _ = L.until(lambda st: not st.get("discussion") and (st["managed"].get("discussion_batch") or {}).get("gate"),
+                        "the discussion closed at the gate")
+        time.sleep(0.5)  # a batch sent at once would have replaced the held message by now
+        st, _ = L.state()
+        tc.assertEqual(next(m for m in st["messages"] if m["id"] == held["id"])["status"], "held")  # not sent yet
+        return held
+
+    def test_closed_at_the_plan_gate_goes_with_the_first_instruction(self):
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(controller={"approve_plan": True}, mgr={"milestones": 1, "replies": {
+            "kickoff": ['We agreed on short tables.\n\n<message to="Jordan">BATCH-MARK: keep every table short; '
+                        'get the first part done.</message>\n\n<rubric>\n- tables short\n- part done\n- checked\n'
+                        '</rubric>']}})])
+        L = Live(self, cfg)
+        L.gate("plan")
+        held = self.discuss_with_a_held_message(self, L)
         L.control({"kind": "gate", "decision": "approve", "message": "", "gate": L.gate("plan")[0]["managed"]["gate"]["key"]},
                   "approve")
         status, rec = L.done()
         self.assertEqual(status, "completed")
         ts = turns(rec)
-        batch = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "discussion")
-        self.assertIn("HELD-MARK", batch["input"])  # the manager sees what was held
+        self.assertFalse([t for t in ts if t["purpose"] == "discussion"])  # no turn of its own: it went with the kickoff
+        kick = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "kickoff")
+        self.assertIn("HELD-MARK", kick["input"])  # the manager sees what was held
+        self.assertIn("We closed our discussion before this decision", kick["input"])
+        old = next(m for m in rec.state["messages"] if m["id"] == held["id"])
+        self.assertEqual(old["status"], "superseded")
+        self.assertNotIn("discussion_carry", rec.state["managed"])
         crit = [t for t in ts if t["agent"] == "critic"]
         self.assertTrue(any("BATCH-MARK" in t["input"] for t in crit))
         self.assertFalse(any("HELD-MARK" in t["input"] for t in crit))
         assert_no_role_leaks(self, rec, also=["HELD-MARK", "We agreed on short tables", "discussion"])
+
+    def test_closed_at_the_milestone_gate_then_sent_back_is_one_message(self):
+        """The case from a real run: the discussion closed at a milestone gate, then my note sent it back. Before,
+        the critic got two messages (one per event) and the worker both; now the manager writes one."""
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(controller={"approve_milestones": True}, mgr={
+            "milestones": 1, "replies": {"feedback": [
+                '<message to="Jordan">BATCH-MARK: keep every table short, and finish the summary first.</message>']}})])
+        L = Live(self, cfg)
+        st, _ = L.gate("milestone")
+        key = st["managed"]["gate"]["key"]
+        held = self.discuss_with_a_held_message(self, L)
+        L.control({"kind": "gate", "decision": "revise", "message": "NOTE-R: finish the summary first.", "gate": key},
+                  "sendback")
+        st, _ = L.gate("milestone", not_key=key)
+        L.control({"kind": "gate", "decision": "approve", "message": "", "gate": st["managed"]["gate"]["key"]}, "ok")
+        status, rec = L.done()
+        self.assertEqual(status, "completed")
+        ts = turns(rec)
+        self.assertFalse([t for t in ts if t["purpose"] in ("discussion", "incoming")])
+        fb = [t for t in ts if t["agent"] == "boss" and t["purpose"] == "feedback"]
+        self.assertEqual(len(fb), 1)  # one manager turn carries my note and the discussion
+        for mark in ("NOTE-R", "HELD-MARK", "We closed our discussion before this decision"):
+            self.assertIn(mark, fb[0]["input"])
+        old = next(m for m in rec.state["messages"] if m["id"] == held["id"])
+        self.assertEqual(old["status"], "superseded")
+        ev = [json.loads(x) for x in (rec.run_dir / "events.jsonl").read_text().splitlines() if x.strip()]
+        self.assertEqual([e.get("at_gate") for e in ev if e.get("event") == "discussion_batch"], [True])
+        guid = [t for t in ts if t["agent"] == "critic" and t["purpose"] == "guidance"]
+        self.assertEqual(len(guid), 1)
+        self.assertIn("BATCH-MARK", guid[0]["input"])
+        crit = [t for t in ts if t["agent"] == "critic"]
+        self.assertFalse(any("HELD-MARK" in t["input"] for t in crit))
+        assert_no_role_leaks(self, rec, also=["HELD-MARK", "NOTE-R", "discussion"])
 
     def test_reminder_and_phases_wait_while_on(self):
         r = unit(Path(tempfile.mkdtemp()))
@@ -168,6 +212,8 @@ class TestDiscussion(unittest.TestCase):
         self.assertNotIn("Do X.", " ".join(r.st["fwd"].get("critic", [])))
         r.set_discussion(False)
         self.assertTrue(r.mg.get("discussion_batch"))
+        self.assertNotIn("gate", r.mg["discussion_batch"])  # no gate open: the batch goes at once, as before
+        self.assertEqual(r.gate_discussion(), "")  # and a later gate does not take it
         self.assertEqual(r.held_by("kickoff"), "")
 
 
