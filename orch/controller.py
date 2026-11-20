@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .backends import StopRequested, TurnRequest, TurnResult, get_backend
+from .backends import StopRequested, TurnRequest, TurnResult, claude_stream_report, get_backend
 from .config import HOT_AGENT_FIELDS, RUN_PROMPT_VARS, AgentConfig, MonitorConfig, load_config
 from .recorder import Recorder, now_iso, read_json
 from . import jobs as _jobs
@@ -1190,7 +1190,17 @@ class MonitorRunner:
     def report_text(self, r: Optional[Dict[str, Any]]) -> str:
         if not r:
             return "(no report yet)"
-        body = relayed(r.get("output") or "(empty output)", self.mon.controller.max_report_chars)
+        output = r.get("output") or ""
+        incomplete = r.get("status") in ("timeout", "stopped", "error", "interrupted")
+        if incomplete:
+            # Older records stored the raw stream in output. Recover without changing history or sessions.
+            recovered = claude_stream_report(output)
+            if recovered is not None:
+                output = recovered
+        body = relayed(output or "(empty output)", self.mon.controller.max_report_chars)
+        if incomplete:
+            notice = "The text below may be incomplete." if output else "No assistant text was recovered."
+            body = f"[Incomplete turn: {r['status']}. {notice}]\n\n" + body
         if r.get("status") != "ok" and r.get("stderr"):
             body += "\n\nstderr (tail):\n```\n" + r["stderr"][-1500:] + "\n```"
         return body
