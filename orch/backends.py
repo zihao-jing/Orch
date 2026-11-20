@@ -30,6 +30,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .opencode_recovery import ProviderRecovery
+
 
 @dataclass
 class TurnRequest:
@@ -73,9 +75,12 @@ class StopRequested(Exception):
 
 def run_process(cmd: List[str], stdin_text: Optional[str], cwd: str, timeout: float,
                 env: Dict[str, str], should_stop: Callable[[], bool],
-                on_line: Optional[Callable[[str], None]] = None) -> Tuple[Optional[int], str, str, str]:
+                on_line: Optional[Callable[[str], None]] = None,
+                abort_reason: Optional[Callable[[], Optional[str]]] = None,
+                watch_waiters: bool = True) -> Tuple[Optional[int], str, str, str]:
     """Run a command, polling for stop requests. Returns (exit_code, stdout, stderr, status).
-    ``on_line`` (optional) sees every stdout line as it arrives."""
+    ``on_line`` sees every stdout line; ``abort_reason`` can stop a failed attempt as an error.
+    Explicit cancellation and the overall timeout take precedence over that callback."""
     full_env = dict(os.environ)
     full_env.update(env or {})
     try:
@@ -130,9 +135,12 @@ def run_process(cmd: List[str], stdin_text: Optional[str], cwd: str, timeout: fl
                 status = "stopped"
             elif deadline and time.monotonic() > deadline:
                 status = "timeout"
+            elif abort_reason and (why := abort_reason()):
+                status = "error"
+                err_chunks.append(why + "\n")
             else:
                 now = time.monotonic()
-                if on_line is not None and now - last_out[0] > WAITER_GRACE and now - last_check >= WAITER_CHECK:
+                if watch_waiters and on_line is not None and now - last_out[0] > WAITER_GRACE and now - last_check >= WAITER_CHECK:
                     last_check = now
                     _stop_waiters(proc.pid, err_chunks)  # silent for a long time while waiting on a process
                 continue
@@ -559,7 +567,8 @@ class OpenCodeBackend(Backend):
     options: executable, model (provider/model#variant), agent, auto (bool, default true: --auto approves every
              permission that is not explicitly denied), permission_mode (bypassPermissions -> --auto), disallowed_tools (deny rules: shell, edit, read, webfetch, ...), add_dirs
              (external_directory allow rules), config (dict merged into the per-run config), system_prompt_mode
-             (prepend|replace), archived (default true), thinking (bool), transport (serve|run), extra_args.
+             (prepend|replace), archived (default true), thinking (bool), transport (serve|run), extra_args,
+             provider_retry_timeout (seconds after a retry without progress; default 180, 0 disables).
              Claude-only options (effort, max_turns, allowed_tools, disable_hooks, mcp_config) are ignored.
     Compaction: a private ``opencode serve`` runs for its length (``POST /api/session/{id}/compact``, then waits).
     Experimental: OpenCode's CLI changes quickly; check flags with ``opencode run --help``.
@@ -634,8 +643,14 @@ class OpenCodeBackend(Backend):
     def _run_plain(self, req: TurnRequest, should_stop: Callable[[], bool], note: str = "") -> TurnResult:
         cmd, env, prompt = self.build(req)
         cb = _opencode_stream_cb(req.on_event) if req.on_event is not None else None
-        rc, out, err, status = run_process(cmd, prompt, req.cwd, req.timeout, env, should_stop, cb)
-        res = self._result(req, cmd, rc, out, err, status)
+        recovery = ProviderRecovery(req.options.get("provider_retry_timeout", 180), req.on_event)
+        def on_line(line: str) -> None:
+            recovery.line(line)
+            if cb:
+                cb(line)
+        rc, out, err, status = run_process(cmd, prompt, req.cwd, req.timeout, env, should_stop, on_line,
+                                         recovery.abort_reason, watch_waiters=cb is not None)
+        res = recovery.annotate(self._result(req, cmd, rc, out, err, status))
         if note:
             res.meta["warning"] = note
         return res
@@ -651,6 +666,7 @@ class OpenCodeBackend(Backend):
         exe = str(req.options.get("executable", "opencode"))
         pw = secrets.token_urlsafe(24)
         _, env, _ = self.build(req)
+        recovery = ProviderRecovery(req.options.get("provider_retry_timeout", 180), req.on_event)
         env = {**env, "OPENCODE_SERVER_PASSWORD": pw, "OPENCODE_PASSWORD": pw}
         deadline = time.monotonic() + req.timeout if req.timeout and req.timeout > 0 else None
         server, url, why = _opencode_serve(exe, req.cwd, env, should_stop)
@@ -658,12 +674,13 @@ class OpenCodeBackend(Backend):
             if should_stop():
                 return TurnResult("stopped", "", req.session_id, stderr=why)
             return self._run_plain(req, should_stop, note=f"live transport unavailable ({why}); ran without it")
-        live = _OpenCodeLive(req, url, pw)
+        live = _OpenCodeLive(req, url, pw, recovery)
         try:
             cmd, _, prompt = self.build(req, server=url)
             live.start()
-            rc, out, err, status = run_process(cmd, prompt, req.cwd, req.timeout, env, should_stop, live.on_run_line)
-            res = self._result(req, cmd, rc, out, err, status)
+            rc, out, err, status = run_process(cmd, prompt, req.cwd, req.timeout, env, should_stop, live.on_run_line,
+                                             recovery.abort_reason)
+            res = recovery.annotate(self._result(req, cmd, rc, out, err, status))
             live.close_steering()
             if res.status == "ok" and live.undelivered():
                 left = (deadline - time.monotonic()) if deadline else 600.0
@@ -796,10 +813,12 @@ class _OpenCodeLive:
 
     POLL = 0.5
 
-    def __init__(self, req: TurnRequest, url: str, password: str) -> None:
+    def __init__(self, req: TurnRequest, url: str, password: str,
+                 recovery: Optional[ProviderRecovery] = None) -> None:
         import base64
         from urllib.parse import urlparse
         self.req = req
+        self.recovery = recovery
         u = urlparse(url)
         self.host, self.port = u.hostname or "127.0.0.1", int(u.port or 80)
         self.headers = {"Authorization": "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()}
@@ -909,6 +928,8 @@ class _OpenCodeLive:
 
     # ---- the run's own output
     def on_run_line(self, line: str) -> None:
+        if self.recovery:
+            self.recovery.line(line)
         line = line.strip()
         if not line.startswith("{"):
             return
@@ -995,6 +1016,8 @@ class _OpenCodeLive:
             return
         if d.get("sessionID") != self.sid:
             return  # another session (a subagent's)
+        if self.recovery:
+            self.recovery.server_event(ev)
         mid = str(d.get("assistantMessageID") or "")
         if kind == "session.text.delta" and d.get("delta"):
             if mid in self.run_owned:
