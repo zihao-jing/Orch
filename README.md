@@ -423,7 +423,9 @@ An agent with `role: auditor` (scaffolded by `orch init --project` in `agents/au
 `audit_every` rounds (default 10), and once more when the run ends, it reads a digest of what was passed between the
 agents and keeps a short list of findings in `agents/auditor/audit.md`: repetition, unneeded context, messages that
 crossed a boundary (leakage), turns that achieved nothing, roles doing each other's jobs. It never judges the task,
-and nothing it writes reaches the agents; the agents are not told it exists. `audit_every: 0` turns automatic audits
+and nothing it writes reaches the agents; the agents are not told it exists. The rounds go on while it reads: one
+audit runs at a time, and one still running when the next is due makes that one cover the rounds since; the run's
+end waits for the final audit. `audit_every: 0` turns automatic audits
 off, the one at the end of the run included; `orch audit` still runs one on demand.
 
 The digest holds only the messages, already compared by orch: each message's size, the part that repeats what that

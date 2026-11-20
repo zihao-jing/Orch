@@ -2556,6 +2556,7 @@ class ManagedRunner(MonitorRunner):
         self.par_restore()  # B11: a parallel section a restart cut off gets its workers back
         while True:
             self.check_control()
+            self.audit_collect()  # an audit that finished while the rounds went on
             if mg.get("phase", "plan") != "done":
                 try:
                     self.activate("between")  # messages from a chat, the terminal or a note start their turn now
@@ -2598,6 +2599,12 @@ class ManagedRunner(MonitorRunner):
         return a[0] if a else None
 
     def audit_due(self, final: bool = False) -> None:
+        """Start an audit when `audit_every` rounds have passed since the last one. It runs in a thread of its own
+        while the rounds go on (it only reads the run's files and writes its findings file); its result is taken in
+        on this thread at a later call. The final audit, when the run ends, is waited for, after any still running."""
+        self.audit_collect(wait=final)
+        if getattr(self, "_audit_thread", None) is not None:
+            return  # one audit at a time: the next starts once this one is taken in
         a, c = self.auditor, self.mon.controller
         if a is None or self.should_stop() or c.audit_every <= 0:  # 0: no automatic audits, the final one included
             return
@@ -2614,15 +2621,41 @@ class ManagedRunner(MonitorRunner):
         self.st["auditing"] = {"lo": lo, "hi": done, "since": now_iso(), "agent": a.name}
         self.rec.event("audit_started", rounds=[lo, done], agent=a.name)
         self.rec.save()
-        try:
-            res = _audit.run_audit(self.mon, a, self.rec.run_dir, lo, done, au.get("prompts"),
-                                   should_stop=self.should_stop, log=self.log)
-        except Exception as e:  # an audit never stops the run
-            res = {"status": "error", "error": f"{type(e).__name__}: {e}", "points": ""}
-        finally:
-            self.st.pop("auditing", None)
+        box: Dict[str, Any] = {"lo": lo, "hi": done}
+        prompts = au.get("prompts")
+
+        def work() -> None:
+            try:
+                box["res"] = _audit.run_audit(self.mon, a, self.rec.run_dir, lo, done, prompts,
+                                              should_stop=self.should_stop, log=self.log)
+            except Exception as e:  # an audit never stops the run
+                box["res"] = {"status": "error", "error": f"{type(e).__name__}: {e}", "points": ""}
+
+        th = threading.Thread(target=work, name="audit", daemon=True)
+        self._audit_thread, self._audit_box = th, box
+        th.start()
+        if final:
+            self.audit_collect(wait=True)
+
+    def audit_collect(self, wait: bool = False) -> None:
+        """Take in a finished audit (or, with `wait`, the running one once it ends): its record, cost and progress."""
+        th = getattr(self, "_audit_thread", None)
+        if th is None:
+            return
+        if wait:
+            with self.unlocked():
+                th.join()
+        if th.is_alive():
+            return
+        box = self._audit_box
+        self._audit_thread = self._audit_box = None
+        self.st.pop("auditing", None)
+        lo, done = box["lo"], box["hi"]
+        res = box.get("res") or {"status": "error", "error": "the audit ended without a result", "points": ""}
         if res.get("status") == "stopped":
+            self.rec.save()
             return  # audited again after the restart
+        au = self.mg.setdefault("audit", {})
         au.update(through=done, prompts=res.get("prompts") or au.get("prompts") or {}, last=now_iso(),
                   status=res.get("status"))
         if res.get("cost_usd"):

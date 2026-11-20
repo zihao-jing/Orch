@@ -907,23 +907,39 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(rec.state["managed"]["audit"]["through"], last)
         evs = [json.loads(l) for l in (rec.run_dir / "events.jsonl").read_text().splitlines()]
         audits = [e for e in evs if e["event"] == "audit"]
-        self.assertEqual([e["rounds"] for e in audits], [[r, r] for r in range(1, last + 1)])  # every round, then none
+        spans = [e["rounds"] for e in audits]  # every round audited once, in order (an audit still running when the
+        self.assertEqual(spans[0][0], 1)        # next round ends makes the next one cover the rounds since)
+        self.assertEqual(spans[-1][1], last)
+        self.assertTrue(all(b[0] == a[1] + 1 for a, b in zip(spans, spans[1:])), spans)
         f = rec.run_dir.parent / "audit-auditor.md"
         text = f.read_text()
         self.assertIn("- [repetition] the checklist is resent every round", text)
         self.assertEqual(text.count("- [repetition]"), 1)  # the list is replaced, not appended
-        self.assertEqual(text.count("### "), last)
+        self.assertEqual(text.count("### "), len(spans))
         self.assertIn("2. Second point.", text)
         self.assertNotIn("3. Third point.", text)  # at most audit_points
         sent = sorted((rec.run_dir / "audits").glob("*.md"))
-        self.assertEqual(len(sent), last)
+        self.assertEqual(len(sent), len(spans))
         self.assertIn("## System prompts", sent[0].read_text())
-        if last > 1:  # the next audit gets the findings so far, and the prompts only if they changed
+        if len(spans) > 1:  # the next audit gets the findings so far, and the prompts only if they changed
             self.assertIn("the checklist is resent every round", sent[1].read_text())
             self.assertIn("**writer**", sent[0].read_text())
             self.assertNotIn("**writer**", sent[1].read_text())  # shown once; again only when it changes
         self.assertEqual(audit.findings_lines(f), ["[repetition] the checklist is resent every round · seen 1× since "
                                                    "2026-11-09 · open"])
+
+    def test_the_rounds_go_on_while_the_auditor_works(self):
+        status, rec = self._audited({"replies": {"audit": [self.AUDIT_REPLY]}, "delays": {"audit": 2.5}})
+        self.assertEqual(status, "completed")
+        evs = [json.loads(l) for l in (rec.run_dir / "events.jsonl").read_text().splitlines()]
+        started = [e for e in evs if e["event"] == "audit_started"]
+        ended = [e for e in evs if e["event"] == "audit"]
+        self.assertTrue(started and len(started) == len(ended))
+        first_start, first_end = started[0]["ts"], ended[0]["ts"]
+        during = [t for t in turns(rec) if first_start <= (t.get("started_at") or "") < first_end]
+        self.assertTrue(during, "no turn of the run started while the first audit ran")
+        self.assertEqual(ended[-1]["rounds"][1], max(int(t["round"]) for t in turns(rec)))  # the final one waited for
+        self.assertNotIn("auditing", rec.state)
 
     def test_a_failed_audit_does_not_stop_the_run(self):
         status, rec = self._audited({"fail_turns": [1]})
@@ -2338,7 +2354,7 @@ class TestAuditFixes(unittest.TestCase):
              "status": "ok", "started_at": "2026-01-01T10:02:00", "ended_at": "2026-01-01T10:03:00",
              "input": "x", "output": "ok"}))
         md, stats = build(rd, 1, 1)
-        self.assertIn("| resumed #7 |", md)
+        self.assertIn("| same session, turn 7 |", md)
         self.assertIn("note from critic", md)
         self.assertFalse([f for f in stats["flags"] if f["kind"] == "unexpected origin"])
 

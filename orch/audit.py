@@ -407,7 +407,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
             origin[who][p["origin"]] += len(p["text"])
         cost = ((t.get("meta") or {}).get("turn_cost_usd")) or 0
         est = turn_cost_basis(t) == "estimate"
-        sess = f"resumed #{t.get('session_turn')}" if t.get("resumed_session") else "new"
+        sess = f"same session, turn {t.get('session_turn')}" if t.get("resumed_session") else "new session"
         rem = f" (↺ {', '.join(t['reminders'])})" if t.get("reminders") else ""  # reminders sent at its end
         mark = (f" · redo of {redo[t['turn_id']]} after a restart" if t["turn_id"] in redo else
                 f" · cut off by a restart, redone in {redone[t['turn_id']]}" if t["turn_id"] in redone else "")
@@ -515,10 +515,12 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           f"agent's previous message. Origins: the turn output, chat reply (*manager-chat*) or *human* note a "
           f"paragraph was copied from; *note from X* is a note agent X passed on from its chat; *orch* is orch's own "
           f"text (templates, handovers). *↺ ids*: short reminders orch adds at the end of a message at intervals, by "
-          f"design; they are left out of the origins and repeats. *session*: *resumed #n* continues the agent's session at its n-th "
-          f"turn, so the agent still has everything said before in it: a short message there is not a lost task. "
+          f"design; they are left out of the origins and repeats. *session*: *same session, turn n* continues the agent's session at its n-th "
+          f"turn (consecutive numbers are one session, not new ones), so the agent still has everything said before in "
+          f"it: a short message there is not a lost task. "
           f"*redo of X after a restart* (status column): the run was restarted while turn X ran, so this turn runs X "
-          f"again; its message repeats X's by design and the pair is not a duplicate. "
+          f"again; its message repeats X's by design, or is just *continue* when X's message had already reached the "
+          f"session (the agent still has it, so nothing is lost), and the pair is not a duplicate. "
           f"*$*: the backend's figure; *~* marks Claude Code's own estimate for a model on another provider, priced "
           f"at Claude rates, which is not what the provider charged — don't judge spend on it. Times are HH:MM:SS; "
           f"*in* is the message without orch's reminders.",
