@@ -467,7 +467,7 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(status, "completed")
         g = next(t for t in turns(rec) if t["purpose"] == "guidance")
         self.assertIn("lacks the new baseline", g["input"])
-        for word in ("Milestone", "score", "decision", "| depth"):
+        for word in ("Milestone", "score", "<decision>", "| depth"):  # the critic's own template says "decision"
             self.assertNotIn(word, g["input"])
 
     def test_checkins_and_notes_up(self):
