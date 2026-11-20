@@ -274,6 +274,11 @@ class ClaudeBackend(Backend):
         elif status == "ok":
             status = "error"
             meta["parse_error"] = "could not parse claude JSON output"
+        if data is None:
+            recovered = claude_stream_report(out)
+            if recovered is not None:
+                output = recovered
+                meta["partial_output"] = True
         return TurnResult(status, output, sid, rc, err, _redact(cmd, req), meta)
 
 
@@ -309,10 +314,10 @@ def _claude_stream_cb(emit: Callable[[Dict[str, Any]], None]) -> Callable[[str],
     return cb
 
 
-def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
+def _claude_json_records(text: str) -> List[Dict[str, Any]]:
     text = text.strip()
     if not text:
-        return None
+        return []
     candidates: List[Any] = []
     try:
         candidates.append(json.loads(text))
@@ -330,10 +335,78 @@ def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
             flat += [x for x in c if isinstance(x, dict)]
         elif isinstance(c, dict):
             flat.append(c)
-    for d in reversed(flat):
+    return flat
+
+
+def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
+    for d in reversed(_claude_json_records(text)):
         if d.get("type") == "result" or "result" in d:
             return d
     return None
+
+
+def claude_stream_report(text: str) -> Optional[str]:
+    """Recover assistant text from an interrupted CLI stream, including old saved turn outputs.
+
+    None means this isn't a Claude transcript: leave ordinary reports alone. Stream deltas and completed
+    assistant messages describe the same text; choose the more complete representation for each message.
+    Tool inputs/results, thinking, and nested agents' messages are not a report from this agent.
+    """
+    records = _claude_json_records(text)
+    if not any("session_id" in e and e.get("type") in ("system", "assistant", "stream_event", "result")
+               for e in records):
+        return None
+    for e in reversed(records):
+        if e.get("type") == "result" and not e.get("parent_tool_use_id"):
+            return str(e.get("result") or "")
+
+    messages: Dict[str, Dict[str, Any]] = {}
+    current = ""
+
+    def message(mid: str) -> Dict[str, Any]:
+        return messages.setdefault(mid, {"blocks": {}, "text": ""})
+
+    for i, e in enumerate(records):
+        if e.get("parent_tool_use_id"):
+            continue
+        if e.get("type") == "stream_event":
+            event = e.get("event") or {}
+            kind = event.get("type")
+            if kind == "message_start":
+                current = str((event.get("message") or {}).get("id") or f"stream-{i}")
+                message(current)
+            elif kind in ("content_block_start", "content_block_delta"):
+                if not current:
+                    current = f"stream-{i}"
+                blocks = message(current)["blocks"]
+                index = event.get("index", 0)
+                block = event.get("content_block") or {}
+                delta = event.get("delta") or {}
+                if kind == "content_block_start" and block.get("type") == "text":
+                    blocks[index] = str(block.get("text") or "")
+                elif kind == "content_block_delta" and delta.get("type") == "text_delta":
+                    blocks[index] = blocks.get(index, "") + str(delta.get("text") or "")
+        elif e.get("type") == "assistant":
+            msg = e.get("message") or {}
+            mid = str(msg.get("id") or current or f"assistant-{i}")
+            body = "\n\n".join(c["text"] for c in msg.get("content", [])
+                               if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str))
+            previous = message(mid)["text"]
+            if body.startswith(previous):
+                message(mid)["text"] = body
+            elif body and not previous.startswith(body):
+                message(mid)["text"] = previous + "\n\n" + body
+
+    parts = []
+    for msg in messages.values():
+        streamed = "\n\n".join(msg["blocks"].values())
+        body = max((msg["text"], streamed), key=len).strip()
+        if body:
+            parts.append(body)
+    notice = "[Incomplete turn: no final response was produced."
+    if parts:
+        return notice + " Recovered assistant text follows; tool activity is omitted.]\n\n" + "\n\n".join(parts)
+    return notice + " No assistant text was recovered; inspect the workspace and turn logs for progress.]"
 
 
 class CodexBackend(Backend):

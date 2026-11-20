@@ -1272,6 +1272,28 @@ class ManagedRunner(MonitorRunner):
         if int(self.st.get("round", 0)) >= m.max_rounds:
             return "max_rounds_reached"
         redo = bool(mg.get("in_work"))  # a round cut off by a restart is redone before any limit or check-in
+        if not redo:
+            missing = [w.called for w in self.workers
+                       if not self.for_worker((mg.get("feedback") or {}).get(w.name) or "")]
+            if missing:
+                # FAIL means the work is incomplete, not that the critic assigned another step. In particular,
+                # a closed run can retain an unfinished checklist without authorizing more worker turns.
+                # Give the manager one chance to supply instructions, then wait rather than cycling forever.
+                retried = bool(mg.get("instruction_retry"))
+                text = (f"No next-step instruction was supplied for {', '.join(missing)}. "
+                        "No worker turn has been started. An unfinished plan or FAIL verdict alone does not "
+                        "assign work. Confirm whether execution should remain paused or give the critic "
+                        "a concrete authorized next step, resolving any closure, scope or deadline conflict.")
+                if retried:
+                    text += " The manager's continuation was followed by another empty instruction; your direction is needed."
+                mg.update(instruction_retry=True,
+                          wait={"who": "missing worker instructions", "text": text, "proposal": text},
+                          phase="wait" if retried else "pause")
+                self.rec.event("missing_worker_instruction", workers=missing, awaiting_human=retried)
+                self.rec.progress("No worker instruction: " + ("waiting for your direction" if retried
+                                                               else "asking the manager whether to pause"))
+                return None
+            mg.pop("instruction_retry", None)
         # milestone_rounds counts rounds without progress: a step of the critic's plan finishing starts it again
         # (without a plan, every round of the milestone counts, as before)
         if not redo and self.stalled() >= c.milestone_rounds:
@@ -1548,10 +1570,14 @@ class ManagedRunner(MonitorRunner):
         w = mg.get("wait") or {}
         r = self.say(self.manager, self.mtpl("manager_pause", proposal=w.get("text", ""), human_messages=""), "pause")
         out = r.get("output") or ""
-        if T.value(out, "decision") == "PAUSE" or (T.bodies(out, "pause") and T.value(out, "decision") != "CONTINUE"):
+        decision = T.value(out, "decision")
+        if decision != "CONTINUE":
+            # Only an explicit CONTINUE authorizes another dispatch. A missing/malformed decision must not
+            # turn a closure or ambiguous response into an implicit instruction to keep spending rounds.
             self.after_manager(r)
             msg = "\n\n".join(T.bodies(out, "pause")) or self.for_me(out)
-            mg["wait"] = {**w, "who": "the manager agrees", "text": msg or w.get("text", ""), "proposal": w.get("text", ""),
+            who = "the manager agrees" if decision == "PAUSE" or T.bodies(out, "pause") else "manager decision unclear"
+            mg["wait"] = {**w, "who": who, "text": msg or w.get("text", ""), "proposal": w.get("text", ""),
                           "turn": r["turn_id"]}
             mg["phase"] = "wait"
             return None

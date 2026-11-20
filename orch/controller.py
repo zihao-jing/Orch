@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .backends import StopRequested, TurnRequest, TurnResult, get_backend
+from .backends import StopRequested, TurnRequest, TurnResult, claude_stream_report, get_backend
 from .config import HOT_AGENT_FIELDS, AgentConfig, MonitorConfig, load_config
 from .recorder import Recorder, now_iso, read_json
 from . import jobs as _jobs
@@ -943,7 +943,14 @@ class MonitorRunner:
     def report_text(self, r: Optional[Dict[str, Any]]) -> str:
         if not r:
             return "(no report yet)"
-        body = relayed(r.get("output") or "(empty output)", self.mon.controller.max_report_chars)
+        output = r.get("output") or "(empty output)"
+        if r.get("status") in ("timeout", "stopped", "error"):
+            # Older Claude turns saved raw stream events when no final result arrived. Recover on read so
+            # resuming a failed review works without rewriting historical turn records or resetting sessions.
+            recovered = claude_stream_report(output)
+            if recovered is not None:
+                output = recovered
+        body = relayed(output, self.mon.controller.max_report_chars)
         if r.get("status") != "ok" and r.get("stderr"):
             body += "\n\nstderr (tail):\n```\n" + r["stderr"][-1500:] + "\n```"
         return body
