@@ -348,50 +348,79 @@ def _claude_stream_cb(emit: Callable[[Dict[str, Any]], None]) -> Callable[[str],
 
 
 def _claude_stream_text(text: str) -> Tuple[str, Optional[str]]:
-    """(reply, session id) from a Claude stream that has no final result line: the text of the last top-level
-    assistant message; if the turn was cut off mid-message, the text streamed since that message started. Lines
-    that are not JSON (a plain error message from the CLI) are kept as they are when nothing else is there."""
-    last, partial, sid, plain = "", [], None, []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if not line.startswith("{"):
-            plain.append(line)
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(ev, dict):
+    """The last top-level assistant message and session id from a cut-off stream.
+
+    Deltas and assistant snapshots describe the same message. Reconcile them by message id so a later
+    content block keeps the earlier text, while a new message still replaces the previous reply.
+    """
+    messages: Dict[str, Dict[str, Any]] = {}
+    current, sid = "", None
+    records = _claude_json_records(text)
+    for i, ev in enumerate(records):
+        if ev.get("parent_tool_use_id"):
             continue
         sid = ev.get("session_id") or sid
-        if ev.get("parent_tool_use_id"):
-            continue  # a subagent's messages are not the reply
-        if ev.get("type") == "assistant":
-            body = "".join(c.get("text", "") for c in (ev.get("message") or {}).get("content") or []
-                           if isinstance(c, dict) and c.get("type") == "text")
-            if body.strip():
-                last, partial = body, []
-        elif ev.get("type") == "stream_event":
-            e = ev.get("event") or {}
-            d = e.get("delta") or {}
-            if e.get("type") == "message_start":
-                partial = []
-            elif e.get("type") == "content_block_delta" and d.get("type") == "text_delta":
-                partial.append(str(d.get("text") or ""))
-    cut = "".join(partial)
-    if cut.strip() and cut.strip() != last.strip():
-        return cut.strip(), sid  # streamed after the last complete message: the cut-off message so far
-    if last.strip():
-        return last.strip(), sid
+        if ev.get("type") == "stream_event":
+            event = ev.get("event") or {}
+            kind = event.get("type")
+            if kind == "message_start":
+                current = str((event.get("message") or {}).get("id") or f"stream-{i}")
+            elif kind not in ("content_block_start", "content_block_delta"):
+                continue
+            if not current:
+                current = f"stream-{i}"
+            msg = messages.setdefault(current, {"blocks": {}, "text": ""})
+            index = event.get("index", 0)
+            block, delta = event.get("content_block") or {}, event.get("delta") or {}
+            if kind == "content_block_start" and block.get("type") == "text":
+                msg["blocks"][index] = str(block.get("text") or "")
+            elif kind == "content_block_delta" and delta.get("type") == "text_delta":
+                msg["blocks"][index] = msg["blocks"].get(index, "") + str(delta.get("text") or "")
+        elif ev.get("type") == "assistant":
+            snapshot = ev.get("message") or {}
+            mid = str(snapshot.get("id") or current or f"assistant-{i}")
+            msg = messages.setdefault(mid, {"blocks": {}, "text": ""})
+            blocks = {n: c["text"] for n, c in enumerate(snapshot.get("content") or [])
+                      if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)}
+            body = "\n\n".join(blocks.values())
+            previous = msg["text"]
+            if body.startswith(previous):
+                msg["text"] = body
+            elif body and not previous.startswith(body):
+                msg["text"] = previous + "\n\n" + body
+            if not msg["blocks"]:
+                msg["blocks"].update(blocks)
+    for msg in reversed(list(messages.values())):
+        streamed = "\n\n".join(msg["blocks"].values())
+        body = max((msg["text"], streamed), key=len).strip()
+        if body:
+            return body, sid
+    # A plain CLI error is useful when there is no assistant reply. JSON is never a report.
+    try:
+        json.loads(text)
+        return "", sid
+    except (ValueError, TypeError):
+        pass
+    plain = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith(("{", "["))]
     return "\n".join(plain).strip(), sid
 
 
-def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
+def claude_stream_report(text: str) -> Optional[str]:
+    """Recover old saved Claude streams on read; None leaves ordinary text/JSON reports alone."""
+    records = _claude_json_records(text)
+    if not any("session_id" in e and e.get("type") in ("system", "assistant", "stream_event", "result")
+               for e in records):
+        return None
+    for e in reversed(records):
+        if e.get("type") == "result" and not e.get("parent_tool_use_id"):
+            return str(e.get("result") or "")
+    return _claude_stream_text(text)[0]
+
+
+def _claude_json_records(text: str) -> List[Dict[str, Any]]:
     text = text.strip()
     if not text:
-        return None
+        return []
     candidates: List[Any] = []
     try:
         candidates.append(json.loads(text))
@@ -409,7 +438,11 @@ def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
             flat += [x for x in c if isinstance(x, dict)]
         elif isinstance(c, dict):
             flat.append(c)
-    for d in reversed(flat):
+    return flat
+
+
+def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
+    for d in reversed(_claude_json_records(text)):
         if d.get("type") == "result" or "result" in d:
             return d
     return None
