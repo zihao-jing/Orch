@@ -482,6 +482,10 @@ orch audit .                           # audit the last audit_every rounds now (
 - **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` continues it in the same session
   with `continue` (the session has the message), so a restart costs at most part of one turn. The cheapest moment is just after a worker turn ends with nothing
   waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
+  If a parallel assignment or review fails, the section keeps its workers, worktrees and pending reviews;
+  `--resume` retries the critic's pending turn and reviews worker results collected before shutdown. Older runs
+  whose failure cleanup deleted the section can recover automatically only when no worker had started and no
+  worktree was created; other missing parallel state stops with a diagnostic instead of replaying uncertain work.
 - **Updating orch.** Each time the run stops to wait for you (a gate, a job, the end), the board checks origin/main
   (as *Check for update* does) and shows **Update and restart** when a newer orch is there. Nothing changes until you
   click it. Then, as soon as every run of the process waits for you with no turn, board chat or audit running, the new
