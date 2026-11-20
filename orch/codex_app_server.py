@@ -16,7 +16,9 @@ class _Cancelled(Exception):
     pass
 
 
-def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
+def run_turn(req: TurnRequest, should_stop: Callable[[], bool], compact: bool = False) -> TurnResult:
+    """One turn; with `compact`, the resumed thread is compacted instead (`thread/compact/start`: the server runs
+    the compaction as a turn of its own, with a `contextCompaction` item, on the same thread id)."""
     o = req.options
     cmd = [str(o.get("executable", "codex")), "app-server"]
     # exec-only flags (such as --ignore-user-config) must not silently be dropped.
@@ -62,6 +64,7 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
     sid, active_turn, completed = req.session_id, None, None
     streamed, finished = {}, set()
     final, request_id, text_deltas = "", 0, 0
+    compacted = False
     steering, attempted = {}, set()
     ready_to_steer = False
 
@@ -98,7 +101,7 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
         proc.stdin.flush()
 
     def notification(message):
-        nonlocal completed, final, active_turn, text_deltas
+        nonlocal completed, final, active_turn, text_deltas, compacted
         method, p = message.get("method"), message.get("params") or {}
         if p.get("threadId") not in (None, sid):
             return
@@ -128,6 +131,8 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
                 finished.add(key)
                 if text:
                     final = text
+            elif method == "item/completed" and kind == "contextCompaction":
+                compacted = True
             elif method == "item/completed" and kind == "fileChange":
                 emit({"k": "tool", "s": "edit: " + ", ".join(c.get("path", "") for c in item.get("changes", []))[:160]})
         elif method == "turn/completed":
@@ -194,13 +199,16 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
             thread = call("thread/start", params)
         sid = thread["thread"]["id"]
         emit({"k": "session", "s": sid})
-        params = {"threadId": sid, "input": [{"type": "text", "text": Backend.first_prompt_with_system(req)}]}
-        if o.get("effort"):
-            params["effort"] = o["effort"]
-        turn = call("turn/start", params)
-        active_turn = turn["turn"]["id"]
-        emit({"k": "input_accepted"})
-        ready_to_steer = True
+        if compact:
+            call("thread/compact/start", {"threadId": sid})  # its turn id comes with turn/started
+        else:
+            params = {"threadId": sid, "input": [{"type": "text", "text": Backend.first_prompt_with_system(req)}]}
+            if o.get("effort"):
+                params["effort"] = o["effort"]
+            turn = call("turn/start", params)
+            active_turn = turn["turn"]["id"]
+            emit({"k": "input_accepted"})
+            ready_to_steer = True
         while completed is None:
             receive()
         # A completion can precede the response to a steer that raced it. Drain already queued replies
@@ -222,6 +230,9 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
                 else:
                     message_status(note, "unknown", reason="Unrecognized steer acknowledgement")
         status = {"completed": "ok", "interrupted": "stopped"}.get(completed.get("status"), "error")
+        if compact and status == "ok" and not compacted:
+            status = "error"
+            errors.append("the compaction turn ended without a contextCompaction item")
         if completed.get("error"):
             errors.append(json.dumps(completed["error"]))
         exit_code = 0 if status == "ok" else None
@@ -250,4 +261,5 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
             reader.join(timeout=5)
     output = final if status == "ok" and final else "\n\n".join(streamed.values())
     return TurnResult(status, output, sid, exit_code, "".join(errors), cmd,
-                      {"transport": "app-server", "text_deltas": text_deltas})
+                      {"transport": "app-server", "text_deltas": text_deltas,
+                       **({"compacted": compacted} if compact else {})})

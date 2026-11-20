@@ -92,8 +92,9 @@ class AgentConfig:
     memory_heading: str = "Things to keep in mind:"
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
-    # "milestone": a new session when each milestone starts (managed mode); "never": keep it; "" = the role's default
-    # (the critic and workers start each milestone fresh, the manager keeps its session)
+    # at each milestone start (managed mode): "compact" summarises the session in place (a new session when the
+    # backend can't compact), "milestone" starts a new session, "never" keeps it; "" = the role's default (the critic
+    # and workers compact, the manager keeps its session)
     fresh_session: str = ""
     state_file: str = ""  # managed mode: the agent's working state (agents/<name>/state.md in a project folder)
     # backup models, tried in order when a turn still fails after its retries: each is a dict with any of
@@ -117,10 +118,11 @@ class AgentConfig:
 
     @property
     def fresh_mode(self) -> str:
-        """When this agent starts a new session in managed mode: "milestone" or "" (never)."""
+        """What a milestone start does to this agent's session in managed mode: "compact" (summarise it in place; a
+        new session when the backend can't), "milestone" (a new session) or "" (never: it goes on as it is)."""
         if self.fresh_session == "never":
             return ""
-        return self.fresh_session or ("milestone" if self.role in ("verifier", "worker") else "")
+        return self.fresh_session or ("compact" if self.role in ("verifier", "worker") else "")
 
     def turn_limit(self, watched: bool = False) -> float:
         """Seconds a turn may run before it is stopped. `safety_timeout` when set. Otherwise `timeout` keeps its
@@ -543,8 +545,8 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
     if unknown:
         raise ConfigError(f"{where} ({name}): unknown keys: {', '.join(sorted(unknown))}")
     fresh = str(merged.get("fresh_session", "") or "").strip().lower()
-    if fresh not in ("", "never", "milestone"):
-        raise ConfigError(f"{where} ({name}): fresh_session must be 'milestone' or 'never'")
+    if fresh not in ("", "never", "milestone", "compact"):
+        raise ConfigError(f"{where} ({name}): fresh_session must be 'compact', 'milestone' or 'never'")
     session = str(merged.get("check_session", "") or "").strip().lower()
     if session and session not in CHECK_SESSIONS:
         raise ConfigError(f"{where} ({name}): check_session must be 'own' or 'side'")

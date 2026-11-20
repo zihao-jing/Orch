@@ -42,10 +42,11 @@ class TestSessions(unittest.TestCase):
         self.sdir = self.tmp / "agents"
         MockBackend.compacts.clear()
 
-    def cfg(self, critic=None, worker=None, mgr=None, writer=None):
+    def cfg(self, critic=None, worker=None, mgr=None, writer=None, checker=None):
         m = managed(mgr=mgr or {"milestones": 2}, critic=critic, worker=worker)
         for ag in m["agents"]:
             ag["state_file"] = str(self.sdir / ag["name"] / "state.md")
+        m["agents"][1].update(checker or {})  # the critic agent's own settings (critic= is its backend options)
         m["agents"][2].update(writer or {})
         return make_cfg(self.tmp, [m])
 
@@ -67,7 +68,8 @@ class TestSessions(unittest.TestCase):
         cfg = self.cfg(worker={"replies": {"work": [M1_WORK, "Done."]}},
                        critic={"replies": {"verify": [M1_REVIEW + "\n<verdict>FAIL</verdict>",
                                                       "Fine now.\n<checklist>\n- [x] ok\n</checklist>\n<verdict>PASS</verdict>"],
-                                           "brief": ["Start with the tables."]}})
+                                           "brief": ["Start with the tables."]}},
+                       writer={"fresh_session": "milestone"}, checker={"fresh_session": "milestone"})
         status, rec = run(cfg)
         self.assertEqual(status, "completed")
         ts = turns(rec)
@@ -106,7 +108,7 @@ class TestSessions(unittest.TestCase):
 
     # 2
     def test_worker_keeps_its_session_across_steps_and_not_across_milestones(self):
-        status, rec = run(self.cfg(critic=self.stepped_critic()))
+        status, rec = run(self.cfg(critic=self.stepped_critic(), writer={"fresh_session": "milestone"}))
         self.assertEqual(status, "completed")
         ts = turns(rec)
         self.assertTrue(any(e.get("done") == 1 for e in _events(rec, "plan_step")))  # a step finished in between
@@ -117,7 +119,7 @@ class TestSessions(unittest.TestCase):
         self.assertTrue(all(t["resumed_session"] for t in w1[1:]))
         self.assertEqual(len({t["session_id"] for t in w2}), 1)
         self.assertNotEqual(w1[0]["session_id"], w2[0]["session_id"])
-        self.assertFalse(MockBackend.compacts)  # off by default
+        self.assertFalse([c for c in MockBackend.compacts if c["agent"] == "writer"])  # between steps: off by default
 
     # 3
     def test_compact_between_steps_only(self):
@@ -149,7 +151,36 @@ class TestSessions(unittest.TestCase):
         self.assertEqual(status, "completed")
         self.assertFalse(any(t["purpose"] == "compact" for t in turns(rec)))
         self.assertEqual(len(_events(rec, "compact_skipped")), 1)
-        self.assertIn("compact between steps is not available for `mock`", (rec.run_dir / "progress.md").read_text())
+        self.assertIn("compacting on request is not available for `mock`", (rec.run_dir / "progress.md").read_text())
+
+    def test_milestone_start_compacts_the_sessions_by_default(self):
+        status, rec = run(self.cfg(critic={"replies": {"brief": ["Start with the tables."]}}))
+        self.assertEqual(status, "completed")
+        ts = sorted(turns(rec), key=lambda t: (t["started_at"], t["round"], t["seq"]))
+        for name in ("writer", "critic"):
+            mine = [t for t in ts if t["agent"] == name]
+            comp = [t for t in mine if t["purpose"] == "compact"]
+            self.assertEqual(len(comp), 1, name)
+            self.assertEqual((comp[0]["milestone"], comp[0]["compact_reason"]), (1, "milestone 2 starts"))
+            nxt = next(t for t in mine if t.get("milestone") == 1 and t["purpose"] != "compact")
+            self.assertTrue(nxt["resumed_session"], name)  # the same session goes on, compacted
+            self.assertEqual(nxt["session_id"], comp[0]["session_id"])
+            self.assertIn("compacted: milestone 2 starts", nxt["session_reset"][0]["reason"])
+            self.assertIn("Our conversation so far was summarised", nxt["input"])
+            self.assertNotIn("fresh conversation", nxt["input"])
+        w2 = next(t for t in ts if t["agent"] == "writer" and t.get("milestone") == 1 and t["purpose"] == "work")
+        self.assertIn("Do only the step below", w2["input"])
+        self.assertFalse(_events(rec, "fresh_session"))
+        boss = [t for t in ts if t["agent"] == "boss"]  # the manager is left alone
+        self.assertFalse(any(t["purpose"] == "compact" for t in boss))
+
+    def test_milestone_start_falls_back_to_a_new_session_when_compact_is_not_available(self):
+        status, rec = run(self.cfg(worker={"no_compact": True}))
+        self.assertEqual(status, "completed")
+        w2 = [t for t in turns(rec) if t["agent"] == "writer" and t.get("milestone") == 1][0]
+        self.assertFalse(w2["resumed_session"])
+        self.assertIn("fresh conversation", w2["input"])
+        self.assertEqual([e["agent"] for e in _events(rec, "fresh_session")], ["writer"])  # the critic compacted
 
     # 4
     def test_a_cut_off_turn_resumes_with_continue_only(self):

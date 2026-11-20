@@ -56,6 +56,13 @@ for line in sys.stdin:
         event('item/completed', item={'id': 'reply', 'type': 'agentMessage', 'text': 'hello world'})
         event('turn/completed', turn={'id': 'turn-test', 'status': 'failed' if mode == 'failed' else 'completed',
               'error': {'message': 'provider failed'} if mode == 'failed' else None})
+    elif method == 'thread/compact/start':
+        send({'id': m['id'], 'result': {}})
+        event('turn/started', turn={'id': 'turn-test'})
+        if mode != 'compact-no-item':
+            event('item/started', item={'id': 'c1', 'type': 'contextCompaction'})
+            event('item/completed', item={'id': 'c1', 'type': 'contextCompaction'})
+        event('turn/completed', turn={'id': 'turn-test', 'status': 'completed'})
     elif method == 'turn/steer':
         assert m['params']['expectedTurnId'] == 'turn-test'
         assert m['params']['threadId'] == 'session-test'
@@ -121,6 +128,24 @@ class CodexStreamTests(unittest.TestCase):
         self.assertTrue(any(m.get('method') == 'thread/resume' for m in messages))
         turn = next(m for m in messages if m.get('method') == 'turn/start')
         self.assertEqual(turn['params']['input'][0]['text'], 'the prompt')
+
+    def test_compact_resumes_the_thread_and_compacts_it_in_place(self):
+        req = self.request(sid='session-test')
+        req.options = {'executable': str(self.peer)}  # the exec transport's thread too: compaction uses the app-server
+        result = CodexBackend().compact(req, lambda: False)
+        self.assertEqual((result.status, result.session_id, result.meta.get('compacted')), ('ok', 'session-test', True))
+        methods = [m.get('method') for m in self.messages()]
+        self.assertIn('thread/resume', methods)
+        self.assertIn('thread/compact/start', methods)
+        self.assertNotIn('turn/start', methods)
+
+    def test_compact_without_a_compaction_item_is_an_error(self):
+        result = CodexBackend().compact(self.request(mode='compact-no-item', sid='session-test'), lambda: False)
+        self.assertEqual(result.status, 'error')
+        self.assertIn('contextCompaction', result.stderr)
+
+    def test_compact_needs_a_session(self):
+        self.assertIsNone(CodexBackend().compact(self.request(), lambda: False))
 
     def test_completion_only_fallback(self):
         result = CodexBackend().run(self.request('completion-only'), lambda: False)

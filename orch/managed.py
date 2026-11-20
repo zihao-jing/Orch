@@ -2141,15 +2141,25 @@ class ManagedRunner(MonitorRunner):
         return [x for x in q if x not in (HANDOVER, HANDOVER_TOP_DOWN) and not x.startswith(self.SESSION_NOTES)]
 
     def fresh_sessions(self) -> None:
-        """B7. At a milestone start the critic and the workers start new sessions (`fresh_session`; "never" keeps
-        them): their system prompt and a short natural instruction, nothing pasted from earlier rounds. What holds
-        is on the golden board (its reminder comes with a new session's first message) and in the critic's checklist
-        file, which they read. The manager keeps its session (unless set to `fresh_session: milestone`)."""
+        """B7. At a milestone start the critic and the workers have their sessions compacted in place (`fresh_session:
+        compact`, the default) and get a short note that a new part starts; when the backend can't compact (or the
+        compact fails), or with `fresh_session: milestone`, they start new sessions instead: their system prompt and a
+        short natural instruction, nothing pasted from earlier rounds. "never" keeps the session as it is. What holds
+        is on the golden board (its reminder comes with a new or compacted session's next message) and in the critic's
+        checklist file, which they read. The manager keeps its session (unless set otherwise)."""
         mg = self.mg
         if mg.get("fresh_for") == mg.get("ms"):
             return
+        n = mg.get("ms", 0) + 1
         for a in self.mon.agents:
-            if a.fresh_mode == "milestone" and self.has_session(a):
+            if a.fresh_mode in ("milestone", "compact") and self.has_session(a):
+                if a.fresh_mode == "compact" and self.compact(a, int(self.st.get("round", 0)), f"milestone {n} starts"):
+                    note = {"worker": "milestone_compact", "verifier": "milestone_compact_critic"}.get(a.role)
+                    if note:  # the critic's brief, or the manager's kickoff, follows
+                        fwd = self.st.setdefault("fwd", {})
+                        fwd[a.name] = [self.mtpl(note, cwd=a.working_dir).strip()] + list(fwd.get(a.name) or [])
+                    self.log(f"{a.name}: session compacted for milestone {n}")
+                    continue
                 sess = self.st["sessions"].get(a.name) or {}
                 prev = {k: v for k, v in sess.items() if k not in ("previous", "resets", "cut_off")}
                 old = sess.get("session_id")
@@ -2164,18 +2174,19 @@ class ManagedRunner(MonitorRunner):
         mg["fresh_for"] = mg.get("ms")
         self.rec.save()
 
-    def compact(self, agent: AgentConfig, rnd: int) -> None:
+    def compact(self, agent: AgentConfig, rnd: int, why: str = "between steps") -> bool:
         """B7: compact the agent's session before its next turn, between steps of the critic's plan (never mid-task:
         the agent is idle and its lock is held). Claude Code: `/compact` in its resumed session; a backend that can't
         compact on request (Codex) is skipped with one note. The compact is recorded as an entry of its own (its cost
-        too), and the next turn records the compact as its session reset."""
+        too), and the next turn records the compact as its session reset. Also at a milestone start (fresh_session:
+        compact; `why` names it). True when the session was compacted."""
         mg = self.mg
         mg["compact_due"] = [x for x in mg.get("compact_due") or [] if x != agent.name]
         self.rec.save()
         sess = self.st["sessions"].get(agent.name) or {}
         sid = sess.get("session_id")
         if not sid:
-            return
+            return False
         chain = agent.variants()
         v = next((x for x in chain if x.session_key == sess.get("session_key")), chain[0])
         backend = get_backend(v.backend)
@@ -2188,7 +2199,8 @@ class ManagedRunner(MonitorRunner):
             "turn_id": self.rec.turn_id(rnd, seq, agent.name), "round": rnd, "seq": seq, "agent": agent.name,
             "role": agent.role, "purpose": "compact", "backend": v.backend, "model": v.label, "cwd": agent.working_dir,
             "session_id": sid, "resumed_session": True, "status": "running", "started_at": now_iso(),
-            "input": "/compact", "output": "", "milestone": mg.get("ms", 0) if mg.get("milestones") else None}
+            "input": "/compact", "output": "", "milestone": mg.get("ms", 0) if mg.get("milestones") else None,
+            "compact_reason": why}
         t0 = time.monotonic()
         with self.unlocked(), self.rec.agent_lock(agent.name):
             try:
@@ -2198,11 +2210,11 @@ class ManagedRunner(MonitorRunner):
         if res is None:
             if not (self.st.get("compact_skipped") or {}).get(v.backend):
                 self.st.setdefault("compact_skipped", {})[v.backend] = True
-                self.rec.progress(f"🗜 {agent.called}: compact between steps is not available for `{v.backend}`; "
-                                  "its own context handling applies")
+                self.rec.progress(f"🗜 {agent.called}: compacting on request is not available for `{v.backend}`; "
+                                  "its own context handling applies (at a milestone: a new session)")
                 self.rec.event("compact_skipped", agent=agent.name, backend=v.backend)
                 self.rec.save()
-            return
+            return False
         record.update(status=res.status, output=res.output or "", meta=res.meta, command=res.command,
                       stderr=(res.stderr or "")[-2000:], exit_code=res.exit_code, ended_at=now_iso(),
                       duration_s=round(time.monotonic() - t0, 2), session_id=res.session_id or sid)
@@ -2210,10 +2222,13 @@ class ManagedRunner(MonitorRunner):
         if res.status == "ok":
             if res.session_id and res.session_id != sid:
                 self.rec.update_session(agent.name, session_id=res.session_id)
-            self.note_session(agent.name, "compacted between steps", change="compact", turn=record["turn_id"])
-            self.after_compact(agent, "compact between steps")
-        else:
-            self.rec.progress(f"🗜 {agent.called}: compact between steps failed ({res.status}); the session goes on")
+            self.note_session(agent.name, f"compacted {why}" if why == "between steps" else f"compacted: {why}",
+                              change="compact", turn=record["turn_id"])
+            self.after_compact(agent, f"compact ({why})")
+            return True
+        self.rec.progress(f"🗜 {agent.called}: compact ({why}) failed ({res.status}); "
+                          + ("a new session instead" if why != "between steps" else "the session goes on"))
+        return False
 
     @staticmethod
     def for_me(text: str) -> str:

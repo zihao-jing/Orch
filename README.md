@@ -108,7 +108,8 @@ backend: claude
 backend_options: {model: sonnet, effort: medium, permission_mode: auto}
 safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
 check_every: 20             # minutes between quick checks of a running turn or job (0 = off)
-fresh_session: milestone    # a new session for each milestone (the default for the critic and workers; "never" keeps it)
+fresh_session: compact      # each milestone: summarise the session in place (the default for the critic and workers;
+                            # a new session when that fails); milestone = always a new session; never = keep it
 # compact_between_steps: true  # Claude Code: /compact between steps of the critic's plan (never mid-task)
 ```
 
@@ -245,10 +246,12 @@ when (S1, S2 …; where two say different things, the later one holds). It is a 
 board instead, which the manager keeps. The board shows it folded under the golden board. A run started before the
 register existed has it rebuilt from its history on resume.
 
-**Sessions and context.** At each milestone start the critic and the workers start new sessions (`fresh_session`:
-default `milestone` for them; `never` keeps the session): their system prompt and a short natural instruction ("We are
-starting a new part of the work…", then the manager's or the critic's instruction), nothing pasted from earlier rounds.
-What holds is on the golden board (sent with a new session's first message) and in the critic's checklist file,
+**Sessions and context.** At each milestone start the critic and the workers have their sessions compacted in place
+(`fresh_session`: default `compact` for them): they keep a summary of the earlier work and get a short note ("We are
+starting a new part of the work…", then the manager's or the critic's instruction). When the backend can't compact on
+request, or the compact fails, they start new sessions instead, as with `fresh_session: milestone`: their system
+prompt and that short note, nothing pasted from earlier rounds. `never` keeps the session as it is. What holds is on
+the golden board (sent again with a new or compacted session's next message) and in the critic's checklist file,
 which the agents read. The manager keeps its session (unless set to `fresh_session: milestone`). Within a milestone
 the worker keeps its session across the steps of the critic's plan.
 
@@ -256,8 +259,10 @@ Compaction is the CLI's job: Claude Code compacts on its own (set the window per
 `backend_options.extra_args: ["--autocompact", "400k"]`); orch doesn't count context. `compact_between_steps: true`
 adds one explicit compact when a step of the critic's plan finishes, before the agent's next turn (never mid-task):
 Claude Code gets `/compact` as the prompt of `claude -p --resume <session>` (`backend_options.compact_instructions`
-are passed after it). It is recorded as a `compact` turn with its own cost. Codex and the other backends have no
-compact on request: the setting is skipped there with one note, and their own context handling applies.
+are passed after it); Codex gets `thread/compact/start` over its app-server (for either transport: the thread ids are
+shared); OpenCode its session compact API. It is recorded as a `compact` turn with its own cost. A backend with no
+compact on request is skipped with one note, and its own context handling applies (at a milestone start: a new
+session).
 
 A turn cut off after its message reached the session (a restart, a crash, a provider error; Claude Code writes the
 prompt to the session before it starts work) is resumed with `continue`, plus only what is new since; the message is
@@ -475,8 +480,8 @@ orch audit .                           # audit the last audit_every rounds now (
 - **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` continues it in the same session
   with `continue` (the session has the message), so a restart costs at most part of one turn. The cheapest moment is just after a worker turn ends with nothing
   waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
-- **Cost.** Long sessions get dearer per turn because each turn re-reads the history: use `fresh_session:
-  milestone` for workers, a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
+- **Cost.** Long sessions get dearer per turn because each turn re-reads the history: milestone starts compact
+  the sessions (or `fresh_session: milestone` for a clean start), a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
 - **Idle rounds.** If the work waits on people, make sure the pause gets used (the board's *Needs you* shows it);
   a worker that keeps answering "holding" is spending rounds.
 - **Insight: each agent should know only the one it talks to.** Agents that are told about the whole team start

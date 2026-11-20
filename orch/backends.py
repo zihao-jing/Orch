@@ -1240,6 +1240,15 @@ class CodexBackend(Backend):
 
     name = "codex"
 
+    def compact(self, req: TurnRequest, should_stop: Callable[[], bool]) -> Optional[TurnResult]:
+        """Compaction on request goes through the app-server (`thread/compact/start`) for either transport: `codex
+        exec` and the app-server share thread ids, so a thread made by `exec` is compacted in place too."""
+        if not req.session_id:
+            return None
+        from .codex_app_server import run_turn
+        r = TurnRequest(**{**req.__dict__, "prompt": "", "on_event": None, "poll_messages": None, "on_message": None})
+        return run_turn(r, should_stop, compact=True)
+
     def run(self, req: TurnRequest, should_stop: Callable[[], bool]) -> TurnResult:
         o = req.options
         if o.get("transport", "exec") == "app-server":

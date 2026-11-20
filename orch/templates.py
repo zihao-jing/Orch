@@ -435,10 +435,15 @@ The repository is at `{{cwd}}`.
     "worker_timeout": "Your last turn ran past the time limit and was stopped. Check where things stand (the jobs "
                       "you started, logs, partial results) before you continue.",
     "milestone_fresh": "We are starting a new part of the work, so this is a fresh conversation. Everything done so "
-                       "far is in the repository at `{{cwd}}`: read the project files and logs you need, and check the "
-                       "background jobs you started for this work, before you change anything; then carry on from there.",
+                       "far is in the repository at `{{cwd}}`: read what you need for the step below, and check the "
+                       "background jobs you started for this work, before you change anything. Do only that step.",
     "milestone_fresh_critic": "We are starting a new part of the work, so this is a fresh conversation. Everything done "
                               "so far is in the repository at `{{cwd}}`; read what you need there.",
+    # a milestone start with the session compacted in place (fresh_session: compact) instead of a new one
+    "milestone_compact": "We are starting a new part of the work. Our conversation so far was summarised to keep it "
+                         "short; the repository at `{{cwd}}` has everything done so far. Do only the step below.",
+    "milestone_compact_critic": "We are starting a new part of the work. Our conversation so far was summarised to "
+                                "keep it short; the repository at `{{cwd}}` has everything done so far.",
     # the decisions register: everything settled so far, given in full when a milestone starts
     "decisions_intro": "Decisions so far. They are binding; where two say different things, the later one holds. "
                        "The list is kept up to date in `{{path}}`.",
