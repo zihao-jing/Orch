@@ -29,6 +29,9 @@ def render(template: str, **values: Any) -> str:
     return re.sub(r"\n{3,}", "\n\n", out).strip() + "\n"
 
 
+# templates replaced by the reminder registry (orch/reminders.py): a config that still overrides one loads, unused
+RETIRED_TEMPLATES = ("tag_reminder_manager", "tag_reminder_critic", "tag_reminder_worker", "manager_direct_voice")
+
 DEFAULT_TEMPLATES: Dict[str, str] = {
     # the auditor (managed mode): the digest of the last stretch of rounds; its system prompt says what to do with it
     "audit_request": "Audit of rounds {{lo}}–{{hi}} (run {{run}}). At most {{points}} points.\n\n{{digest}}",
@@ -170,15 +173,17 @@ Reply with a concise report when done.
 {{human_messages}}
 
 Could you split this into milestones? Please list them in the order the work should happen, as a numbered
-list with one milestone per line: "1. Short title — what has to be true when it is done". Then tell me how
-you will judge whether a milestone is finished: a small table of criteria with what a 5 out of 5 looks like,
-and the score you need before you accept one. {{critic}} oversees the hands-on work and will report to you when
-a milestone is ready.
+list with one milestone per line: "1. Short title — what has to be true when it is done". Say the overall score
+(out of 5) a milestone needs before you accept it; you set each milestone's own rubric when it starts.
+{{critic}} oversees the hands-on work and will report to you when a milestone is ready. End with a `<summary>` for
+my OK: what the plan covers, what you checked it against, and where to look.
 """,
     "manager_plan_revise": """\
 {{comment}}
 
-Please send me the updated milestone list in the same form.
+Please send me the updated milestone list in the same form, with a `<summary>`: what changed, what you checked, and
+where to look. It is still the plan for my OK: nothing starts until I approve it, so keep the first milestone's
+instruction, rubric and number of people for when it starts.
 """,
     "manager_kickoff": """\
 {{human_messages}}
@@ -190,8 +195,9 @@ Milestone {{n}} of {{total}} is next: {{milestone}}
 Please write the instruction that gets {{critic}} started on it: what is needed, what matters most and what to
 watch out for. Describe the work itself and keep it high level; {{critic}} does not hear about milestones,
 your rubric or scores. Put the instruction inside `<message to="{{critic}}">…</message>`; anything outside it is
-for me. Then write your `<state>` for this part of the work: the instruction in short and the decisions that still
-hold.
+for me. Set this milestone's rubric in `<rubric>…</rubric>`: 3–8 criteria specific to its work, one per line, each
+scored out of 5 at the review. Then write your `<state>` for this part of the work: the instruction in short and the
+decisions that still hold.
 """,
     "manager_question": """\
 {{human_messages}}
@@ -201,8 +207,14 @@ hold.
 {{question}}
 
 Please answer if you can, inside `<message to="{{critic}}">…</message>`. If only I can decide it, ask me in a
-`<question>…</question>` (one per decision), and still give {{critic}} your best guess to work with until I reply.
-If the answer changes the work, update your `<state>`.
+`<question>…</question>` (one per decision): the work waits for my answer. If {{critic}} can go on with your best
+guess meanwhile, write `<question blocking="no">` and give {{critic}} that guess. If the answer changes the work,
+update your `<state>`.
+""",
+    # B7: a question that came with a finished milestone: the review comes next; the next milestone starts afresh
+    "manager_question_before_report": """\
+{{critic}} has finished this milestone; its report comes to you next for your review. Answer only the question now:
+keep your scores, decision and the next milestone's instruction for the review.
 """,
     "manager_review": """\
 {{human_messages}}
@@ -211,12 +223,17 @@ If the answer changes the work, update your `<state>`.
 
 {{report}}
 
-Please score it against your rubric: a small table with a score out of 5 for each criterion, then your overall
-score as `<score>x</score>` (out of 5). If the milestone is done, write me a short summary (tables welcome) and end
-with `<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
+{{rubric}}
+
+Please judge it as I would, against that rubric: a small table with one row per criterion and a score out of 5,
+then your overall score as `<score>x</score>` (out of 5). Look at the logs, reports and files it names where you need
+to; read deeper only where something looks wrong. If the milestone is done, write me a `<summary>` for my OK (what
+changed, what was checked, where to look), a short report (tables welcome), and end with
+`<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
 `<message to="{{critic}}">…</message>`, in terms of the work and at a high level (only that is passed on, so leave
-out milestones and scores), and end with `<decision>REVISE</decision>`. Either way, update your `<state>`: on
-ACCEPT fold in what this milestone settled, on REVISE what still has to happen.
+out milestones and scores), and end with `<decision>REVISE</decision>`. If your working state changes, update your
+`<state>`: on ACCEPT fold in what this milestone settled, on REVISE what still has to happen. Anything settled that
+should hold beyond this milestone goes on the golden board.
 """,
     "manager_feedback": """\
 I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
@@ -226,7 +243,7 @@ I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
 {{unsent}}
 
 Please write what {{critic}} should do next, at a high level and in terms of the work (no milestones or scores),
-inside `<message to="{{critic}}">…</message>`, and update your `<state>` with it.
+inside `<message to="{{critic}}">…</message>`, and update your `<state>` if it changes.
 """,
     "unsent_message": """Your last message to {{critic}} was held when the milestone came to me, and it has not been sent:
 
@@ -245,10 +262,20 @@ Your new message replaces it, so carry over whatever in it still applies.
 
 {{note}}
 
-Please break this into a short `<plan>` of steps, then give {{worker}} the first step only: what to do, how
-you will check it, and whatever settled matters the work must keep to ({{worker}} hears about them only from you).
-Your `<checklist>` covers that step and the standing rules. The repository is at `{{cwd}}`.
+Please break this into a few steps in your checklist file `{{checklist_path}}` (one `## Step N: …` section each,
+the first step's items under it, standing rules under `## Standing rules`), then give {{worker}} the first step
+only: what to do, how you will check it, and whatever settled matters the work must keep to. The repository is at
+`{{cwd}}`.
 """,
+    # B11: the manager approved several people before the brief: the critic plans for them and hands out nothing yet
+    "critic_brief_workers": """\
+{{n}} people can work on this at the same time, each in their own conversation. Plan the steps so that the
+independent ones can go to different people; I introduce them, with their ids, right after this. Don't give a step
+to {{worker}} in this reply.""",
+    # the critic's review came without its verdict tag: one short turn asks for it (nothing else changes)
+    "critic_verdict_missing": "Your review ended without a verdict. Please give it now, in one line: "
+                              "`<verdict>PASS</verdict>` only when every item in your checklist file is `[x]`, "
+                              "otherwise `<verdict>FAIL</verdict>`. What you wrote is passed on as it is.",
     "critic_review": """\
 {{human_messages}}
 
@@ -256,26 +283,37 @@ Your `<checklist>` covers that step and the standing rules. The repository is at
 
 {{worker_report}}
 
-Please take a look at the changes. If the current step is done, tick it in your plan and give {{worker}} the next
-step in this same reply, with a new checklist for it. If everything that can be done here is done and the rest
-waits on a person, don't tell {{worker}} to hold: propose a pause in `<pause>…</pause>` instead. End with your
-`<plan>`, your `<checklist>` and `<verdict>PASS</verdict>` (only when every step is done) or
-`<verdict>FAIL</verdict>`.
+Please take a look at the changes and update your checklist file `{{checklist_path}}` in place (tick what holds
+now). If the current step is done, add the next step's items there and give {{worker}} that step in this same
+reply. If everything that can be done here is done and the rest waits on a person, don't tell {{worker}} to hold:
+propose a pause in `<pause>…</pause>` instead. End with `<verdict>PASS</verdict>` (only when every item of every
+step in the file is `[x]`) or `<verdict>FAIL</verdict>`.
 """,
     "critic_answer": """\
 About your question:
 
 {{answer}}
 
-If this changes what {{worker}} should do, say what (and update your `<plan>` if it changes the steps). If it
-changes your verdict, end with a new `<verdict>`.
+If this changes what {{worker}} should do, say what (and edit your checklist file if it changes the steps or
+items). If it changes your verdict, end with a new `<verdict>`.
 """,
+    # added to critic_answer while the critic's last review has not reached the worker yet
+    "critic_answer_pending": "{{worker}} has not received your last review yet. If this changes what they should do, "
+                             "write the whole instruction as it should now read: it replaces that review, so they get "
+                             "one instruction. If nothing changes for them, write nothing outside the tags and the "
+                             "review goes out as it was.",
     "critic_report": """\
 {{human_messages}}
 
 Please tell me how things stand{{limit_note}}: what was asked, what was done, what is still
 open, any risks, and anything you assumed while a question was open. Tables are welcome; keep the prose short.
 """,
+    # added to a review prompt when processes the worker started are still running: the critic decides
+    "critic_jobs_running": """\
+Still running after {{who}}'s turn: {{jobs}}. If the work you are reviewing depends on one of them (its results,
+its logs), reply with `<wait-job/>` (or `<wait-job pid="123"/>` for some of them) instead of a verdict: the step
+waits, the job is checked on while it runs, and {{who}} picks up again when it ends; anything you write to {{who}}
+now reaches them then. A process the result does not depend on (a dev server, a monitor) needs nothing from you.""",
     "worker_job_done": """\
 {{human_messages}}
 
@@ -311,7 +349,7 @@ The work was paused while waiting for this:
 
 That is done now. My message: {{message}}
 
-Please check where things stand, update your `<plan>` if needed, and give {{worker}} the next step.
+Please check where things stand, update your checklist file if needed, and give {{worker}} the next step.
 """,
     "critic_guidance": """\
 {{human_messages}}
@@ -320,8 +358,8 @@ I read your report, and more is needed:
 
 {{guidance}}
 
-Please add what is needed to your `<plan>` (new steps, or a step reopened) and give {{worker}} the next step,
-with your `<checklist>` for it.
+Please add what is needed to your checklist file `{{checklist_path}}` (new steps, or a step reopened, with their
+items) and give {{worker}} the next step.
 """,
     "critic_checkin": """\
 {{human_messages}}
@@ -330,16 +368,28 @@ A quick update for me, please: two or three lines on how it is going and anythin
 report needed.
 """,
     "critic_urgent_checkin": """\
-Please answer my message now as a brief check-in. {{worker}} is still working; this conversation leaves that
-work running. Use the context and files already available, and distinguish current observations from results
-that are still pending. Do not stop or restart their work, wait for it to finish, or begin a new review.
-Reply directly to me inside `<message to="you">…</message>`, addressing me as "you".
-If my message changes what should be done, also send a concise, self-contained update inside
-`<message to="{{worker}}">…</message>`. Speak as "I" and address them as "you"; state what changes and what
-still holds without mentioning me or your role. That update is queued into their current conversation at
-the next supported boundary while tools continue, or their next turn if live input is unavailable. Do not
-claim delivery or execution before evidence. A status-only question needs no worker message. No checklist
-or verdict is needed for this check-in.
+Please answer my message now as a brief check-in. {{worker}} is still working; leave that work running, and don't
+start a new review. Use what you can already see, and keep current observations apart from results still pending.
+Reply to me inside `<message to="you">…</message>`. If my message changes what should be done, also send a short,
+self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you": what changes and what still
+holds, without mentioning me. It reaches them at the next pause in their work, or at their next turn; don't claim
+it was acted on before you see evidence. No checklist or verdict is needed.
+""",
+    # a turn started only because a message arrived for an idle agent (delivery is activation)
+    "critic_message_turn": """\
+Please answer my message above now. {{worker}} may still be working: leave that work running and don't start a new
+review. Reply to me inside `<message to="you">…</message>`. If it changes what {{worker}} should do, also send a
+short, self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you", saying what it
+replaces. No checklist or verdict is needed.
+""",
+    "manager_message_turn": """\
+The message above came in while the work goes on. Act on it if it needs something: only a
+`<message to="{{critic}}">` reaches {{critic}}. Otherwise a line for me is enough.
+""",
+    # a message for the manager while a milestone waits at my gate: the next milestone waits for my OK too
+    "manager_message_at_gate": """\
+Milestone {{n}} is waiting for my OK at the gate, so nothing new starts yet: keep the next milestone's instruction
+for when I approve. Write to {{critic}} now only if the finished work itself has to change.
 """,
     "manager_checkin": """\
 {{human_messages}}
@@ -369,11 +419,13 @@ The repository is at `{{cwd}}`.
 
 {{feedback}}
 """,
-    "worker_timeout": "Your last turn ran past the time limit and was stopped. Check where things stand (running "
-                      "jobs, logs, partial results) before you continue.",
+    "worker_timeout": "Your last turn ran past the time limit and was stopped. Check where things stand (the jobs "
+                      "you started, logs, partial results) before you continue.",
     "milestone_fresh": "We are starting a new part of the work, so this is a fresh conversation. Everything done so "
-                       "far is in the repository at `{{cwd}}`: read the relevant files, logs and any running jobs "
-                       "before you change anything, and carry on from there.",
+                       "far is in the repository at `{{cwd}}`: read the project files and logs you need, and check the "
+                       "background jobs you started for this work, before you change anything; then carry on from there.",
+    "milestone_fresh_critic": "We are starting a new part of the work, so this is a fresh conversation. Everything done "
+                              "so far is in the repository at `{{cwd}}`; read what you need there.",
     # the decisions register: everything settled so far, given in full when a milestone starts
     "decisions_intro": "Decisions so far. They are binding; where two say different things, the later one holds. "
                        "The list is kept up to date in `{{path}}`.",
@@ -394,10 +446,10 @@ no longer does.
 
 {{instruction}}
 
-Please make your `<plan>` for this (keep the steps that are already done as done) and give {{worker}} the next
-step only: what to do, concretely, and what you will check. {{worker}} also starts a fresh conversation and knows
-only what you tell it, so include whatever settled matters the work must keep to. Your `<checklist>` covers that
-step and the standing rules. The repository is at `{{cwd}}`.
+Please update your steps in your checklist file `{{checklist_path}}` for this (keep the steps that are already
+done as done, and give the next step its items) and give {{worker}} the next step only: what to do, concretely,
+and what you will check. {{worker}} also starts a fresh conversation and knows only what you tell it, so include
+whatever settled matters the current step must keep to. The repository is at `{{cwd}}`.
 """,
     "state_edited": "I edited your working notes; they now read:\n\n{{state}}\n\nGo by them from now on.",
     "critic_state_instruction": "## My standing instruction\n\n{{state}}",
@@ -405,12 +457,18 @@ step and the standing rules. The repository is at `{{cwd}}`.
     "decisions_pointer": "Everything decided so far is in `{{path}}` (the later entry holds where two differ); look "
                          "one up there when you need it.",
     "decisions_intro_worker": "Decisions so far. They are binding; where two say different things, the later one holds.",
+    # B7: a turn cut off after its message reached the session (restart, crash, provider error): the session has the
+    # message, so it is resumed with this alone (plus anything new since)
+    "turn_continue": "continue",
+    # a turn that ended without a usable reply, in a session that has the message
+    "turn_unusable": "Your last reply came through empty ({{reason}}). Please answer my last message again, in text.",
     "turn_interrupted": "Your last turn was cut off when the run was restarted, so here is the same message "
                         "again. Pick up from where you got to rather than starting over: check what you already "
-                        "did (files, running jobs, logs) and don't restart a job that is still running.",
+                        "did (files, the jobs you started, logs) and don't restart a job that is still running.",
     "backend_switched": "You are taking over this work from a colleague, so this is your first message here. "
-                        "Everything done so far is in the repository at `{{cwd}}`: read the current files "
-                        "(and any logs or running jobs) before you change anything, and carry on from there.",
+                        "Everything done so far is in the repository at `{{cwd}}`: read the current project files "
+                        "(and the logs and background jobs of this work) before you change anything, and carry on "
+                        "from there.",
     # relayed answers (put in front of the agent's next message)
     "relay_answer_manager": "About your question ({{question}}): {{answer}}",
     "relay_answer_critic": "My answer about \"{{question}}\": {{answer}}",
@@ -428,47 +486,22 @@ step and the standing rules. The repository is at `{{cwd}}`.
     "manager_resumed": "I ended the pause and said this (it went to {{critic}} too): \"{{message}}\"\n\n"
                        "What the pause was waiting for: {{waited}}",
     "relay_note": "{{note}}",
-    "critic_reply_routing": """\
-If I asked you a question or requested an explanation alongside this review or instruction, put your
-complete answer inside `<message to="you">…</message>`. This sends the answer to me; address me as "you" in it.
-Plain text outside that tag goes to {{worker}}, so use it only for their instructions or feedback, written as
-your own request to "you". Keep any requested checklist and verdict separate. Answer my question yourself when
-you can; it does not replace the ongoing review or create a new task for {{worker}}.
-""",
-    "manager_direct_voice": """\
-When writing to {{critic}}, speak as "I" and address them as "you". Present instructions, questions and decisions
-as your own. Keep my identity, our conversation and your role out of that message; do not attribute requests to
-a user, manager or anyone above you. Ask for explanations as "Please explain this to me". Keep your reply to me separate
-from the message you send to {{critic}}.
-""",
+    # added to a critic review or instruction that carries a message from me (not on every turn)
+    "critic_reply_routing": "If I asked you something, answer it inside `<message to=\"you\">…</message>`; text outside "
+                            "tags goes to {{worker}}.",
     "urgent_resume": "I stopped you mid-turn for this, because it can't wait until you finish:\n\n{{note}}\n\n"
                      "Take it into account from here. Anything you were running in the foreground was ended; check "
                      "where it got to before you rely on it. Then finish the request you were working on, and reply "
                      "as it asked.",
-    "urgent_cut_short": "(orch: I ended this turn early for an urgent message; the work above may be half done.)",
-    "worker_cut_short": "(orch: I ended this turn early so {{critic}} could act on an urgent message from me at once. "
-                        "The work may be half done; anything it was running in the foreground was ended.)",
+    "urgent_cut_short": "(This turn was ended early for an urgent message; the work above may be half done.)",
+    "worker_cut_short": "(This turn was ended early for an urgent message. The work may be half done; anything running "
+                        "in the foreground was ended.)",
     "worker_after_cut": "I ended your last turn early to change course; anything it was running in the foreground was "
                         "ended. What to do now follows.",
     "night_manager": "Night mode is on: nobody is watching the run. Decide everything yourself, from my preferences and "
-                     "the decisions register, and keep the work moving until every milestone is done. Still write each "
+                     "the golden board, and keep the work moving until every milestone is done. Still write each "
                      "question for me in <question>, with the choice you made and why: it is recorded for me to review in "
                      "the morning, and I can still overrule it. Pause only if nothing at all can be done without me.",
-    "tag_reminder_manager": "A reminder, in case it helps (not a request to add anything): what is for {{critic}} goes in "
-                            "<message to=\"{{critic}}\">…</message>; a decision only I can make in <question>…</question> "
-                            "(one per question); stopping the whole run until I act in <pause>…</pause>; in reviews "
-                            "<score>…</score> and <decision>…</decision>; your working state in <state>…</state> when it changes. "
-                            "Everything outside tags is read by me.",
-    "tag_reminder_critic": "A reminder, in case it helps (not a request to add anything): text outside tags reaches "
-                           "{{worker}}; what is only for me goes in <message to=\"you\">…</message>; "
-                           "questions for me in <question>…</question>; proposing to stop the whole run until "
-                           "a person acts in <pause>…</pause>; {{worker}} gets one step of your <plan>…</plan> at a "
-                           "time; each review ends with <plan>…</plan>, <checklist>…</checklist> (the current step) and "
-                           "<verdict>PASS</verdict> (every step done) or <verdict>FAIL</verdict>.",
-    "tag_reminder_worker": "A reminder, in case it helps (not a request to add anything): a question for me goes in "
-                           "<question>…</question>; jobs you start detached are noticed automatically, and "
-                           "<no-wait pid=\"…\"/> is only for a long-lived helper the result does not depend on; "
-                           "a job the work needs is waited for, not tagged.",
     "session_reset": """\
 This is a fresh conversation: your earlier one was cleared to keep turns quick, and the work carries on from where it
 is. Here is what you need from before.
@@ -478,8 +511,177 @@ is. Here is what you need from before.
 Read the files and logs you need before you act, and carry on from there.""",
     "report_checklist": "{{critic}}'s working checklist at its last review ({{done}} of {{total}} done):\n\n{{checklist}}",
     "report_plan": "{{critic}}'s plan ({{done}} of {{total}} steps done):\n\n{{plan}}",
-    "plan_nudge": "You said PASS, but your plan still has open steps. A finished step is not the finished work: tick "
-                  "it, give me the next step (now: {{step}}), and say PASS only when every step is done. If a step "
-                  "is no longer needed, drop it from the plan.",
+    "plan_nudge": "You said PASS, but your checklist file still has open steps. A finished step is not the finished "
+                  "work: give {{worker}} the next step (now: {{step}}) with its items in the file, and say PASS only "
+                  "when every step is done. If a step is no longer needed, delete it from the file.",
+    "checklist_file_nudge": "You said it is ready, but your checklist file `{{checklist_path}}` still has {{open}} open "
+                            "item(s), or none at all. Tick an item there only when it holds, and pass only once every "
+                            "item is [x].",
+    # the critic's list for one step grew past about 25 items (once each time it grows)
+    "checklist_cap": "Your checklist for the current step has {{n}} items; keep it to about {{cap}}: merge items that "
+                     "check the same thing, in the file.",
+    # the manager, once each time the golden board grows past its size limit
+    "golden_prune": "The golden board (`{{path}}`) is {{chars}} characters, over the {{limit}} it should stay under. "
+                    "Prune it in place: merge entries that overlap, remove what no longer holds.",
+    # the golden board names a layer above the critic or the worker: held from them until it is rewritten
+    "golden_leak": "The golden board names {{words}}. {{critic}} and {{worker}} read it as their own user's rules, so "
+                   "it is held from them until you rewrite those entries about the work alone.",
     "relay_note_up": "{{critic}} mentioned: {{note}}",
+    # a <message to="…"> that names no one the sender may write to: one line back to the sender
+    "address_correction_manager": "Not delivered: {{bad}}. You can write to {{critic}} (`<message to=\"{{critic}}\">`) "
+                                  "or, rarely, to {{worker}}; text outside tags is for me.",
+    "address_correction_critic": "Not delivered: {{bad}}. You can write to me (`<message to=\"you\">`) and to "
+                                 "{{worker}} (`<message to=\"{{worker}}\">`); nobody else.",
+    "address_correction_worker": "A `<message>` tag in your reply was not delivered. Write to me directly, without "
+                                 "`<message>` tags.",
+    # the manager's reply held nothing for the critic, where the work needs a message
+    "manager_no_message": "Nothing in your last reply reached {{critic}}: only `<message to=\"{{critic}}\">…</message>` "
+                          "is passed on. Please write what {{critic}} should get, inside that tag.",
+    "critic_no_message": "Nothing new from me on this; carry on with your plan, on your own best assumption where "
+                         "something is open.",
+    # board chat with the critic or a worker: framed as a message from its usual user
+    "chat_reminder_critic": "Answer my message. Don't start new work or change files unless I ask. Your reply comes "
+                            "to me; to pass something on to {{worker}}, put it in `<message to=\"{{worker}}\">…</message>`.",
+    "chat_reminder_worker": "Answer my message. Don't start new work or change files unless I ask.",
+    # B5 progress checks. To the monitor (or the critic's side session): a quick look at running work, evidence only
+    "monitor_check": """\
+Quick check: how is the run going?
+
+Running now: {{what}}, for {{minutes}} min, in `{{cwd}}`.
+{{activity}}
+
+{{step}}
+
+Reply in a few lines and end with `<status>ok|quiet|off-track|stopped</status>`.""",
+    # B8: the worker's model changed (a retry fell back to a backup, or the settings changed); the critic is told once,
+    # in one neutral line, at its next turn. {{who}}: "The person you instruct" (one worker) or that worker's name
+    "worker_model_changed": "{{who}} is now on a different model; keep instructions short and explicit.",
+    # the check's report as the critic reads it: an observation about the work, like a check-in result
+    "progress_check_report": "Progress check, {{minutes}} min into {{what}}:\n\n{{report}}",
+    # the critic's own session runs the check (check_session: own, no monitor)
+    "critic_quick_check": """\
+Quick check: how is the run going? {{worker}} is still working ({{what}}, {{minutes}} min so far); leave that work
+running and don't start a review.
+{{activity}}
+
+{{step}}
+
+Look at the logs and outputs, in a few lines. Write to {{worker}} in `<message to="{{worker}}">…</message>` only if
+the run is quiet, off track, or a job or watcher it relies on has died; otherwise no message.""",
+    # the critic is woken by a check that found a problem
+    "critic_check_turn": "The progress check above found something that may need you. {{worker}} is still working: "
+                         "don't start a review. If the run is quiet, off track, or a job or watcher it relies on has "
+                         "died, send {{worker}} a short message in `<message to=\"{{worker}}\">…</message>`, as \"I\", "
+                         "saying what to check or change. If it needs nothing from you, reply in one line.",
+    # a worker turn started by a message while its background job keeps running
+    "worker_job_message": "{{human_messages}}\n\nYour background job ({{jobs}}) is still running and is being "
+                          "watched; you don't need to check on it or wait for it. Act on my message above, then reply "
+                          "briefly.",
+    # the manager's light status look while work runs (queued for its next turn; it starts no turn)
+    "manager_progress_status": "{{line}}",
+    # B6: the milestone's rubric, in the review prompt; and the note when it has none or too few / too many criteria
+    "rubric_review": "Your rubric for this milestone:\n\n{{items}}",
+    "rubric_missing": "You set no rubric for this milestone. Set 3–8 criteria specific to its work in "
+                      "`<rubric>…</rubric>` (one per line) first, then score against them.",
+    "rubric_note": "Your rubric for milestone {{n}} has {{count}} criteria; set 3–8, specific to its work, in "
+                   "`<rubric>…</rubric>` (one per line), in your next reply.",
+    # B6 discussion mode: a reminder while it is on, and the one turn after I close it
+    "discussion_manager": "We are in a discussion: nothing you write reaches {{critic}} until I close it. Keep what "
+                          "{{critic}} should get for the one message you send then.",
+    "manager_discussion_end": """\
+I closed our discussion. Send {{critic}} the new directions now, in one `<message to="{{critic}}">…</message>`:
+everything we settled that changes the work, complete on its own. It replaces the messages held during the
+discussion; carry over what in them still applies.
+
+{{held}}
+
+If nothing changes for {{critic}}, write no message; one line for me is enough. Anything settled that should hold
+beyond this goes on the golden board.
+""",
+    "discussion_held_none": "Nothing was held during the discussion.",
+    "discussion_held": "Held during the discussion (not sent):\n\n{{messages}}",
+    # B9: a pause sent back from the wait gate
+    "manager_wait_revise": """\
+About the pause (what it waited for: {{waited}}): I'm sending it back, it is not done.
+
+{{message}}
+
+Please decide again. If the work should stay paused, write for me, in a few plain lines, what I need to do and what
+to send back, and end with `<decision>PAUSE</decision>`. If there is useful work meanwhile, put it inside
+`<message to="{{critic}}">…</message>` and end with `<decision>CONTINUE</decision>`.
+""",
+    # B9 review file: the manager writes a review for me to comment on; my comments come back
+    "review_file_request": """\
+Please write me a review of where the work stands, as a Markdown file at `{{path}}` (create it; edit nothing else).
+I will comment in the file and send it back.
+
+- Overview first: what the goal is, how many parts there are, and the verdict for each (does it achieve its
+  purpose: yes / partly / no), in plain words.
+- Then each part: the verdict, the evidence (a small table, its conclusion next to it), what is open and the next
+  action with its cost.
+- Self-contained: assume I forgot the context; plain names, no internal codes; every term and table readable alone.
+- Concise: say each thing once; only final, correct results.
+
+In your reply, one line for me with the path. Write nothing for {{critic}} in this turn.
+""",
+    "review_comments": """\
+I commented on your review `{{path}}`. My changes and comments, as a diff of the file:
+
+{{diff}}
+
+Please answer each comment here. If they change the work, tell {{critic}} what changes in one message.
+""",
+    # B11 parallel workers. The critic's proposal, as the manager reads it (a note that wakes it: it is a decision)
+    "workers_proposal": """\
+{{critic}} proposes {{n}} people working at the same time on steps {{steps}}: {{reason}}
+
+You can approve up to {{max}} on your own: `<workers n="N">why</workers>` (N counts the person working now). More
+than that comes to me to decide. To keep one person, write `<workers n="1">why</workers>`.""",
+    # the critic hears that its proposal was declined (neutral: no one above is named)
+    "workers_declined": "Let's keep to one person on these steps for now; carry on one step at a time.",
+    # the critic hands out the steps: one <to> section per worker
+    "critic_par_assign": """\
+{{human_messages}}
+
+From now on {{n}} people work at the same time, each in their own conversation: {{ids}}. {{first}} is the person
+you have worked with so far{{fresh}}. They don't know about each other: write to each as "I" to "you", and never
+mention one to another.
+
+Steps to hand out: {{steps}}. Give each of {{who}} one step now, one section each, complete on its own:
+
+<to worker="ID" step="N" out="output folder">what to do, how you will check it, what it must keep to</to>
+
+Avoid two people writing the same files: give each their own output folder{{worktrees}}. Steps you don't hand out now
+go to whoever finishes first. The work board `{{board}}` shows who does what, each step's status and where outputs
+go; I keep it up to date. Add shared limits (GPU, API rate) under its "Shared limits" heading.""",
+    # one review of one worker's step, while the others keep working
+    "critic_par_review": """\
+{{human_messages}}
+
+{{who}} (`{{id}}`) sent this update on {{step}}:
+
+{{report}}
+
+Please check this step and tick what holds in your checklist file `{{checklist_path}}`. Text outside the tags goes
+to {{who}} only. End with `<verdict>PASS</verdict>` when every item of {{step}} is `[x]`, otherwise
+`<verdict>FAIL</verdict>` with what to fix.{{next}} The work board is `{{board}}`.""",
+    "critic_par_next": " If it passes, {{next_step}} is next for {{who}}: give that step in this same reply.",
+    "critic_par_last": " If it passes, no step is left for {{who}}; they stop there.",
+    # the parallel steps are finished: the critic takes stock (a review, as for one worker)
+    "critic_par_done": """\
+{{human_messages}}
+
+The steps done in parallel are finished:
+
+{{summary}}
+
+The work board `{{board}}` has the details. Merge or tidy up what needs it, check the checklist file
+`{{checklist_path}}`, and give {{worker}} the next step in this reply if one is left. End with `<verdict>PASS</verdict>`
+(only when every item of every step in the file is `[x]`) or `<verdict>FAIL</verdict>`.""",
+    # a PASS on a step whose items are not all ticked
+    "par_checklist_nudge": "You passed {{step}} for {{who}}, but its items in your checklist file are not all `[x]`; "
+                           "I sent your words back as a review instead. Tick the items that hold, or say what is "
+                           "missing.",
+    # B6 milestone fallback: the item added to a reopened milestone's checklist file
+    "checklist_reopened": "reopened: check this part again before it counts as done",
 }

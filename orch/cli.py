@@ -6,12 +6,13 @@ import argparse
 import dataclasses
 import json
 import re
+import shlex
 import signal
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .config import Config, ConfigError, is_config, load_config, validate
@@ -80,14 +81,17 @@ def init_project(root: Path, force: bool) -> int:
         print(f"{d / 'agents'} exists (use --force to overwrite)")
         return 1
     files = {
-        ".gitignore": "runs/\nagents/*/state.md\n",
+        ".gitignore": "runs/\nagents/*/state.md\nagents/*/checklist-m*.md\n",
         "agents/manager/agent.yaml": """\
 role: manager
 description: Owns the milestones and the rubric; reports to me.
 backend: claude
-backend_options: {model: opus, effort: medium, permission_mode: auto}
+backend_options: {model: opus, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
+fallback:                   # tried in order when a turn still fails after its retries
+  - {label: codex-astra, backend: codex, backend_options: {model: gpt-6.2-astra, effort: medium}}
 timeout: 2400
 retries: 1
+# check_every: 60           # minutes between status lines for me from the progress checks (no turn; 0 = off)
 # the run as a whole
 goal_file: goal.md          # only the manager reads the goal
 max_rounds: 400             # worker/critic rounds in all milestones together (safety cap); keep it well above
@@ -100,29 +104,39 @@ approve_milestones: true    # and after each milestone the manager accepts
         "agents/critic/agent.yaml": """\
 role: critic
 description: Turns milestones into instructions and reviews every change.
-backend: claude
-backend_options: {model: opus, effort: medium, permission_mode: auto}
+backend: codex
+backend_options: {model: gpt-6.2-sol, effort: medium}
+fallback:
+  - {label: claude-haiku, backend: claude, backend_options: {model: haiku, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}}
+  - {label: qwen4-max-preview, backend: opencode, backend_options: {model: alibaba-token-plan-cn/qwen4-max-preview}}
 timeout: 2400
 retries: 1
 checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
 milestone_rounds: 50        # rounds without a step of the critic's plan finishing before the manager and I look
 checkin_every: 2            # every 2 rounds, a status line for the manager (from the plan: no model turn; 0 = off)
-# job_wait: 21600           # how long a review waits for a job the worker left running (seconds; 0 = never)
-# job_ignore: ["status_loop"]  # commands that are never waited on (regexes), e.g. a long-lived helper
+# job_wait: 21600           # 0 = don't look for jobs the worker left running; caps a wait the critic asks for only when checks are off
+# check_session: side       # without a monitor, the critic runs the checks: side (a fresh session) or own
+# job_ignore: ["status_loop"]  # commands never listed as running jobs (regexes), e.g. a long-lived helper
 """,
         "agents/worker/agent.yaml": """\
 role: worker
 description: Does the work in the repository.
 backend: claude
-backend_options: {model: sonnet, effort: medium, permission_mode: auto}
+backend_options: {model: haiku, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
+fallback:
+  - {label: deepseek-v4-pro, backend: opencode, backend_options: {model: zenmux/deepseek/deepseek-v4-pro}}
+  - {label: glm-5.3, backend: opencode, backend_options: {model: alibaba-token-plan-cn/glm-5.3}}
 # Codex instead: backend: codex, backend_options: {model: <model>, sandbox: workspace-write,
 #                extra_args: ["-c", "sandbox_workspace_write.network_access=true"]}
-timeout: 7200               # per turn; long jobs run in the background, and orch waits for them between turns
+safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
+check_every: 20             # minutes between quick checks of a running turn or background job (0 = off)
 retries: 1
 fresh_session: milestone    # a new session for each milestone: turns stay fast and cheap; the files carry the state
+# compact_between_steps: true  # Claude Code: /compact between steps of the critic's plan (never mid-task)
 # snapshot: [docs]          # folders whose every version is kept in the run log
 """,
         "agents/auditor/agent.yaml": AUDITOR_YAML,
+        "agents/monitor/agent.yaml": MONITOR_YAML,
     }
     from .config import PROMPTS_DIR
     for name in ("manager", "critic", "worker", "auditor"):
@@ -144,16 +158,30 @@ fresh_session: milestone    # a new session for each milestone: turns stay fast 
 AUDITOR_YAML = """\
 role: auditor
 description: Reads how the agents talk to each other (never the task) and keeps a short list of findings in audit.md.
-backend: claude
+backend: opencode
 backend_options:
-  model: sonnet
-  effort: low
-  disable_hooks: true
+  model: alibaba-token-plan-cn/deepseek-v4-pro
   # everything it needs is in the digest orch sends; no files, no tools
   disallowed_tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
+fallback:
+  - {label: deepseek-v4-pro-zenmux, backend_options: {model: zenmux/deepseek/deepseek-v4-pro}}
 timeout: 900
-audit_every: 10             # rounds between audits, plus one when the run ends (0 = only `orch audit`)
+audit_every: 10             # rounds between audits, plus one when the run ends (0 = no automatic audits, not even the final one; only `orch audit`)
 audit_points: 5             # at most this many points per audit
+"""
+
+MONITOR_YAML = """\
+role: monitor
+description: Watches the worker's long turns and jobs; reports evidence (never verdicts) to the critic.
+backend: opencode
+backend_options:
+  model: alibaba-token-plan-cn/qwen3.8-flash
+  # read-only: it may run status commands and read logs and files, never edit
+  disallowed_tools: [Edit, Write, NotebookEdit, Task, WebFetch, WebSearch]
+fallback:
+  - {label: deepseek-v4.1-flash, backend_options: {model: zenmux/deepseek/deepseek-v4.1-flash}}
+timeout: 600
+check_session: own          # own: one continuing session for its checks; side: a fresh session per check
 """
 
 NO_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"]
@@ -586,6 +614,44 @@ def cmd_tell(a: argparse.Namespace) -> int:
     return status
 
 
+def hook_settings(python: str = "python3") -> Dict[str, Any]:
+    """The Claude Code hook configuration for orch/hooks/terminal_relay.py (to merge into a settings file)."""
+    script = str(Path(__file__).resolve().parent / "hooks" / "terminal_relay.py")
+    entry = [{"hooks": [{"type": "command", "command": f"{python} {script}", "timeout": 10}]}]
+    return {"hooks": {ev: entry for ev in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")}}
+
+
+def cmd_terminal(a: argparse.Namespace) -> int:
+    """Open an agent's session (the manager's by default) in a terminal without two writers: prints the command
+    that resumes it with the environment the relay hook reads, or (--hooks) the hook configuration to install.
+    Nothing is written to any settings file."""
+    if a.hooks:
+        print("# Merge into .claude/settings.local.json of the project (or ~/.claude/settings.json). orch does not")
+        print("# write it for you. The hook does nothing outside an orch run, nor in the turns orch runs itself.")
+        print(json.dumps(hook_settings(), indent=2))
+        return 0
+    runs = resolve_runs(a.target, a.monitor)
+    if not runs:
+        print("no runs found")
+        return 1
+    run = runs[0]
+    st = read_json(run / "state.json", {}) or {}
+    sessions = st.get("sessions") or {}
+    name = a.agent or next((n for n, x in sessions.items() if (x or {}).get("role") == "manager"), None)
+    sid = ((sessions.get(name) or {}) if name else {}).get("session_id")
+    if not sid:
+        print(f"{run}: {name or 'the manager'} has no session yet")
+        return 1
+    cfg = read_json(run / "config.json", {}) or {}
+    ag = next((x for x in cfg.get("agents", []) if isinstance(x, dict) and x.get("name") == name), {})
+    cwd = ag.get("working_dir") or cfg.get("working_dir") or "."
+    print(f"cd {shlex.quote(str(cwd))} && ORCH_RUN_DIR={shlex.quote(str(run))} ORCH_AGENT={shlex.quote(name)} "
+          f"claude --resume {shlex.quote(sid)}")
+    print("# with the relay hook installed (`orch terminal --hooks`), orch holds this agent's turns while the session "
+          "is open and routes its <message> tags.")
+    return 0
+
+
 def cmd_report(a: argparse.Namespace) -> int:
     runs = resolve_runs(a.target, a.monitor)
     roots = set()
@@ -707,6 +773,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rounds", help="N or A-B (default: the last audit_every rounds)")
     p.add_argument("--digest", action="store_true", help="print the digest the auditor would read; no model call")
     p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser("terminal", help="managed mode: the command that opens an agent's session in a terminal "
+                                        "(its messages are routed), or --hooks: the relay hook settings to install")
+    p.add_argument("target", nargs="?", default=".")
+    p.add_argument("agent", nargs="?", default=None, help="agent name (default: the manager)")
+    p.add_argument("--monitor", action="append")
+    p.add_argument("--hooks", action="store_true", help="print the Claude Code hook settings (writes nothing)")
+    p.set_defaults(func=cmd_terminal)
 
     p = sub.add_parser("report", help="regenerate HTML reports")
     p.add_argument("target")

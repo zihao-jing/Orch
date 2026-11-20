@@ -3,17 +3,25 @@
 Every signal is an XML-style tag with a start and an end, so orch never has to guess where a block stops:
 
     <message to="critic">…</message>   delivered only to that agent (urgent="yes": cuts into its running turn)
-    <question>…</question>             one decision for the level above (one tag per question)
+    <question>…</question>             one decision for the level above (one tag per question); the manager's
+                                       blocking="no": the work goes on meanwhile
     <pause>…</pause>                   a pause (proposed by the critic, called by the manager)
     <plan>…</plan>                     the critic's steps for the current work (`- [x]` / `- [ ]` lines), one at a time
     <checklist>…</checklist>           the critic's checklist for the current step (`- [x]` / `- [ ]` lines)
     <verdict>PASS</verdict>            the critic's verdict
     <score>4.5</score>                 the manager's overall score (out of 5)
     <decision>ACCEPT</decision>        the manager's decision: ACCEPT, REVISE, PAUSE or CONTINUE
-    <no-wait pid="123"/>               the worker: don't hold the review for this process
+    <wait-job/>                        the critic: the work depends on a job still running; wait for it (all the
+                                       running jobs, or <wait-job pid="123 456"/> for some of them)
+    <no-wait pid="123"/>               older: a worker's helper process the review need not wait for (still read)
     <state>…</state>                   the manager's working state (saved to its state.md)
     <preference to="critic">…</preference>  the manager: one line added to that agent's preference.md
     <instruction>…</instruction>       what the next agent must act on: passed on whole, in place of the rest of the reply
+    <rubric>…</rubric>                 the manager: the current milestone's 3–8 criteria, one per line
+    <summary>…</summary>               the manager: what changed, what was checked, where to look (top of a gate)
+    <workers n="3" steps="2,3">…</workers>  B11: the critic proposes several workers for independent steps; the
+                                       manager approves (n >= 2) or declines (n="1")
+    <to worker="w-2" step="3">…</to>   B11: the critic's instruction (and step) for one of several workers
 
 Text outside the tags is for whoever the agent is replying to. Tags inside `code` or ``` fences are only quoted,
 not used. A tag left open runs to the next protocol tag or to the end of the reply.
@@ -23,8 +31,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "no-wait", "state", "preference",
-         "instruction")
+NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "wait-job", "no-wait", "state", "preference",
+         "instruction", "rubric", "summary", "workers", "to")
 _ALT = "|".join(re.escape(n) for n in NAMES)
 _OPEN = re.compile(rf"<({_ALT})((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)
 _ATTR = re.compile(r"([\w-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>/]+))")
@@ -49,7 +57,7 @@ def parse(text: str) -> List[Tuple[str, Dict[str, str], str, int, int]]:
         o = opens[i]
         name = o.group(1).lower()
         attrs = {a.group(1).lower(): next(g for g in a.groups()[1:] if g is not None) for a in _ATTR.finditer(o.group(2) or "")}
-        if o.group(3):  # <no-wait pid="1"/>
+        if o.group(3):  # <wait-job pid="1"/>
             out.append((name, attrs, "", o.start(), o.end()))
             i += 1
             continue

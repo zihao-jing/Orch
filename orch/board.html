@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Orch Board</title>
+<link rel="icon" href="data:,">
 <style>
 :root{color-scheme:light;
  --page:#f9f9f7;--surface:#fcfcfb;--panel:#ffffff;--ink:#0b0b0b;--ink2:#52514e;--mute:#898781;
@@ -37,7 +38,7 @@ h1{font-size:19px;margin:0}h2{font-size:13px;text-transform:uppercase;letter-spa
 .side .chat{width:min(980px,100%);height:min(86vh,960px);max-width:100%;max-height:100%;margin:0;resize:both;overflow:hidden;
  background:var(--page);box-shadow:0 18px 60px rgba(0,0,0,.35);padding:16px 20px}
 .chat-x{margin-left:auto;padding:0 8px;line-height:22px;font-size:16px}
-.chat-top{display:flex;align-items:center;gap:8px;margin-bottom:10px}.chat-top h2{margin:0}
+.chat-top{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}.chat-top h2{margin:0}
 #chattoggle.on{background:var(--you-bg);border-color:var(--you);color:var(--you)}
 .badge{display:inline-block;min-width:16px;padding:0 5px;border-radius:999px;background:var(--you);color:#fff;font-size:11px;line-height:16px;text-align:center;margin-left:4px}
 
@@ -158,7 +159,58 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
 .cm.route .w{color:var(--you)}
 .empty{color:var(--mute);font-size:13px;padding:6px 0}
 .tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}.tabs button.on{background:var(--ink);color:var(--page);border-color:var(--ink)}
-@media (max-width:600px){.wrap{padding:12px 16px 40px}.tile .v{font-size:18px}}
+/* B9b timeline: milestone → step → one block per level of communication → one line per message */
+.nowl{font-size:13px;line-height:1.6}.nowl .bad{color:var(--you)}
+.stats{font-size:12px;color:var(--ink2);margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 14px}
+.tlbar{display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.tlbar input[type=search]{flex:1 1 220px;min-width:0;font:inherit;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:6px 10px}
+.tlbar label{font-size:12px;color:var(--ink2);display:flex;gap:5px;align-items:center;white-space:nowrap}
+#sres:empty{display:none}#sres{margin-bottom:12px;border:1px solid var(--s1);border-radius:10px;padding:6px 8px;background:var(--surface)}
+.shead{font-size:12px;color:var(--ink2);display:flex;gap:8px;align-items:center;margin:2px 4px 6px}
+.snip{font-size:12px;color:var(--mute);margin:0 0 4px 20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+details.ms{border:1px solid var(--ring);border-radius:12px;margin:10px 0;background:var(--panel)}
+details.ms>summary,details.stp>summary,details.msinfo>summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
+details.ms>summary::-webkit-details-marker,details.stp>summary::-webkit-details-marker,details.msinfo>summary::-webkit-details-marker,details.ln>summary::-webkit-details-marker{display:none}
+details.ms>summary{padding:10px 14px;font-weight:600}
+details.ms>summary:before,details.stp>summary:before,details.msinfo>summary:before{content:"▸";color:var(--mute);font-weight:400}
+details.ms[open]>summary:before,details.stp[open]>summary:before,details.msinfo[open]>summary:before{content:"▾"}
+details.stp{border-top:1px solid var(--grid)}details.stp>summary{padding:7px 14px;font-size:13px}
+details.stp>summary .lab{color:var(--ink2);font-weight:400;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 120px}
+details.msinfo{border-top:1px solid var(--grid);padding:0 14px}details.msinfo>summary{padding:7px 0;font-size:12.5px;color:var(--ink2)}
+.msinfo .mi{padding:0 0 10px}
+.bcard{padding:12px 14px}.bcard>h2{display:flex;gap:8px;align-items:center}.bcard.b-user>h2{color:var(--you)}
+.bcard.b-mon{padding:8px 14px}.bcard.b-mon>h2{margin-bottom:4px}
+.bcard details.stp:first-of-type{border-top:0}.bcard details.stp>summary{padding:7px 2px}.bcard .stb{padding:0 0 8px 14px}
+.bcard .lane{font-size:12px;color:var(--ink2);margin:8px 4px 2px;padding-top:4px;border-top:1px dashed var(--grid)}
+details.bcard>summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:center}details.bcard>summary::-webkit-details-marker{display:none}
+details.bcard>summary h2{margin:0;display:flex;gap:8px;align-items:center}details.bcard.b-user>summary h2{color:var(--you)}
+details.bcard>summary:before{content:"▸";color:var(--mute)}details.bcard[open]>summary:before{content:"▾"}details.bcard[open]>summary{margin-bottom:6px}
+.bmore{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--mute);padding:4px 4px 2px}
+.sz{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mute)}.sz.big{color:var(--warn-ink)}
+.rtag{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--mute)}
+details.inp{border:1px dashed var(--ring);border-radius:8px;margin:4px 0 8px;padding:0 8px}details.inp>summary{cursor:pointer;font-size:12px;color:var(--ink2);padding:4px 0}
+.step .cnt{font-size:11px;color:var(--mute);margin-top:4px}
+.blk{border:1px solid var(--ring);border-radius:10px;background:var(--surface);padding:6px 6px 4px;min-width:0}
+.blk h3{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink2);margin:2px 4px 6px;display:flex;gap:6px;align-items:center}
+.blk.b-user h3{color:var(--you)}.blk.b-mon{grid-column:1/-1;padding:3px 6px}.blk.b-mon h3{margin:2px 4px}
+.blk .lane{font-size:11px;color:var(--mute);margin:4px 4px 2px}
+details.ln{border-radius:6px;margin:1px 0}
+details.ln>summary{cursor:pointer;list-style:none;display:flex;gap:6px;align-items:baseline;padding:3px 4px;font-size:12.5px;min-width:0;border-radius:6px}
+details.ln>summary:hover{background:var(--code)}
+details.ln>summary>*{flex:none}details.ln>summary b{font-weight:600}
+details.ln>summary .pv{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink2)}
+details.ln.other>summary{font-size:11.5px;color:var(--mute);padding:1px 4px}details.ln.other>summary .pv{color:var(--mute)}
+.hide-other details.ln.other{display:none}
+details.ln.needs>summary{background:var(--you-bg);box-shadow:inset 3px 0 0 var(--you)}
+details.ln.flash{outline:2px solid var(--you);outline-offset:1px}
+details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px solid var(--grid)}
+.tm{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mute)}
+.ktag{font-size:10px;padding:0 5px;border-radius:4px;background:var(--code);color:var(--ink2);text-transform:uppercase;letter-spacing:.03em}
+.ktag.warning{background:var(--warn-bg);color:var(--warn-ink)}.ktag.question,.ktag.gate{background:var(--you-bg);color:var(--you)}
+.st{font-size:11px;color:var(--mute)}.st.delivered,.st.answered{color:var(--good-ink)}.st.sent,.st.open,.st.held,.st.superseded{color:var(--warn-ink)}.st.dropped{color:var(--mute)}
+.st.running{color:var(--s1)}.st.failed,.st.error,.st.unseen,.st.unknown,.st.timeout{color:var(--crit-ink)}
+.lmore{font-size:12px;color:var(--mute);padding:2px 4px}
+@media (max-width:600px){.wrap{padding:12px 16px 40px}.tile .v{font-size:18px}.blocks{padding:6px 6px 8px}details.ln>summary .to{display:none}}
 </style>
 </head>
 <body>
@@ -169,33 +221,33 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
   <span class="mute mono" id="runid"></span>
   <span style="flex:1"></span>
   <select id="mon" style="display:none"></select>
-  <a class="sm btn" id="loglink" href="log/run" target="_blank" title="Every turn's full input and output, folded by milestone and round">📜 Log</a>
+  <a class="sm btn" id="replink" href="report" target="_blank" title="The run's static report (report.html): every turn's input and output, to keep or share">📄 Report</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
   <button class="sm" id="theme" title="Toggle light/dark">◐</button>
+  <button class="sm" id="reviewbtn" title="Ask the manager for a review file: a short Markdown review you can comment in and send back">📝 Review file</button>
+  <button class="sm ok" id="discpill" hidden title="A discussion with the manager is open: it sends nothing to the critic until you close it. Click to open the conversation">💬 Discussing</button>
   <button class="sm" id="night" title="Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review">🌙 Night</button>
   <button class="sm" id="stop" title="Stop after the current turn">Stop run</button>
  </header>
  <div class="grid" id="grid">
   <main>
    <div id="needs"></div>
-   <div class="tiles" id="tiles"></div>
-   <div class="card"><h2>Milestones</h2><div class="steps" id="steps"></div></div>
-   <div class="card"><div class="charts">
-     <div id="ch-check"></div>
-     <div><h2 id="score-h">Manager scores</h2><div class="chart" id="ch-score"></div></div>
-   </div></div>
-   <div class="card" id="report"></div>
-   <div class="card"><h2>Manager ↔ critic</h2><div id="thread"></div></div>
-  <div class="card" id="messages-card"><h2>Messages</h2><div class="mfilter" id="mfilter"></div><div id="messages"></div></div>
-   <div class="card" id="worker-updates-card" hidden><h2>Updates to running workers</h2><div id="worker-updates"></div></div>
-   <div class="card"><h2>Critic ↔ worker, round by round</h2><div id="rounds"></div></div>
-   <div class="card"><h2>Questions</h2><div id="qs"></div></div>
-   <div class="card"><h2 id="dec-h">Decisions</h2><div id="decs"></div></div>
+   <div class="card" id="now-card"><h2>Working now</h2><div class="nowl" id="now"></div><div class="stats" id="stats"></div></div>
+   <div class="card" id="tl-card"><h2>Milestones</h2><div class="steps" id="steps"></div><div id="msinfo"></div>
+    <div class="tlbar" style="margin:10px 0 0"><input type="search" id="q" placeholder="Search all messages…" aria-label="Search all messages">
+     <label title="Progress checks, jobs, reminders sent, retries, model switches, session resets and warnings"><input type="checkbox" id="other"> checks, jobs &amp; system lines</label></div>
+    <div class="tlbar" id="bfilter" style="margin:6px 0 0" title="Which conversations to show below"></div>
+    <div id="sres" style="margin-top:10px"></div></div>
+   <div id="timeline"></div>
+   <details class="card bcard" id="gold-card" open><summary><h2 id="gold-h">Golden board</h2><span style="flex:1"></span><button class="sm" id="gold-edit" title="Edit the board yourself. Every agent gets the new board; the manager is told what you changed">✎ Edit</button></summary><div id="golden"></div>
+    <details class="fold" id="dec-fold"><summary><b id="dec-h">Decisions record</b></summary><div id="decs"></div></details></details>
+   <details class="card ckp" id="qs-card"><summary><h2 id="qs-h">Questions</h2></summary><div id="qs"></div></details>
+   <details class="card ckp" id="reviews-card" hidden><summary><h2>Review files</h2></summary><div id="reviews"></div></details>
   <details class="card ckp" id="audit-card" hidden><summary><h2 id="audit-h">Auditor</h2><span class="mute">click to load</span></summary><div id="audit"></div></details>
   </main>
   <aside class="side">
    <div class="card chat">
-    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" title="Who to talk to" style="font-size:13px;max-width:45%"></select><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
+    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" title="Who to talk to" style="font-size:13px;max-width:45%"></select><button class="sm" id="discuss" title="Discussion: while it is on, the manager sends nothing to the critic; when you turn it off, it sends one message with the new directions">💬 Discuss</button><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
     <div class="chatlog" id="chatlog"></div>
     <div class="row"><textarea id="chatin" rows="2" placeholder="Ask anything or give direction… (Enter to send, Shift+Enter for a new line)"></textarea></div>
     <div class="row" style="justify-content:space-between;align-items:center"><span class="mute" style="font-size:12px" id="chat-hint"></span><button class="pri" id="chatsend">Send</button></div>
@@ -208,10 +260,10 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
 const MONS = __MONITORS__;
 const qsM = new URLSearchParams(location.search).get('m');
 let M = MONS.includes(qsM) ? qsM : MONS[0];
-document.getElementById('loglink').href = 'log/run?m=' + encodeURIComponent(M);
-let D = null, sel = null, tab = 'all';
+document.getElementById('replink').href = 'report?m=' + encodeURIComponent(M);
+let D = null;
 const chatOlder = new Map(), chatMoreFlag = new Map(); let chatFirstId = '';  // older chat messages fetched on request
-const live = {}, expanded = new Set(), openRounds = new Set();
+const live = {};
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function inline(s){ s = esc(s);
@@ -226,13 +278,15 @@ function tagsToMd(s){
       (_, w, rest) => lab('→ ' + who(w.trim().replace(/^the\s+/i,'')) + (/urgent\s*=\s*["']?(yes|true|1|now)/i.test(rest||'') ? ' (urgent)' : '')))
     .replace(/<question\s*>/gi, lab('❓ Question')).replace(/<pause\s*>/gi, lab('⏸ Pause'))
     .replace(/<plan\s*>/gi, lab('Plan')).replace(/<checklist\s*>/gi, lab('Checklist'))
+    .replace(/<rubric\s*>/gi, lab('Rubric')).replace(/<summary\s*>/gi, lab('Summary'))
     .replace(/<verdict\s*>\s*([^<]*)<\/verdict\s*>/gi, (_, v) => lab('Verdict: ' + v.trim()))
     .replace(/<score\s*>\s*([^<]*)<\/score\s*>/gi, (_, v) => lab('Score: ' + v.trim() + (/\//.test(v) ? '' : '/5')))
     .replace(/<decision\s*>\s*([^<]*)<\/decision\s*>/gi, (_, v) => lab('Decision: ' + v.trim()))
     .replace(/<no-wait\s+pid\s*=\s*["']?(\d+)["']?\s*\/?>/gi, (_, p) => `\n\n*(not waited on: pid ${p})*\n\n`)
-    .replace(/<\/(message|question|pause|plan|checklist|verdict|score|decision|no-wait)\s*>/gi, '\n\n');
+    .replace(/<question\s+blocking\s*=\s*["']?no["']?\s*>/gi, lab('❓ Question (the work goes on meanwhile)'))
+    .replace(/<\/(message|question|pause|plan|checklist|verdict|score|decision|no-wait|rubric|summary)\s*>/gi, '\n\n');
 }
-const TAGBLOCK = /<(message|question|pause|plan|checklist|verdict|score|decision|no-wait|preference)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
+const TAGBLOCK = /<(message|question|pause|plan|checklist|verdict|score|decision|no-wait|preference|rubric|summary)\b[^>]*>[\s\S]*?(<\/\1\s*>|$)/gi;
 function md(src){
   const L = tagsToMd(src).replace(/\r/g,'').split('\n'); let h = '', i = 0;
   while (i < L.length){
@@ -338,50 +392,74 @@ function paintLive(t){ if (raf[t]) return; raf[t] = requestAnimationFrame(() => 
 
 function render(){
   if (!D || !D.run_id){ $('title').textContent = 'Orch board · ' + M; setHTML($('status'), stPill('starting')); return; }
-  const mg = D.managed || {}, mss = mg.milestones || [];
-  if (sel === null || sel >= mss.length) sel = Math.min(mg.ms || 0, Math.max(0, mss.length - 1));
+  const mg = D.managed || {};
   $('title').textContent = D.monitor; setHTML($('status'), stPill(D.status)); $('runid').textContent = D.run_id;
   document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
-  renderNeeds(mg); renderTiles(mg); renderSteps(mg); renderCharts(mg); renderReport(mg);
-  renderThread(mg); renderWorkerUpdates(); renderRounds(mg); renderQs(); renderDecisions(); renderAudit(); renderChat();
-  renderMessages();
+  renderNeeds(mg); renderNow(mg); renderTimeline(); renderQs(); renderReviews(mg); renderDecisions(); renderAudit(); renderChat();
   Object.keys(live).forEach(paintLive);
 }
 
-function running(){ return (D.turns||[]).filter(t => t.status === 'running'); }
-const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milestone', brief:'briefing the worker', work:'working',
+const DOING = {plan:'drafting the milestone plan', kickoff:'starting the milestone', brief:'briefing', work:'working',
   verify:'reviewing the changes', answer:'answering a question', amend:'updating the notes', report:'writing the milestone report',
-  review:'scoring the milestone', guidance:'passing on guidance', feedback:'reading your feedback',
-  checkin:'sending a quick update', ack:'reading the quick update'};
-function renderTiles(mg){
+  review:'scoring the milestone', guidance:'passing on guidance', feedback:'reading your feedback', compact:'compacting its session',
+  checkin:'sending a quick update', check:'checking on the work', ack:'reading the quick update', incoming:'answering a message that just arrived'};
+const mins = since => since ? Math.max(0, Math.round((Date.now() - Date.parse(since)) / 60000)) : 0;
+function renderNow(mg){  // the switches, and the status area: only the agents working now, one line each
   const nb = $('night'), want = nightWanted();  // the switch as last set (the run applies it when the current turn ends)
   nb.textContent = want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
+  const qOpen = (D.questions||[]).some(q => q.status === 'open' && q.to === 'human');  // B9: no switch mid-question
+  nb.disabled = qOpen && !(D.night_pending != null && D.night_pending !== !!D.night);
+  nb.title = qOpen ? 'A question for you is open: night mode can switch once it is answered' : 'Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review';
+  const db = $('discuss'), dw = discussWanted();  // B6: shown as last set, at once
+  db.textContent = dw ? '💬 Discussing · close' : '💬 Discuss'; db.classList.toggle('ok', dw);
+  db.hidden = !(dw || !chatWith || chatWith === mgrName());  // a discussion is with the manager: shown there, or while open
+  $('discpill').hidden = !dw;  // on the main page only while a discussion is open, as a reminder
+  const rb = $('reviewbtn'); rb.disabled = !!mg.review_req; rb.textContent = mg.review_req ? '📝 Review asked…' : '📝 Review file';
+  const lines = [], lined = new Set();
+  Object.values(D.status_lines||{}).forEach(x => {  // B5: "Sam: step 3, running 14 min — log active"
+    const m = x.since_ts ? Math.max(0, Math.round((Date.now()/1000 - x.since_ts)/60)) : 0, bad = x.status && x.status !== 'ok';
+    lined.add(x.agent);
+    lines.push(`<div class="${bad ? 'bad' : ''}" title="${esc(x.checked_at ? 'last check ' + x.checked_at : 'no check yet')}"><span class="dot live"></span> <b>${esc(called(x.agent))}</b>: ${x.step ? esc(x.step) + ', ' : ''}${x.kind === 'job' ? 'job running' : 'running'} ${m} min — ${esc(x.summary||'')}</div>`); });
+  (D.running||[]).forEach(t => { if (lined.has(t.agent)) return; lined.add(t.agent);
+    lines.push(`<div><span class="dot live"></span> <b>${esc(called(t.agent))}</b>: ${esc(DOING[t.purpose]||t.purpose)}, running ${mins(t.started_at)} min</div>`); });
+  Object.entries(D.reliability||{}).forEach(([n, x]) => {  // B8: a retry waiting, or a backup in use
+    const what = x.state === 'retrying' ? `${esc(x.model)} failed (${esc(x.reason||'error')}); retry ${x.retry}/${x.of} in ${x.wait_s}s`
+      : x.state === 'switched' ? `switched to backup ${esc(x.model)} (${esc(x.reason||'error')})`
+      : x.state === 'backup' ? `on backup ${esc(x.model)}; ${esc(x.primary||'primary')} again after ${x.until ? new Date(x.until * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'the cooldown'}`
+      : `${esc(x.model)}: ${esc(x.state)} (${esc(x.reason||'')})`;
+    lines.push(`<div class="bad">⏳ <b>${esc(called(n))}</b>: ${what}</div>`); });
+  Object.keys(D.terminal||{}).forEach(n => lines.push(`<div class="mute" title="orch holds this agent's turns and routes the messages it writes there">⌨ ${esc(called(n))} is open in a terminal</div>`));
+  if (D.stop_reason && D.status === 'stopped') lines.push(`<div class="bad">⛔ ${esc(D.stop_reason)}</div>`);
+  if (!lines.length) lines.push(`<div class="mute">${mg.held ? (String(mg.held.why).startsWith('question') ? '⏸ Nobody is working: the work waits for your answer to ' + esc(String(mg.held.why).slice(9)) : '⏸ Nobody is working: the manager\'s next step waits for the discussion to close')
+    : D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? '⏸ Paused until your task is done' : '⏸ Nobody is working: waiting for your OK')
+    : D.status === 'waiting_job' ? '⏳ Waiting for the worker\'s job to finish' : 'Nobody is working right now (' + esc(D.status||'') + ')'}</div>`);
+  setHTML($('now'), lines.join(''));
   const qs = D.questions||[], mss = mg.milestones||[], done = mss.filter(m=>m.status==='done').length;
-  const run = running()[0];
-  const nowTxt = run ? `<span class="dot live"></span> <b>${esc(called(run.agent))}</b>&nbsp;is ${esc(DOING[run.purpose]||run.purpose)}`
-                     : D.status === 'waiting_job' ? 'Waiting for the worker\'s job to finish' : (D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? 'Paused until your task is done' : 'Waiting for your OK') : esc(D.status||''));
-  const QA = D.queued_answers || {}, live = qs.filter(q => q.status === 'open' && !QA[q.id]);  // settled-but-queued counts as done
-  const openQ = live.length, mine = live.filter(q => q.to === 'human').length;
-  const tiles = [
-    ['Now', `<div class="now" style="font-size:14px;font-weight:500">${nowTxt}</div>`, ''],
-    ['Milestones', `${done}<span class="mute" style="font-size:15px"> / ${mss.length||'–'}</span>`, mss[mg.ms] ? 'on: ' + esc(mss[mg.ms].title) : ''],
-    ['Rounds', esc(D.round||0), 'worker ↔ critic'],
-    ['Questions', `${openQ}<span class="mute" style="font-size:15px"> open</span>`, mine ? `<b style="color:var(--you)">${mine} for you</b>` : `${qs.length} asked in all`],
-    ['Cost', D.cost ? '$' + Number(D.cost).toFixed(2) : '—', ((D.turn_counts||{}).total||0) + ' turns'
-      + (D.cost_estimate ? `<br><span title="Claude Code prices every model at its own Claude rates. For turns on another provider's endpoint or a model it does not know, its dollars are a guess, not what the provider charged.">incl. ~$${Number(D.cost_estimate).toFixed(2)} estimated ⓘ</span>` : '')]];
-  setHTML($('tiles'), tiles.map(([k,v,s]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join(''));
+  const QA = D.queued_answers || {}, openQ = qs.filter(q => q.status === 'open' && !QA[q.id]), mine = openQ.filter(q => q.to === 'human').length;
+  const st = [mss.length ? `Milestones ${done} / ${mss.length}${mss[mg.ms] ? ' · on: ' + esc(mss[mg.ms].title) : ''}` : '',
+    `Round ${esc(D.round||0)}`, `${openQ.length} question${openQ.length === 1 ? '' : 's'} open${mine ? ` (<b style="color:var(--you)">${mine} for you</b>)` : ''}`,
+    `${D.cost ? '$' + Number(D.cost).toFixed(2) : '$—'} · ${((D.turn_counts||{}).total||0)} turns`
+      + (D.cost_estimate ? ` <span title="Claude Code prices every model at its own Claude rates. For turns on another provider's endpoint or a model it does not know, its dollars are a guess.">(incl. ~$${Number(D.cost_estimate).toFixed(2)} estimated ⓘ)</span>` : '')];
+  setHTML($('stats'), st.filter(Boolean).map(x => `<span>${x}</span>`).join(''));
 }
 
-function qThread(qid){ const rows = {}; (D.chat||[]).filter(c => c.qid === qid).forEach(c => rows[c.id] = Object.assign(rows[c.id]||{}, c)); return Object.values(rows); }
+function qThread(qid){ const rows = {}; (D.chat||[]).filter(c => c.qid === qid).forEach(c => rows[c.id] = Object.assign(rows[c.id]||{}, c)); return Object.values(rows).map(fullC); }
+// the state carries chat messages clipped (c.len is the whole length); the whole text loads on request, cached
+function fullC(c){ const m = c.len > (c.text||'').length && msgCache.get('c:' + c.id); return m && m.text != null ? Object.assign({}, c, {text: m.text, len: 0}) : c; }
+const clipNote = c => c.len > (c.text||'').length ? `<button class="more" data-chatfull="${esc(c.id)}">Show the whole message (${Math.round(c.len/1000)}k characters)</button>` : '';
 function renderNeeds(mg){
   const QA = D.queued_answers || {};
   const g = mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !QA[q.id]);  // settled ones leave
   const threads = Object.fromEntries(mine.map(q => [q.id, qThread(q.id)]));
-  const job = mg.job, sig = JSON.stringify([job && job.since, g && g.key, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status))]);
+  const revs = (D.review_files||[]).filter(r => r.status === 'written' && r.exists);  // B9: a review file to comment in
+  const job = mg.job, sig = JSON.stringify([job && job.since, g && g.key, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status)), revs.map(r => r.path)]);
   const el = $('needs'); if (el._sig === sig) return; el._sig = sig;
   const typed = {}; el.querySelectorAll('textarea,input').forEach(x => { if (x.id) typed[x.id] = x.value; });
-  if (!g && !mine.length && !job){ el.innerHTML = ''; return; }
-  let h = '<div class="card needs"><h2>' + (g || mine.length ? 'Needs you' : 'Waiting for a job') + '</h2>';
+  if (!g && !mine.length && !job && !revs.length){ el.innerHTML = ''; return; }
+  let h = '<div class="card needs"><h2>' + (g || mine.length || revs.length ? 'Needs you' : 'Waiting for a job') + '</h2>';
+  revs.forEach(r => { h += `<div class="q"><div class="row" style="align-items:center;gap:8px;margin-top:0">📝 <b>Review file to comment:</b> ${r.href ? `<a href="${esc(r.href)}" target="_blank">${esc(r.name)}</a>` : esc(r.name)}
+      <span style="flex:1"></span><button class="sm" data-rc="${esc(r.path)}" title="Sends what you changed in the file (your comments) to the manager">↩ Send back comments</button></div>
+      <div class="mute mono" style="font-size:11px">${esc(r.path)}</div></div>`; });
   if (job){
     const ls = Object.entries(job.agents||{}).map(([a, j]) => `<li><b>${esc(called(a))}</b>: ${inline((j.lines||[]).join('; '))}</li>`).join('');
     h += `<div style="font-weight:600;margin-bottom:4px">⏳ A job the worker started is still running, so the critic's review is held until it ends (since ${tm(job.since)})</div>
@@ -389,6 +467,7 @@ function renderNeeds(mg){
   }
   if (g){
     h += `<div style="font-weight:600;margin-bottom:4px">⏸ ${esc(g.title)}</div>`;
+    if (g.summary) h += `<div class="rec"><div class="k">What changed, what was checked, where to look</div><div class="md">${md(g.summary)}</div></div>`;
     if (g.kind === 'plan'){
       h += '<div class="tw"><table><tr><th>#</th><th>milestone</th><th>done when</th></tr>' + (mg.milestones||[]).map((m,i) =>
         `<tr><td class="num">${i+1}</td><td><b>${inline(m.title)}</b></td><td>${inline(m.done_when||'')}</td></tr>`).join('') + '</table></div>';
@@ -399,7 +478,7 @@ function renderNeeds(mg){
     h += g.kind === 'wait'
       ? `<div class="ink2" style="font-size:12px">The worker and the critic are paused; no rounds are spent while you work on this.</div>
       <div class="row"><textarea id="gate-msg" rows="2" placeholder="What you did, where the files are, anything the critic should know"></textarea></div>
-      <div class="row"><button class="ok" data-gate="approve">✓ Done, carry on</button></div>`
+      <div class="row"><button class="ok" data-gate="approve">✓ Done, carry on</button><button data-gate="revise">↺ Send back with my note</button></div>`
       : `<div class="row"><textarea id="gate-msg" rows="2" placeholder="Optional: what still needs work, or a note for the manager"></textarea></div>
       <div class="row"><button class="ok" data-gate="approve">✓ Approve</button><button data-gate="revise">↺ Send back with my note</button></div>`;
   }
@@ -410,7 +489,7 @@ function renderNeeds(mg){
       <div class="md">${md(qtext(q.text))}</div>` +
       (forMe(q.assumption) ? `<div class="rec"><div class="k">${esc(called(q.from))}'s recommendation</div><div class="md">${md(forMe(q.assumption))}</div></div>` : '');
     if (th.length) h += '<div class="qthread">' + th.map(c => c.role === 'human'
-        ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}${c.settle ? ' · settle' : ''}</div><div class="b">${md(c.text)}</div></div>`
+        ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}${c.settle ? ' · settle' : ''}</div><div class="b">${md(c.text)}${clipNote(c)}</div></div>`
         : replyBubbles(c, called(q.from), c.settle ? ' · what we agreed' : '')).join('') + '</div>';
     if (done){
       h += `<div class="mute" style="font-size:12px;margin-top:6px"><span class="pill p-good">✓ settled</span> ${esc(called('critic'))} gets this when the current turn ends.</div>`;
@@ -440,6 +519,7 @@ document.addEventListener('click', async e => {
   if (b.dataset.job){ b.disabled = true; await post('api/job', {}); }
   if (b.dataset.gate){ const msg = ($('gate-msg')||{}).value || '';
     if (b.dataset.gate === 'revise' && !msg.trim() && !confirm('Send it back without a note?')) return;
+    if (b.dataset.gate === 'revise' && (D.managed.gate||{}).kind === 'wait' && !confirm('Send the pause back to the manager? It decides again with your note.')) return;
     b.disabled = true; await post('api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}); }
   else if (b.dataset.qo){ b.disabled = true; await qSend(b.dataset.qo, b.dataset.a); }
   else if (b.dataset.qs){ const v = (($('qa-'+b.dataset.qs)||{}).value || '').trim(); if (!v) return; b.disabled = true; await qSend(b.dataset.qs, v); }
@@ -447,97 +527,69 @@ document.addEventListener('click', async e => {
     if (!qThread(b.dataset.qd).length && !v && !confirm('Settle without talking? The manager writes up its current assumption as the answer.')) return;
     b.disabled = true; const ta = $('qa-' + b.dataset.qd); if (ta) ta.value = '';
     await post('api/chat', {qid: b.dataset.qd, message: v, settle: true}); }
-  else if (b.dataset.more){ expanded.has(b.dataset.more) ? expanded.delete(b.dataset.more) : expanded.add(b.dataset.more); render(); }
-  else if (b.dataset.older){ shown[b.dataset.older] = b.dataset.n === 'all' ? 1e9 : shown[b.dataset.older] + (+b.dataset.n); render(); }
-  else if (b.dataset.less){ shown[b.dataset.less] = LIMIT[b.dataset.less]; render(); }
-  else if (b.dataset.tab){ tab = b.dataset.tab; render(); }
+  else if (b.dataset.reopen != null && b.dataset.reopen !== undefined){
+    if (!confirm('Move milestone ' + (+b.dataset.reopen + 1) + ' back to open? Its checklist gets an open item; the manager is not prompted.')) return;
+    b.disabled = true; await post('api/milestone', {ms: +b.dataset.reopen}); }
+  else if (b.dataset.chatfull){ b.disabled = true; try { await getMsg('c:' + b.dataset.chatfull); } catch(err){} $('needs')._sig = null; render(); }
+  else if (b.dataset.rc){ if (!confirm('Send your comments in this file to the manager?')) return;
+    b.disabled = true; await post('api/review_comments', {path: b.dataset.rc}); }
 });
 async function post(url, body){ try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json(); if (j.error) alert(j.error); soon(); return j; } catch(e){ alert('Could not reach the board server.'); } }
 
-const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started']};
-function renderSteps(mg){
-  const mss = mg.milestones || [];
-  if (!mss.length){ setHTML($('steps'), `<div class="empty">${mg.phase === 'plan' || !mg.phase ? 'The manager is drafting the milestone plan…' : 'No milestones yet.'}</div>`); return; }
-  setHTML($('steps'), mss.map((m,i) => { const s = MS_ST[m.status] || ['', m.status];
-    const ser = (D.series||[]).filter(x => x.milestone === i && x.purpose === 'verify'), last = ser[ser.length-1];
-    const frac = m.status === 'done' ? 1 : last ? last.done / Math.max(1,last.total) : 0;
-    return `<div class="step${i===sel?' sel':''}" data-ms="${i}" title="${esc(m.done_when||'')}">
-      <div class="n"><span>Milestone ${i+1}</span>${m.score != null ? `<b class="ink2">${m.score}/5</b>` : ''}</div>
-      <div class="t">${esc(m.title)}</div><div class="bar"><i style="width:${Math.round(frac*100)}%"></i></div>
-      <div class="n" style="margin-top:6px">${pill(s[0], s[1])}<span>${m.rounds||0} round${m.rounds===1?'':'s'}</span></div></div>`; }).join(''));
-}
-$('steps').addEventListener('click', e => { const s = e.target.closest('[data-ms]'); if (s){ sel = +s.dataset.ms; render(); } });
+const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started'], open:['p-warn','↺ open again']};
 
 // ---------------------------------------------------------------- charts (inline SVG)
-function tipAt(box, html, x, y){ let t = box.querySelector('.tip'); if (!t){ t = document.createElement('div'); t.className='tip'; box.appendChild(t); }
-  t.innerHTML = html; t.style.display='block'; const bw = box.clientWidth, tw = t.offsetWidth;
-  t.style.left = Math.max(0, Math.min(bw - tw, x + 12)) + 'px'; t.style.top = Math.max(0, y - 10) + 'px'; }
-function barChart(box, rows, min, empty){
-  const sig = JSON.stringify([rows, min]); if (box._sig === sig) return; box._sig = sig;
-  if (!rows.length){ box.innerHTML = `<div class="empty">${empty}</div>`; return; }
+function barChart(rows, min){  // the manager's scores per criterion, out of 5 (inline SVG; hover a bar for its name)
+  if (!rows.length) return '';
   const W=560, lw=170, pr=40, rh=28, pt=8, H = pt + rows.length*rh + 26, iw = W-lw-pr, X = v => lw + v/5*iw;
   let g = '';
   [0,1,2,3,4,5].forEach(v => g += `<line x1="${X(v)}" x2="${X(v)}" y1="${pt}" y2="${H-22}" stroke="var(--grid)"/><text x="${X(v)}" y="${H-8}" text-anchor="middle" font-size="11" fill="var(--mute)">${v}</text>`);
   rows.forEach((r,i) => { const y = pt + i*rh + 7, name = r[0].length > 24 ? r[0].slice(0,23)+'…' : r[0];
     g += `<text x="${lw-10}" y="${y+11}" text-anchor="end" font-size="12" fill="var(--ink2)"><title>${esc(r[0])}</title>${esc(name)}</text>`;
-    g += `<rect class="bar-h" data-i="${i}" x="${lw}" y="${y}" width="${Math.max(2, X(r[1])-lw)}" height="14" rx="4" fill="var(--s1)"/>`;
+    g += `<rect x="${lw}" y="${y}" width="${Math.max(2, X(r[1])-lw)}" height="14" rx="4" fill="var(--s1)"><title>${esc(r[0])}: ${r[1]} / 5</title></rect>`;
     g += `<text x="${X(r[1])+6}" y="${y+11}" font-size="12" fill="var(--ink)">${r[1]}</text>`; });
   if (min != null) g += `<line x1="${X(min)}" x2="${X(min)}" y1="${pt}" y2="${H-22}" stroke="var(--ink2)" stroke-dasharray="4 3"/><text x="${X(min)+4}" y="${pt+9}" font-size="11" fill="var(--ink2)">bar ${min}</text>`;
-  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Manager scores per criterion, out of 5">${g}</svg>`;
-  box.querySelectorAll('.bar-h').forEach(el => { el.addEventListener('pointermove', ev => { const r = box.getBoundingClientRect(), row = rows[+el.dataset.i];
-    tipAt(box, `<b>${row[1]} / 5</b><br><span class="mute">${esc(row[0])}</span>`, ev.clientX - r.left, ev.clientY - r.top); });
-    el.addEventListener('pointerleave', () => { const t = box.querySelector('.tip'); if (t) t.style.display='none'; }); });
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Manager scores per criterion, out of 5">${g}</svg></div>`;
 }
 function checklistItems(text){  // "- [x] item — note" lines of a critic review
   return String(text||'').split('\n').map(l => l.match(/^\s*[-*]\s*\[([ xX~\-])\]\s*(.+)$/)).filter(Boolean).map(m => {
     const done = /x/i.test(m[1]), parts = m[2].split(/\s+[—–]\s+/); return {done, item: parts[0], note: parts.slice(1).join(' — ')}; });
 }
-function planHTML(){  // the critic's steps for this milestone: done, current, still to come
-  const ps = (D.turns||[]).filter(t => t.role === 'verifier' && t.milestone === sel && t.status !== 'running' && t.plan);
-  const p = ps[ps.length-1];
-  if (!p) return '';
-  const steps = checklistItems(p.plan_text || ''), cur = steps.findIndex(s => !s.done);
+function planHTML(c){  // the critic's steps for a milestone: done, current, still to come
+  if (!c || !c.plan_text) return '';
+  const steps = checklistItems(c.plan_text), cur = steps.findIndex(s => !s.done);
   const li = (s, i) => `<li class="${s.done ? 'done' : i === cur ? 'open cur' : 'open'}"><span class="bx">${s.done ? '✓' : i === cur ? '▶' : '☐'}</span><span>${inline(s.item)}</span></li>`;
   const head = cur < 0 ? `all ${steps.length} steps done` : `step ${cur + 1} of ${steps.length}`;
   return `<div class="ink2" style="font-size:12px;font-weight:600;margin:8px 0 2px">Plan · ${head}</div><ul class="ck plan">${steps.map(li).join('')}</ul>`;
 }
-function renderChecklist(){
-  const vs = (D.turns||[]).filter(t => t.purpose === 'verify' && t.milestone === sel && t.status !== 'running' && t.checklist);
-  const last = vs[vs.length-1];
-  const title = 'Critic checklist · milestone ' + (sel+1) + (last ? ` · round ${last.round}: ${last.checklist[0]}/${last.checklist[1]}` : '');
-  if (!last){ setHTML($('ch-check'), `<h2>${esc(title)}</h2>${planHTML()}<div class="empty">The critic has not reviewed this milestone yet.</div>`); return; }
-  const items = checklistItems(last.checklist_text || ''), open = items.filter(i => !i.done), done = items.filter(i => i.done);
+function checklistHTML(ms){
+  const c = (D.checklists||{})[ms];
+  let h = planHTML(c);
+  if (!c || !c.checklist) return h + '<div class="empty">The critic has not reviewed this milestone yet.</div>';
+  const items = checklistItems(c.checklist_text || ''), open = items.filter(i => !i.done), done = items.filter(i => i.done);
   const li = i => `<li class="${i.done ? 'done' : 'open'}"><span class="bx">${i.done ? '✓' : '☐'}</span><span>${inline(i.item)}${i.note ? ` <span class="nt">— ${inline(i.note)}</span>` : ''}</span></li>`;
-  const bar = `<div class="bar" title="${last.checklist[0]} of ${last.checklist[1]} items done"><i style="width:${Math.round(100*last.checklist[0]/Math.max(1,last.checklist[1]))}%"></i></div>`;
-  let h = planHTML();
-  if (vs.length > 1) h += '<div class="ck-hist">' + vs.map((v, i) => `<span class="c${i === vs.length-1 ? ' last' : ''}" title="round ${v.round}">R${v.round} ${v.checklist[0]}/${v.checklist[1]}</span>`).join('<span>→</span>') + '</div>';
-  else h += '<div style="height:10px"></div>';
-  h += open.length ? `<div class="ink2" style="font-size:12px;font-weight:600;margin-bottom:2px">Still open (${open.length})</div><ul class="ck">${open.map(li).join('')}</ul>`
-                   : `<div style="font-size:13px">${pill('p-good', '✓ every item done')}</div>`;
+  h += `<div class="ink2" style="font-size:12px;font-weight:600;margin:8px 0 2px">Critic checklist · round ${esc(c.round)}: ${c.checklist[0]}/${c.checklist[1]}</div>`
+    + `<div class="bar"><i style="width:${Math.round(100*c.checklist[0]/Math.max(1,c.checklist[1]))}%"></i></div>`;
+  if ((c.hist||[]).length > 1) h += '<div class="ck-hist">' + c.hist.map((v, i) => `<span class="c${i === c.hist.length-1 ? ' last' : ''}" title="round ${v[0]}">R${v[0]} ${v[1]}/${v[2]}</span>`).join('<span>→</span>') + '</div>';
+  h += open.length ? `<div class="ink2" style="font-size:12px;font-weight:600;margin:6px 0 2px">Still open (${open.length})</div><ul class="ck">${open.map(li).join('')}</ul>`
+                   : `<div style="font-size:13px;margin-top:6px">${pill('p-good', '✓ every item done')}</div>`;
   if (done.length) h += `<details class="tbl"><summary>Done (${done.length})</summary><ul class="ck">${done.map(li).join('')}</ul></details>`;
-  const shut = !ckOpen ? `<span class="mute" style="font-size:12px;font-weight:400">${open.length ? open.length + ' still open' : 'all done'}</span>` : '';
-  setHTML($('ch-check'), `<details class="ckp"${ckOpen ? ' open' : ''}><summary><h2>${esc(title)}</h2>${shut}</summary>${bar}${h}</details>${ckOpen ? '' : bar}`);  // the bar shows folded or not
+  return h;
 }
-let ckOpen = true; try { ckOpen = localStorage.getItem('orch-ck') !== '0'; } catch(e){}
-$('ch-check').addEventListener('toggle', e => { if (!e.target.classList || !e.target.classList.contains('ckp')) return;
-  ckOpen = e.target.open; try { localStorage.setItem('orch-ck', ckOpen ? '1' : '0'); } catch(e){} render(); }, true);
-function renderCharts(mg){
-  renderChecklist();
-  const revs = (D.reviews||[]).filter(r => r.milestone === sel), last = revs[revs.length-1];
-  $('score-h').textContent = 'Manager scores · milestone ' + (sel+1) + (last && last.score != null ? ' · overall ' + last.score + '/5' : '');
-  barChart($('ch-score'), last ? (last.criteria||[]) : [], D.min_score, 'The manager has not scored this milestone yet.');
-}
-
-function renderReport(mg){
-  const m = (mg.milestones||[])[sel];
-  if (!m){ setHTML($('report'), '<h2>Milestone report</h2><div class="empty">Nothing yet.</div>'); return; }
-  const revs = (D.reviews||[]).filter(r => r.milestone === sel);
-  let h = `<h2>Milestone ${sel+1} report · from ${esc(who('manager'))} to you</h2><div style="font-weight:600">${esc(m.title)}</div>
-    <div class="ink2" style="margin-bottom:8px">Done when: ${inline(m.done_when||'—')}</div>`;
-  h += m.summary ? `<div class="md">${md(m.summary)}</div>` : '<div class="empty">The manager has not reported on this milestone yet.</div>';
-  if (revs.length) h += '<details class="tbl"' + (revs.length>1?' open':'') + '><summary>Review history</summary><div class="tw"><table><tr><th>review</th><th>round</th><th class="num">score</th><th>decision</th></tr>' +
-    revs.map((r,i) => `<tr><td>${i+1}</td><td>${r.round}</td><td class="num">${r.score ?? '—'}</td><td>${r.decision==='ACCEPT'?pill('p-good','✓ accept'):pill('p-warn','↺ revise')}</td></tr>`).join('') + '</table></div></details>';
-  setHTML($('report'), h);
+function msInfoHTML(ms){  // a milestone's report, checklist and scores, folded at the top of the milestone
+  const m = ((D.managed||{}).milestones||[])[ms]; if (!m) return '';
+  const revs = (D.reviews||[]).filter(r => r.milestone === ms), last = revs[revs.length-1];
+  let h = `<div class="ink2" style="margin-bottom:6px">Done when: ${inline(m.done_when||'—')}</div>`;
+  if (m.status === 'done') h += `<div class="row" style="margin:0 0 6px"><button class="sm" data-reopen="${ms}" title="Move this milestone back to open: shown as open, and its checklist gets an open item">↺ Move back to open</button></div>`;
+  if (m.status === 'open') h += `<div class="ink2" style="font-size:12px">↺ Moved back to open ${tm(m.reopened_at)}.</div>`;
+  if ((m.rubric||[]).length) h += `<details class="tbl"><summary>Rubric (${m.rubric.length} criteria)</summary><ol>${m.rubric.map(x => `<li>${inline(x)}</li>`).join('')}</ol></details>`;
+  if (m.gate_summary) h += `<div class="rec"><div class="k">What changed, what was checked, where to look</div><div class="md">${md(m.gate_summary)}</div></div>`;
+  h += m.summary ? `<div class="ink2" style="font-size:12px;font-weight:600;margin-top:8px">Report from ${esc(who('manager'))}</div><div class="md">${md(m.summary)}</div>` : '<div class="empty">The manager has not reported on this milestone yet.</div>';
+  h += checklistHTML(ms);
+  if (last){ h += `<div class="ink2" style="font-size:12px;font-weight:600;margin:10px 0 2px">Manager scores${last.score != null ? ' · overall ' + last.score + '/5' : ''}</div>` + barChart(last.criteria||[], D.min_score);
+    if (revs.length > 1) h += '<details class="tbl"><summary>Review history</summary><div class="tw"><table><tr><th>review</th><th>round</th><th class="num">score</th><th>decision</th></tr>' +
+      revs.map((r,i) => `<tr><td>${i+1}</td><td>${r.round}</td><td class="num">${r.score ?? '—'}</td><td>${r.decision==='ACCEPT'?pill('p-good','✓ accept'):pill('p-warn','↺ revise')}</td></tr>`).join('') + '</table></div></details>'; }
+  return h;
 }
 
 function preview(text){  // first line of prose, without markdown, for a folded message
@@ -545,17 +597,16 @@ function preview(text){  // first line of prose, without markdown, for a folded 
     && !(x.length < 80 && /:\**\s*$/.test(x))) || '';  // skip lead-ins like "QUESTIONS FOR YOU:" or "Here is the instruction:"
   return ln.replace(/[*_`]/g, '').replace(/^\s*([-+]|\d+\.)\s+/, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').slice(0, 220);
 }
-const CLAMP_CHARS = 900;  // longer messages show their first ~240px; "Show all" opens the rest
 const prompts = new Map(), promptOpen = new Set();  // a prompt stays folded until the reader opens it
 const promptKey = t => `${D.run_id}:${t}`;
 function promptBody(t){
   return `<pre>${esc(t.input || '(empty prompt)')}</pre>`
     + (t.system_prompt ? `<details><summary>System instructions</summary><pre>${esc(t.system_prompt)}</pre></details>` : '');
 }
-function promptPanel(t){
+function promptPanel(t, label){
   const key = promptKey(t.turn_id), saved = prompts.get(key);
   const open = promptOpen.has(key);
-  return `<details data-prompt="${esc(t.turn_id)}"${open ? ' open' : ''}><summary>Prompt</summary><div class="prompt-body">${saved ? promptBody(saved) : 'Loading prompt…'}</div></details>`;
+  return `<details class="inp" data-prompt="${esc(t.turn_id)}"${open ? ' open' : ''}><summary>${label || 'Prompt'}</summary><div class="prompt-body">${saved ? promptBody(saved) : 'Loading prompt…'}</div></details>`;
 }
 document.addEventListener('toggle', async e => {
   const d = e.target, id = d.dataset && d.dataset.prompt;
@@ -573,85 +624,226 @@ document.addEventListener('toggle', async e => {
     prompts.set(key, t); body.innerHTML = promptBody(t);
   } catch(e){ body.textContent = 'Could not load prompt. Close and reopen to retry.'; }
 }, true);
-const fullOut = new Map(), fullPending = new Set();  // a turn's whole output, fetched when its fold is opened
-function outputOf(t){ return (t.output_len||0) <= (t.output||'').length ? (t.output||'') : fullOut.get(t.turn_id); }
-async function ensureFull(id){
-  if (fullOut.has(id) || fullPending.has(id)) return; fullPending.add(id);
-  try { const r = await fetch('api/turn?m=' + encodeURIComponent(M) + '&id=' + encodeURIComponent(id), {cache:'no-store'});
-        const j = await r.json(); if (!j.error) fullOut.set(id, j.output || ''); } catch(e){}
-  fullPending.delete(id); if (fullOut.has(id)) render();
+// ---------------------------------------------------------------- B9b: the timeline
+// milestone → step → one block per level of communication → one line per message, unfolding to its full text.
+// The state carries the lines of the open step (tl_items); folded steps load on opening (api/items), full texts on
+// unfolding (api/message); both are cached here.
+const BLOCKS = [['user', () => 'You ↔ ' + who('manager')], ['mc', () => who('manager') + ' ↔ ' + who('critic')],
+  ['cw', () => who('critic') + ' ↔ ' + who('worker')], ['mon', () => 'Monitor → ' + who('critic')]];
+const OTHER = new Set(['system', 'warning', 'job', 'reminder', 'check']);  // small tagged lines; the filter hides them
+const groupCache = new Map(), groupPending = new Set();  // group key -> {n, items, more}
+const msgCache = new Map(), msgPending = new Set();       // item id -> its full text (api/message)
+const openItems = new Set(), openG = new Set(), shutG = new Set(), openInfo = new Set();  // openG/shutG: "<block>|<step key>"
+let showOther = true; try { showOther = localStorage.getItem('orch-other') !== '0'; } catch(e){}
+// which conversation cards are hidden (filter) or folded; how many lines each step of a card shows (newest first)
+const PAGE = 10, shown = new Map();  // "<block>|<step key>" -> lines shown
+let hiddenB = new Set(), shutCard = new Set(), wantItem = null;
+try { hiddenB = new Set(JSON.parse(localStorage.getItem('orch-hidden-blocks') || '[]')); shutCard = new Set(JSON.parse(localStorage.getItem('orch-shut-cards') || '[]')); } catch(e){}
+const saveB = () => { try { localStorage.setItem('orch-hidden-blocks', JSON.stringify([...hiddenB])); localStorage.setItem('orch-shut-cards', JSON.stringify([...shutCard])); } catch(e){} };
+const enc = encodeURIComponent;
+function groupItems(g){
+  if (g.key === D.tl_cur) return {items: D.tl_items || [], more: D.tl_more || 0};
+  const c = groupCache.get(g.key); return c && c.n === g.n ? c : null;
 }
-function fold(t, defOpen){
-  const f = (D.flow||{})[t.purpose] || [t.role, ''];
-  let to = f[1]; if (t.purpose === 'review' && t.revise) to = 'critic';
-  const run = t.status === 'running', open = openMsgs.has(t.turn_id) || ((run || defOpen) && !shutMsgs.has(t.turn_id));
-  const id = 'm-' + t.turn_id, long = !run && (t.output_len||0) > CLAMP_CHARS, full = expanded.has(id);
-  const text = run ? '' : outputOf(t);
-  if (!run && text === undefined && (open || full)) ensureFull(t.turn_id);
-  const shown = text === undefined ? (t.output||'') : text;  // until the rest has arrived, the preview
-  const rows = (D.routes||{})[t.turn_id] || [];
-  const body = run ? `<div data-live="${esc(t.turn_id)}"></div>`
-    : `<div class="md${long && !full ? ' clamp' : ''}">${md(routedBlocks(shown).plain || (rows.length ? '' : shown) || '(empty)')}</div>`
-      + (long ? `<button class="more" data-more="${id}">${full ? 'Show less' : 'Show all (' + Math.round((t.output_len||0)/1000) + 'k characters)'}</button>` : '')
-      + routeCards(shown, rows, t.turn_id, text !== undefined);
-  return `<details class="fold${to==='human'?' to-human':''}" data-t="${esc(t.turn_id)}"${open?' open':''}><summary>
-    <span class="mute">${tm(t.started_at)}</span><b>${esc(called(t.agent))}</b>→<b>${esc(who(to))}</b>
-    <span class="pill">${esc(t.purpose)}</span>${t.tag_reminder?'<span class="ink2" title="A short reminder of the tags was added to this message">↺ tags</span>':''}${t.milestone!=null?`<span>M${t.milestone+1}</span>`:''}
-    ${t.status!=='ok'?stPill(t.status):''}${t.verdict?pill(t.verdict==='PASS'?'p-good':'p-crit', t.verdict==='PASS'?'✓ pass':'✕ fail'):''}
-    ${t.model ? `<span class="mute mono" title="${t.cost_basis === 'estimate' ? 'cost is Claude Code\'s estimate, not the provider\'s price' : 'model'}">${esc(t.model)}${t.cost != null ? ' · ' + (t.cost_basis === 'estimate' ? '~' : '') + '$' + Number(t.cost).toFixed(2) : ''}</span>` : ''}
-    ${routeChips(rows)}<span class="pv">${esc(run ? 'writing…' : headline(t.output))}</span></summary><div class="fb">${receivedLine(t.turn_id)}${promptPanel(t)}<div class="mute">Output</div>${body}</div></details>`;
+async function loadGroup(key, all){
+  if (groupPending.has(key)) return; groupPending.add(key);
+  try { const r = await fetch(`api/items?m=${enc(M)}&g=${enc(key)}${all ? '&all=1' : ''}`, {cache:'no-store'}); const j = await r.json();
+        const g = (D.tl_groups||[]).find(x => x.key === key); groupCache.set(key, {n: g ? g.n : j.items.length, items: j.items || [], more: j.more || 0}); }
+  catch(e){} finally { groupPending.delete(key); }
+  renderTimeline();
 }
-const openMsgs = new Set(), shutMsgs = new Set();
-const LIMIT = {thread: 8, rounds: 5}, shown = {thread: 8, rounds: 5};  // newest first; older ones behind a link
-function olderLink(list, total){ const hid = total - shown[list]; if (hid <= 0) return shown[list] > LIMIT[list] ? `<div class="older"><button class="more" data-less="${list}">Show fewer</button></div>` : '';
-  return `<div class="older"><span>${hid} older not shown</span><button class="more" data-older="${list}" data-n="20">Show ${Math.min(20, hid)} more</button>`
-    + (hid > 20 ? `<button class="more" data-older="${list}" data-n="all">Show all</button>` : '') + `</div>`; }
-const UPPER = ['plan','kickoff','restart','answer','review','feedback','report','checkin','ack'];
-function renderWorkerUpdates(){
-  const rows = D.worker_messages || [];
-  $('worker-updates-card').hidden = !rows.length;
-  const labels = {queued:'Queued for worker', sending:'Sending to active turn',
-    accepted:'Accepted by backend', deferred:'Waiting for next worker turn',
-    in_prompt:'Included in turn prompt', unknown:'Delivery unconfirmed — not automatically resent'};
-  setHTML($('worker-updates'), rows.slice(-20).reverse().map((m, i) =>
-    `<details class="fold"${i===0 ? ' open' : ''}><summary><span class="mute">${tm(m.created_at)}</span>
-    <b>${esc(called(m.from))} → ${esc(called(m.to))}</b><span class="pill">${esc(labels[m.status] || m.status)}</span></summary>
-    <div class="fb"><div class="mute">From ${esc(m.source_turn)}${m.delivery_turn ? ' · to ' + esc(m.delivery_turn) : ''}
-    ${m.via==='steer' && m.status==='accepted' ? ' · queued into the active conversation; this does not yet confirm execution' : ''}</div>
-    <div class="md">${md(m.message)}</div>${m.reason ? `<div class="mute">${esc(m.reason)}</div>` : ''}</div></details>`).join(''));
+async function getMsg(id){
+  if (msgCache.has(id)) return msgCache.get(id);
+  const r = await fetch(`api/message?m=${enc(M)}&id=${enc(id)}`, {cache:'no-store'}); const j = await r.json();
+  if (!j.error) msgCache.set(id, j); return j;
 }
-function renderThread(mg){
-  const ts = (D.turns||[]).filter(t => UPPER.includes(t.purpose) && (tab === 'all' || t.purpose === 'plan' || t.milestone === sel));
-  const tabs = `<div class="tabs"><button class="sm${tab==='all'?' on':''}" data-tab="all">All milestones</button><button class="sm${tab==='sel'?' on':''}" data-tab="sel">Milestone ${sel+1} only</button></div>`;
-  ts.sort((a, b) => String(b.started_at||'').localeCompare(String(a.started_at||'')) || String(b.turn_id).localeCompare(String(a.turn_id)));  // newest first
-  setHTML($('thread'), tabs + (ts.length ? ts.slice(0, shown.thread).map(t => fold(t)).join('') + olderLink('thread', ts.length) : '<div class="empty">No messages yet.</div>'));
+async function loadMsg(id){
+  if (msgPending.has(id)) return; msgPending.add(id);
+  try { const j = await getMsg(id); if (j.error) msgCache.set(id, j); } catch(e){ msgCache.set(id, {error: 'could not load it'}); }
+  finally { msgPending.delete(id); }
+  renderTimeline(); renderSearch();
 }
-function renderRounds(mg){
-  const ts = (D.turns||[]).filter(t => ['brief','work','verify','amend','guidance'].includes(t.purpose));
-  const groups = {}; ts.forEach(t => { const k = t.round || 0; (groups[k] = groups[k] || []).push(t); });
-  const keys = Object.keys(groups).map(Number).sort((a,b) => b-a);
-  if (!keys.length){ setHTML($('rounds'), '<div class="empty">No rounds yet.</div>'); return; }
-  const h = keys.slice(0, shown.rounds).map((k, idx) => { const g = groups[k], v = g.filter(t => t.purpose==='verify').pop(), w = g.filter(t => t.purpose==='work');
-    const runningNow = g.some(t => t.status==='running'), msx = g[0].milestone;
-    const isOpen = openRounds.has(k) || (idx===0 && !openRounds.has(-k-1));
-    return `<details class="round" data-r="${k}"${isOpen?' open':''}><summary><b>${k ? 'Round ' + k : 'Briefing'}</b>${msx!=null?`<span class="mute">M${msx+1}</span>`:''}
-      ${runningNow ? pill('p-run','● running') : ''}${v && v.verdict ? pill(v.verdict==='PASS'?'p-good':'p-crit', v.verdict==='PASS'?'✓ pass':'✕ fail') : ''}
-      ${v && v.checklist ? `<span class="mono ink2">☑ ${v.checklist[0]}/${v.checklist[1]}</span>` : ''}
-      ${w.some(t=>t.asked) || (D.questions||[]).some(q => w.some(t=>t.turn_id===q.turn)) ? pill('p-you','? asked') : ''}
-      <span class="mute">${g.length} message${g.length>1?'s':''}</span></summary><div class="rb">${g.map((t, i) => fold(t, idx===0 && i===g.length-1)).join('')}</div></details>`; }).join('');
-  setHTML($('rounds'), h + olderLink('rounds', keys.length));
+const ST_LABEL = {delivered:'✓ delivered', sent:'→ sent', held:'⏸ held', superseded:'↷ superseded', dropped:'⊘ dropped', running:'● running', open:'? open',
+  answered:'✓ answered', passed_up:'↑ passed up', night:'🌙 decided', failed:'⚠ not delivered', unseen:'? unseen', unknown:'⚠ unconfirmed', error:'✕ error', timeout:'✕ timeout'};
+function itemBody(it){
+  if (it.status === 'running' && it.tid) return `<div data-live="${esc(it.tid)}"></div>`;
+  const m = msgCache.get(it.id);
+  if (!m){ loadMsg(it.id); return '<div class="mute">Loading…</div>'; }
+  if (m.error) return `<div class="mute">${esc(m.error)}</div>`;
+  const text = m.text || '';
+  if (it.id.startsWith('t:') && m.turn && it.id === 't:' + m.turn){  // a whole reply: its words, each message it passed on, its prompt
+    const {plain} = routedBlocks(text);
+    return promptPanel({turn_id: m.turn}, `Input to this turn · ${(m.input_len||0).toLocaleString()} chars`)
+      + receivedLine(m.received) + heldLine(m.held)
+      + `<div class="md">${md(plain || ((m.routes||[]).length ? '' : text) || '(empty)')}</div>` + routeCards(text, m.routes, m.turn)
+      + `<div class="mute" style="font-size:12px;margin-top:4px">${m.model ? esc(m.model) + ' · ' : ''}output ${(text.length).toLocaleString()} chars</div>`;
+  }
+  if (it.id.startsWith('t:') && m.turn)  // a message one turn passed on: the input of that turn, then the message
+    return promptPanel({turn_id: m.turn}, 'Input to the turn that wrote this') + `<div class="md">${md(text || '(empty)')}</div>`;
+  if (it.id.startsWith('c:') && !/:\d+$/.test(it.id.slice(2)))
+    return (m.problems||[]).map(p => `<div class="w" style="color:var(--warn-ink)">⚠ ${esc(p)}</div>`).join('') + routedHTML(text, chatRoutes(it.id.slice(2), m.relays), it.id);
+  return `<div class="md">${md(text || '(empty)')}</div>`;
 }
-$('thread').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.t) return;
-  if (d.open){ openMsgs.add(d.dataset.t); shutMsgs.delete(d.dataset.t); paintLive(d.dataset.t); } else { openMsgs.delete(d.dataset.t); shutMsgs.add(d.dataset.t); } }, true);
-$('rounds').addEventListener('toggle', e => { const d = e.target; if (d.dataset && d.dataset.t){
-    if (d.open){ openMsgs.add(d.dataset.t); shutMsgs.delete(d.dataset.t); paintLive(d.dataset.t); } else { openMsgs.delete(d.dataset.t); shutMsgs.add(d.dataset.t); } return; }
-  if (!d.dataset || d.dataset.r === undefined) return; const k = +d.dataset.r;
-  if (d.open){ openRounds.add(k); openRounds.delete(-k-1); } else { openRounds.delete(k); openRounds.add(-k-1); } }, true);
-
+function lineHTML(it, where){  // one message: time, sender → recipient, status, kind, first line; unfolds to the full text
+  const other = OTHER.has(it.kind), open = openItems.has(it.id);
+  const cls = 'ln k-' + it.kind + (other ? ' other' : '') + (it.needs ? ' needs' : '');
+  const to = it.to ? `<span class="to mute">→ ${esc(called(it.to))}</span>` : '';
+  const st = it.status ? `<span class="st ${esc(it.status)}">${esc(ST_LABEL[it.status] || it.status)}</span>` : '';
+  const kt = it.kind !== 'msg' ? `<span class="ktag ${esc(it.kind)}">${esc(it.kind)}</span>` : '';
+  const extra = (it.urgent ? '<span class="st running">⚡</span>' : '') + (it.verdict ? pill(it.verdict === 'PASS' ? 'p-good' : 'p-crit', it.verdict === 'PASS' ? '✓ pass' : '✕ fail') : '')
+    + (it.purpose && it.kind === 'msg' ? `<span class="mute" style="font-size:11px">${esc(it.purpose)}</span>` : '');
+  const wh = where ? `<span class="ktag">${esc(groupName(it.ms, it.step))}</span>` : '';
+  const whole = it.tid && it.id === 't:' + it.tid;  // a turn's reply: its round and how much went in and came out
+  const rd = whole && it.round != null ? `<span class="rtag" title="round ${esc(it.round)}">R${esc(it.round)}</span>` : '';
+  const sz = whole && it.in_len != null && it.kind === 'msg' ? `<span class="sz${it.in_len > SZ_BIG ? ' big' : ''}" title="characters in the input to this turn → in its reply">${kchars(it.in_len)} → ${kchars(it.len||0)}</span>` : '';
+  return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${rd}${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${extra}${wh}<span class="pv">${esc(it.line || '')}</span>${sz}</summary>`
+    + (open ? `<div class="fb">${itemBody(it)}</div>` : '') + '</details>';
+}
+const SZ_BIG = 30000;  // an input above this is marked
+const kchars = n => n < 1000 ? String(n) : (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+function laneHTML(lane, rows){  // B11: one worker's lane in the critic ↔ worker card
+  const mg = D.managed || {}, par = (mg.par && mg.par.slots) ? mg.par : (mg.par_last || {}), s = (par.slots || {})[lane] || {};
+  const head = [s.step ? 'step ' + s.step : '', s.status || '', s.check ? 'monitor: ' + s.check : ''].filter(Boolean).map(esc).join(' · ');
+  const nm = called(lane);  // a copy without a name of its own is called by its id: shown once
+  return `<div class="lane"><b>${esc(nm)}</b>${nm !== lane ? ` <span class="mute">${esc(lane)}</span>` : ''}${head ? ' — ' + head : ''}</div>` + rows.map(it => lineHTML(it)).join('');
+}
+function groupName(ms, step){ return (ms < 0 ? 'plan' : 'M' + (ms + 1)) + (step ? ' · step ' + step : ''); }
+// One milestone at a time (picked in the Milestones card; the current one by default). Below it, one card per level of
+// communication, stacked at full width; in each card the steps of that milestone, the newest open, older ones folded.
+let selMs = null;  // the milestone picked; null follows the current one
+const curMs = () => ((D.tl_groups||[]).find(g => g.key === D.tl_cur) || {}).ms;
+function shownMs(){
+  const gs = D.tl_groups || [], mss = (D.managed||{}).milestones || [];
+  if (selMs !== null && (mss[selMs] || gs.some(g => g.ms === selMs))) return selMs;
+  const c = curMs(); return c === undefined ? (mss.length ? 0 : -1) : c;
+}
+function stepItems(b, g){  // the step's lines in this card, newest first, PAGE at a time
+  const got = groupItems(g);
+  if (!got){ loadGroup(g.key); return '<div class="lmore">Loading…</div>'; }
+  const rows = got.items.filter(it => it.block === b && (showOther || !OTHER.has(it.kind))).reverse();
+  const k = b + '|' + g.key;
+  let n = shown.get(k) || PAGE;
+  const w = wantItem ? rows.findIndex(it => it.id === wantItem) : -1;
+  if (w >= n){ n = Math.ceil((w + 1) / PAGE) * PAGE; shown.set(k, n); }
+  const page = rows.slice(0, n), left = rows.length - page.length;
+  const lanes = b === 'cw' ? [...new Set(page.map(it => it.lane).filter(Boolean))] : [];
+  const body = lanes.length > 1 ? lanes.map(l => laneHTML(l, page.filter(it => it.lane === l))).join('') + page.filter(it => !it.lane).map(it => lineHTML(it)).join('')
+                                : page.map(it => lineHTML(it)).join('');
+  const more = left > 0 ? `<div class="bmore"><button class="sm" data-pmore="${esc(k)}">Show ${Math.min(PAGE, left)} more</button><span>${left} older line${left === 1 ? '' : 's'}</span>${left > PAGE ? `<button class="more" data-pall="${esc(k)}">show all</button>` : ''}</div>`
+    : got.more ? `<div class="bmore">Older lines of this step are not loaded · <button class="more" data-gall="${esc(g.key)}">load them</button></div>` : '';
+  return body + more;
+}
+function cardHTML(b, title, gsel){
+  if (hiddenB.has(b)) return '';
+  const cnt = g => ((g.blocks||{})[b] || [0, 0])[showOther ? 1 : 0];
+  const has = gsel.filter(g => cnt(g) > 0);
+  if (!has.length) return '';
+  const n = has.reduce((a, g) => a + g.blocks[b][0], 0), open = !shutCard.has(b);
+  let body = '';
+  if (open && has.length === 1 && !has[0].step) body = stepItems(b, has[0]);
+  else if (open) body = has.map((g, i) => {
+    const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
+    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : 'Before the steps'}</b><span class="lab">${esc(g.label || '')}</span>`
+      + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
+      + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
+  }).join('');
+  return `<details class="card bcard b-${b}" data-card="${b}"${open ? ' open' : ''}><summary><h2>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h2></summary>${body}</details>`;
+}
+function renderFilter(){
+  setHTML($('bfilter'), '<span class="mute" style="font-size:12px">Show:</span>' + BLOCKS.map(([b, title]) =>
+    `<label><input type="checkbox" data-bf="${b}"${hiddenB.has(b) ? '' : ' checked'}> ${esc(title())}</label>`).join(''));
+}
+$('bfilter').addEventListener('change', e => { const b = e.target.dataset.bf; if (!b) return;
+  e.target.checked ? hiddenB.delete(b) : hiddenB.add(b); saveB(); renderTimeline(); });
+function renderSteps(ms){
+  const gs = D.tl_groups || [], mss = (D.managed||{}).milestones || [], cur = curMs();
+  const keys = [...(gs.some(g => g.ms < 0) ? [-1] : []), ...mss.map((m, i) => i)];
+  if (!mss.length) gs.forEach(g => { if (!keys.includes(g.ms)) keys.push(g.ms); });
+  const of = k => gs.filter(g => g.ms === k);
+  setHTML($('steps'), keys.map(k => {
+    const m = mss[k], st = m ? (MS_ST[m.status] || ['', m.status]) : null;
+    const n = of(k).reduce((a, g) => a + g.n - g.other, 0), x = of(k).reduce((a, g) => a + g.needs, 0);
+    return `<div class="step${k === ms ? ' sel' : ''}" data-selms="${k}" title="Show this milestone's messages"><div class="n"><span>${k < 0 ? (mss.length ? 'Before milestone 1' : 'The run') : 'Milestone ' + (k + 1)}</span>${k === cur ? '<span style="color:var(--s1)">now</span>' : ''}</div>`
+      + `<div class="t">${esc(k < 0 ? 'The plan' : (m ? m.title : ''))}</div>${st ? pill(st[0], st[1]) : ''}${m && m.score != null ? ` <span class="ink2" style="font-size:12px">${m.score}/5</span>` : ''}`
+      + `<div class="cnt">${n} message${n === 1 ? '' : 's'}${x ? ` · <b style="color:var(--you)">${x} for you</b>` : ''}</div></div>`;
+  }).join(''));
+  setHTML($('msinfo'), mss[ms] ? `<details class="msinfo" data-info="${ms}"${openInfo.has(ms) ? ' open' : ''} style="border-top:0;padding:0;margin-top:8px"><summary>Report, checklist and scores</summary>${openInfo.has(ms) ? `<div class="mi">${msInfoHTML(ms)}</div>` : ''}</details>` : '');
+}
+function renderTimeline(){
+  const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
+  const gs = D.tl_groups || [], ms = shownMs();
+  renderSteps(ms); renderFilter();
+  if (!gs.length){ setHTML(el, '<div class="card"><div class="empty">No messages yet.</div></div>'); return; }
+  const gsel = gs.filter(g => g.ms === ms).sort((a, b) => b.step - a.step);  // the newest step first
+  const h = BLOCKS.map(([b, title]) => cardHTML(b, title, gsel)).join('');
+  setHTML(el, h || '<div class="card"><div class="empty">No messages in this milestone yet.</div></div>');
+}
+$('steps').addEventListener('click', e => { const t = e.target.closest('[data-selms]'); if (!t) return;
+  const k = +t.dataset.selms; selMs = k === curMs() ? null : k; renderTimeline(); });
+document.addEventListener('toggle', e => {  // remember what is open; fetch what an opened fold needs
+  const d = e.target; if (!d.dataset) return;
+  if (d.dataset.id){ const id = d.dataset.id;
+    if (d.open === openItems.has(id)) return;
+    d.open ? openItems.add(id) : openItems.delete(id);
+    if (d.open){ const fb = document.createElement('div'); fb.className = 'fb';
+      const it = findItem(id); fb.innerHTML = it ? itemBody(it) : ''; if (!d.querySelector(':scope>.fb')) d.appendChild(fb); paintLive((it||{}).tid); }
+    else { const fb = d.querySelector(':scope>.fb'); if (fb) fb.remove(); }
+    return; }
+  if (d.dataset.g !== undefined){ const k = d.dataset.g, has = !!d.querySelector(':scope>.stb');
+    if (d.open){ openG.add(k); shutG.delete(k); } else { openG.delete(k); shutG.add(k); }
+    if (d.open !== has) renderTimeline(); return; }
+  if (d.dataset.card !== undefined){ const b = d.dataset.card, has = !!d.querySelector(':scope>details,:scope>details.ln,:scope>.lmore,:scope>.bmore');
+    if (d.open) shutCard.delete(b); else shutCard.add(b); saveB(); if (d.open !== has) renderTimeline(); return; }
+  if (d.dataset.info !== undefined){ const k = +d.dataset.info; if (d.open !== openInfo.has(k)){ d.open ? openInfo.add(k) : openInfo.delete(k); renderTimeline(); } }
+}, true);
+function findItem(id){
+  for (const it of D.tl_items || []) if (it.id === id) return it;
+  for (const c of groupCache.values()) for (const it of c.items) if (it.id === id) return it;
+  for (const it of (SR && SR.hits) || []) if (it.id === id) return it;
+  const m = msgCache.get(id); return m && m.item;
+}
+$('other').addEventListener('change', e => { showOther = e.target.checked; try { localStorage.setItem('orch-other', showOther ? '1' : '0'); } catch(err){}
+  renderTimeline(); $('sres').classList.toggle('hide-other', !showOther); });
+$('timeline').addEventListener('click', e => {
+  const m = e.target.closest('[data-pmore]'); if (m){ const k = m.dataset.pmore; shown.set(k, (shown.get(k) || PAGE) + PAGE); renderTimeline(); return; }
+  const a = e.target.closest('[data-pall]'); if (a){ shown.set(a.dataset.pall, 1e9); renderTimeline(); return; }
+  const b = e.target.closest('[data-gall]'); if (b){ b.disabled = true; loadGroup(b.dataset.gall, true); } });
+async function gotoItem(id){  // open the milestone and step that hold a message, unfold it and show it
+  let it = findItem(id);
+  if (!it){ try { const m = await getMsg(id); it = m.item; } catch(e){} }
+  if (!it) return;
+  const key = it.ms + '|' + it.step;
+  selMs = it.ms === curMs() ? null : it.ms; openG.add(it.block + '|' + key); shutG.delete(it.block + '|' + key); openItems.add(id);
+  if (OTHER.has(it.kind) && !showOther){ showOther = true; }
+  hiddenB.delete(it.block); shutCard.delete(it.block); saveB(); wantItem = id;
+  const g = (D.tl_groups||[]).find(x => x.key === key);
+  if (g && !groupItems(g)) await loadGroup(key, true); else renderTimeline();
+  const el = document.querySelector(`#timeline details.ln[data-id="${CSS.escape(id)}"]`); if (!el) return;
+  el.scrollIntoView({block: 'center', behavior: 'smooth'}); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600);
+}
+// search over all messages (the server reads every message's full text)
+let SR = null, sTimer = null, sSeq = 0;
+$('q').addEventListener('input', () => { clearTimeout(sTimer); sTimer = setTimeout(runSearch, 300); });
+async function runSearch(){
+  const q = $('q').value.trim(), seq = ++sSeq;
+  if (q.length < 2){ SR = null; renderSearch(); return; }
+  try { const r = await fetch(`api/search?m=${enc(M)}&q=${enc(q)}`, {cache:'no-store'}); const j = await r.json(); if (seq === sSeq){ SR = j; renderSearch(); } }
+  catch(e){ SR = {q, hits: [], error: true}; renderSearch(); }
+}
+function renderSearch(){
+  const el = $('sres'); el.classList.toggle('hide-other', !showOther);
+  if (!SR){ setHTML(el, ''); return; }
+  const n = SR.hits.length;
+  setHTML(el, `<div class="shead"><b>${SR.error ? 'Search failed' : n ? n + (SR.more ? '+' : '') + ' message' + (n === 1 ? '' : 's') : 'Nothing found'}</b> for “${esc(SR.q)}”<span style="flex:1"></span><button class="sm" data-sclear="1">Clear</button></div>`
+    + SR.hits.map(it => lineHTML(it, true) + (it.snip ? `<div class="snip">${esc(it.snip)} <a href="#" data-gotoitem="${esc(it.id)}">show in place</a></div>` : `<div class="snip"><a href="#" data-gotoitem="${esc(it.id)}">show in place</a></div>`)).join(''));
+}
+$('sres').addEventListener('click', e => { if (e.target.closest('[data-sclear]')){ $('q').value = ''; SR = null; renderSearch(); return; }
+  const a = e.target.closest('[data-gotoitem]'); if (a){ e.preventDefault(); gotoItem(a.dataset.gotoitem); } });
 const qtext = t => String(t||'').split('\n').filter(x => !/^\W*QUESTIONS? FOR\b[^:]*:?\s*$/i.test(x)).join('\n');
 const QST = {open:['p-warn','open'], passed_up:['p-run','↑ passed up'], answered:['p-good','✓ answered'], night:['p-run','🌙 manager decided']};
 function renderQs(){
   const qs = (D.questions||[]).slice().reverse();
+  $('qs-h').textContent = 'Questions' + (qs.length ? ` · ${qs.filter(q => q.status === 'open').length} open, ${qs.length} in all` : '');
   if (!qs.length){ setHTML($('qs'), '<div class="empty">No questions so far. Questions go up one level at a time (worker → critic → manager → you); the run keeps going while they are open.</div>'); return; }
   const QA = D.queued_answers || {}, isOpen = q => q.status === 'open' && !QA[q.id];
   const row = q => { const s = QA[q.id] && q.status === 'open' ? ['p-good', '✓ settled'] : (QST[q.status] || ['', q.status]);
@@ -664,18 +856,66 @@ function renderQs(){
     + (closed.length ? `<details class="tbl"><summary>Settled (${closed.length})</summary>${head + closed.map(row).join('')}</table></div></details>` : ''));
 }
 
-function renderDecisions(){  // the register: everything settled, newest first; the agents get it in full each milestone
+function renderReviews(mg){  // B9: the review files the manager wrote; comment in the file, then send the comments back
+  const rs = D.review_files || [], req = mg.review_req;
+  $('reviews-card').hidden = !rs.length && !req;
+  if ($('reviews-card').hidden) return;
+  const RS = {written:['p-run','to comment'], 'comments sent':['p-good','✓ comments sent'], missing:['p-warn','not written']};
+  setHTML($('reviews'), (req ? `<div class="mute" style="font-size:12px">📝 Asked ${tm(req.at)}; ${esc(who('manager'))} writes it when free.</div>` : '') +
+    rs.map(r => { const s = RS[r.status] || ['', r.status];
+      return `<div class="q"><div class="row" style="align-items:center;gap:8px">${r.href && r.exists ? `<a href="${esc(r.href)}" target="_blank">${esc(r.name)}</a>` : esc(r.name)} ${pill(s[0], s[1])}
+        <span class="mute" style="font-size:12px">${tm(r.written_at || r.requested_at)}</span><span style="flex:1"></span>
+        ${r.exists ? `<button class="sm" data-rc="${esc(r.path)}" title="Sends what you changed in the file (your comments) to the manager">↩ Send back comments</button>` : ''}</div>
+        <div class="mute mono" style="font-size:11px">${esc(r.path)} — comment in this file, then send it back</div></div>`; }).join(''));
+}
+let goldEdit = null;  // while I edit: {text, base}; the poll then leaves the editor alone
+try { if (localStorage.getItem('orch-gold-shut') === '1') $('gold-card').open = false; } catch(e){}
+$('gold-card').addEventListener('toggle', e => { if (e.target !== $('gold-card')) return; try { localStorage.setItem('orch-gold-shut', $('gold-card').open ? '0' : '1'); } catch(err){} });
+function renderGolden(){  // the golden board (B3): the rules, preferences and key decisions every agent reads; the manager keeps it
+  const G = D.golden || {}, warn = [];
+  $('gold-h').textContent = 'Golden board' + (G.chars ? ` · ${G.chars.toLocaleString()} chars` : '');
+  $('gold-edit').hidden = !G.path || !!goldEdit;
+  if (goldEdit) return;
+  if (G.over) warn.push(`<span class="pill p-warn">over ${(G.limit||0).toLocaleString()} characters: the manager was asked to prune it</span>`);
+  const lk = Object.values(G.leaks || {}).flat();
+  if (lk.length) warn.push(`<span class="pill p-warn">names ${esc([...new Set(lk)].join(', '))}: held from the agents below until rewritten</span>`);
+  const body = (G.text || '').trim()
+    ? `<div class="md">${md(G.text)}</div>` : '<div class="empty">Nothing on it yet. The manager adds the rules, your preferences and key decisions here; every agent reads it.</div>';
+  setHTML($('golden'), (warn.length ? `<div class="row">${warn.join(' ')}</div>` : '') + body
+    + (G.path ? `<div class="mute mono" style="font-size:11px;margin-top:4px">${esc(G.path)}</div>` : ''));
+}
+$('gold-edit').addEventListener('click', e => {
+  e.preventDefault(); e.stopPropagation();  // a button in the summary: don't fold the card
+  const G = D.golden || {}; if (!G.path) return;
+  goldEdit = {text: G.raw || '', base: G.hash}; $('gold-card').open = true; $('gold-edit').hidden = true;
+  const rows = Math.min(30, Math.max(8, (G.raw || '').split('\n').length + 2));
+  setHTML($('golden'), `<textarea id="gold-ta" rows="${rows}" spellcheck="false" style="font:12.5px/1.5 ui-monospace,Menlo,monospace"></textarea>
+    <div class="row" style="margin-top:8px;gap:8px;align-items:center"><button class="pri sm" id="gold-save">Save</button><button class="sm" id="gold-cancel">Cancel</button>
+    <span class="mute" style="font-size:12px">Every agent gets the new board; the manager is told what you changed and keeps it.</span></div>`);
+  $('gold-ta').value = goldEdit.text; $('gold-ta').focus();
+});
+$('golden').addEventListener('click', async e => {
+  if (e.target.id === 'gold-cancel'){ goldEdit = null; $('golden')._h = null; renderGolden(); return; }
+  if (e.target.id !== 'gold-save') return;
+  e.target.disabled = true;
+  const j = await post('api/golden', {text: $('gold-ta').value, base: goldEdit.base});
+  if (j && j.ok){ goldEdit = null; $('golden')._h = null; renderGolden(); } else e.target.disabled = false;
+});
+function renderDecisions(){  // the register: everything settled, newest first; a record (the agents read the golden board)
+  renderGolden();
   const ds = (D.decisions||[]).slice().reverse();
-  $('dec-h').textContent = 'Decisions' + (ds.length ? ` · ${ds.length} · binding, the later one holds` : '');
-  if (!ds.length){ setHTML($('decs'), '<div class="empty">Nothing settled yet. Your answers and notes, gate messages and the manager\'s answers to the critic are listed here and given to the agents in full at the start of each milestone.</div>'); return; }
+  $('dec-h').textContent = 'Decisions record' + (ds.length ? ` · ${ds.length}` : '');
+  if (!ds.length){ setHTML($('decs'), '<div class="empty">Nothing settled yet. Your answers and notes, gate messages and the manager\'s answers to the critic are recorded here.</div>'); return; }
   const shown = ds.slice(0, decPage), left = ds.length - shown.length;  // paged like the messages: 15 at a time
   setHTML($('decs'), shown.map(d => `<details class="fold" data-d="${esc(d.id)}"${openDecs.has(d.id) ? ' open' : ''}><summary>
     <span class="mono">${esc(d.id)}</span><span class="mute">${tm(d.at)}</span><b>${esc(d.by === 'you' ? 'you' : called(d.by))}</b>
     <span class="pill">${esc(d.source)}</span><span class="pv">${esc(preview(d.text))}</span></summary>
-    <div class="fb"><div class="md">${md(d.text)}</div></div></details>`).join('')
+    <div class="fb"><div class="md">${md(d.len > (d.text||'').length ? ((msgCache.get('d:' + d.id)||{}).text || (openDecs.has(d.id) && loadDec(d.id), d.text)) : d.text)}</div></div></details>`).join('')
     + (left > 0 ? `<div class="older"><button class="more" data-dpage="1">Show ${Math.min(15, left)} older (${left} more)</button></div>` : ''));
 }
 let decPage = 15;
+async function loadDec(id){ if (msgPending.has('d:' + id)) return; msgPending.add('d:' + id);
+  try { await getMsg('d:' + id); } catch(e){} msgPending.delete('d:' + id); renderDecisions(); }
 $('decs').addEventListener('click', e => { if (e.target.closest('[data-dpage]')) { decPage += 15; renderDecisions(); } });
 const openDecs = new Set();
 const openAudits = new Set();
@@ -714,36 +954,10 @@ $('audit-card').addEventListener('toggle', e => { if (e.target === $('audit-card
 $('audit').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.a) return;
   d.open ? openAudits.add(d.dataset.a) : openAudits.delete(d.dataset.a); }, true);
 $('decs').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.d) return;
-  d.open ? openDecs.add(d.dataset.d) : openDecs.delete(d.dataset.d); }, true);
+  d.open ? openDecs.add(d.dataset.d) : openDecs.delete(d.dataset.d); if (d.open) renderDecisions(); }, true);
 function mgrName(){ const m = (D.agents||[]).find(a => a.role === 'manager'); return m ? m.name : 'manager'; }
 let chatWith = null;  // the agent name being talked to; null = the manager
 function talkable(){ return (D.agents||[]).filter(a => ['manager','verifier','worker'].includes(a.role)); }
-let msgFilter = 'all', msgPage = 15;  // how many of the filtered messages are shown; grows with "Show older"
-const openFeed = new Set();  // folded messages the reader opened (kept across the page's refreshes)
-const MSG_KINDS = {all: 'All', conversation: 'Conversations', transfer: 'Transfers', 'check-in': 'Check-ins', warning: 'Warnings'};
-function renderMessages(){  // every message the run passed on, newest first, folded and paged like the decisions
-  const all = D.messages || [];
-  setHTML($('mfilter'), Object.keys(MSG_KINDS).map(k => {
-    const n = k === 'all' ? all.length : all.filter(m => m.kind === k).length;
-    return `<button class="sm${msgFilter === k ? ' on' : ''}" data-mf="${k}">${esc(MSG_KINDS[k])} (${n})</button>`; }).join(''));
-  const rows = all.filter(m => msgFilter === 'all' || m.kind === msgFilter).slice().reverse();
-  if (!rows.length){ setHTML($('messages'), '<div class="empty">No messages of this kind yet.</div>'); return; }
-  const shown = rows.slice(0, msgPage), left = rows.length - shown.length;
-  setHTML($('messages'), shown.map(m => {
-    const id = m.id || `${m.ts}|${m.from}|${m.to}`;
-    const tags = [m.kind, m.label, m.urgent ? '⚡ urgent' : '', m.status || ''].filter(Boolean).map(esc).join(' · ');
-    const probs = (m.problems || []).map(p => `<div class="w" style="color:#b45309">⚠ ${esc(p)}</div>`).join('');
-    return `<details class="fold" data-m="${esc(id)}"${openFeed.has(id) ? ' open' : ''}><summary>
-      <span class="pill">${tags}</span><b>${esc(m.from)}</b><span class="mute">→ ${esc(m.to)}</span><span class="mute">${tm(m.ts)}</span>
-      <span class="pv">${esc(preview(m.text))}</span></summary>${probs}<div class="fb"><div class="md">${routedHTML(m.text, m.turn ? (D.routes||{})[m.turn] : chatRoutes(m.id), m.turn || m.id)}</div></div></details>`;
-  }).join('') + (left > 0 ? `<div class="older"><button class="more" data-mpage="1">Show ${Math.min(msgPage, left)} older (${left} more)</button></div>` : ''));
-}
-$('mfilter').addEventListener('click', e => { const b = e.target.closest('[data-mf]'); if (!b) return;
-  msgFilter = b.dataset.mf; msgPage = 15; renderMessages(); });
-$('messages').addEventListener('click', e => { const b = e.target.closest('[data-mpage]'); if (!b) return;
-  msgPage += 15; renderMessages(); });
-$('messages').addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.m) return;
-  d.open ? openFeed.add(d.dataset.m) : openFeed.delete(d.dataset.m); }, true);
 function renderChat(){
   const cl = $('chatlog'), atBottom = cl.scrollHeight - cl.scrollTop - cl.clientHeight < 40;
   const mg = mgrName(), sel = $('chatwho'), opts = talkable();
@@ -759,12 +973,12 @@ function renderChat(){
   const merged = new Map();  // older messages fetched on request first, then the latest ones from the state
   for (const c of [...(chatOlder.get(chatWith)||[]), ...(D.chat||[]).filter(c => !c.qid && (c.with || mg) === chatWith)])
     merged.set(c.id, Object.assign(merged.get(c.id)||{}, c));
-  const list = [...merged.values()];
+  const list = [...merged.values()].map(fullC);
   chatFirstId = list.length ? list[0].id : '';
   const moreFlag = chatMoreFlag.has(chatWith) ? chatMoreFlag.get(chatWith) : !!(D.chat_more||{})[chatWith];
   const olderBtn = moreFlag ? '<div class="older"><button class="more" data-chatmore="1">Show older messages</button></div>' : '';
   const h = list.length ? list.map(c => c.role === 'human'
-      ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}</div><div class="b">${md(c.text)}</div></div>`
+      ? `<div class="cm me"><div class="w" style="text-align:right">you · ${tm(c.ts)}</div><div class="b">${md(c.text)}${clipNote(c)}</div></div>`
       : replyBubbles(c, called(c.who || c.with || mg), '', problemLine(c) + relayLine(c.id))).join('')
     : (chatWith === mg
       ? `<div class="empty">Ask ${esc(who2)} how things stand, why a milestone was sent back, or tell them what to prioritise. If they want ${esc(who('critic'))} to change course, they will say so and it is passed on.</div>`
@@ -793,24 +1007,26 @@ function routeStatus(r){  // what became of one passed-on message, as a line of 
       + (r.turn_status === 'running' ? ', running now' : '') + (r.at ? ' · ' + tm(r.at) : '')];
     case 'waiting': return ['wait', r.urgent ? `⚡ waiting: urgent, cuts into ${to}'s running turn` : `⏳ waiting for ${to}'s next turn`];
     case 'unseen': return ['bad', `? not found in the prompts of ${to}'s ${r.later} later turn${r.later === 1 ? '' : 's'}`];
-    case 'superseded': return ['wait', `↷ not sent: ${esc(r.reason || 'a later message replaced it')}${r.turn ? ' (' + link(r.turn) + ')' : ''}`];
+    case 'superseded': return ['wait', `↷ superseded: ${esc(r.reason || 'a later message replaced it')}${r.turn ? ' (' + link(r.turn) + ')' : ''}`];
+    case 'dropped': return ['', `⊘ dropped: ${esc(r.reason || 'nothing will carry it any more')}`];
+    case 'held': return [r.by_design ? 'ok' : 'wait', `${r.by_design ? '⊘' : '⏸'} held: ${esc(r.reason || '')}`];
     case 'unknown': return ['bad', `⚠ sent into ${to}'s running turn${r.turn ? ' ' + link(r.turn) : ''}, not confirmed`];
     case 'failed': return ['bad', `⚠ not delivered: ${esc(r.problem || '')}`];
   }
   return ['', esc(r.status)];
 }
-function chatRoutes(id){  // a chat reply's passed-on messages, from the inbox notes they became
-  return ((D.relays||{})[id] || []).map(r => r.status === 'delivered'
+function chatRoutes(id, rows){  // a chat reply's passed-on messages, from the inbox notes they became
+  return (rows || (D.relays||{})[id] || []).map(r => r.status === 'delivered'
     ? Object.assign({}, r, {status: r.turn ? 'read' : 'waiting'}) : r);
 }
-function routeCards(text, rows, src, complete){  // each <message> a reply passed on, as a folded card with its status
-  const blocks = complete ? routedBlocks(text).blocks : [];
+function routeCards(text, rows, src){  // each <message> a reply passed on, as a folded card with its status
+  const complete = true, blocks = routedBlocks(text).blocks;
   const byI = new Map((rows||[]).map((r, k) => [r.i ?? k, r]));
   const n = complete ? blocks.length : (rows||[]).length;
   let h = '';
   for (let i = 0; i < n; i++){
     const b = complete ? blocks[i] : null, r = complete ? byI.get(i) : rows[i];
-    const rawTo = b ? b.to : (r.to || ''), you = /^you$/i.test(rawTo) || (r && r.status === 'you');
+    const rawTo = b ? b.to : (r.to || ''), you = (r && r.status === 'you') || (!r && /^you$/i.test(rawTo));
     const key = src + ':' + i, [cls, st] = you ? ['ok', 'for you'] : routeStatus(r);
     const name = you ? 'you' : (r && r.to ? called(r.to) : who(rawTo));
     const urgent = b ? b.urgent : !!(r && r.urgent);
@@ -824,43 +1040,27 @@ function routeCards(text, rows, src, complete){  // each <message> a reply passe
 }
 function routedHTML(text, rows, src){  // a whole reply: its own text, then the cards
   const {plain, blocks} = routedBlocks(text);
-  return blocks.length ? md(plain) + routeCards(text, rows, src, true) : md(text || '(empty)');
+  return blocks.length ? md(plain) + routeCards(text, rows, src) : md(text || '(empty)');
 }
-function headline(text){  // a folded reply's one-line preview: its own words, else the first message it passed on
-  const {plain, blocks} = routedBlocks(text);
-  return preview(plain || (blocks[0] ? blocks[0].body : '') || text);
+function heldLine(hs){  // blocks of this reply orch keeps from the next agent by design: logged, not lost
+  if (!hs || !hs.length) return '';
+  const kinds = [...new Set(hs.map(h => h.kind))];
+  return `<div class="recv" title="${esc(hs.map(h => h.reason).join('; '))}">⊘ Held by design from ${esc(called(hs[0].to))}: ${esc(kinds.join(', '))}</div>`;
 }
-const RCHIP = {read: ['ok', '✓'], you: ['ok', ''], waiting: ['wait', '⏳'], superseded: ['wait', '↷'], unseen: ['bad', '?'], unknown: ['bad', '⚠'], failed: ['bad', '⚠']};
-function routeChips(rows){  // the folded turn's header: one chip per message it passed on
-  return (rows||[]).filter(r => r.status !== 'you').map(r => { const [cls, icon] = RCHIP[r.status] || ['', ''];
-    const tip = routeStatus(r)[1].replace(/<[^>]+>/g, '');
-    return `<span class="rchip ${cls}" title="${esc(tip)}">✉ ${esc(called(r.to))} ${icon}</span>`; }).join('');
-}
-function receivedLine(id){  // on the recipient's side: which earlier messages this turn's prompt carries
-  const rs = (D.received||{})[id]; if (!rs || !rs.length) return '';
+function receivedLine(rs){  // on the recipient's side: which earlier messages this turn's prompt carries
+  if (!rs || !rs.length) return '';
   return `<div class="recv">↳ Its prompt carried ${rs.map(x => `the message from ${esc(called(x.from))} in <a href="#" data-goto="${esc(x.turn)}">${esc(x.turn)}</a>`).join(', ')}</div>`;
 }
 document.addEventListener('toggle', e => { const d = e.target; if (!d.dataset || !d.dataset.route) return;
-  d.open ? openRoutes.add(d.dataset.route) : openRoutes.delete(d.dataset.route);
-  if (d.open && d.querySelector('[data-loadturn]')) ensureFull(d.dataset.src); }, true);
-document.addEventListener('click', e => {  // jump to a turn: open its round and its fold, show it, flash it
-  const a = e.target.closest('a[data-goto]'); if (!a) return; e.preventDefault();
-  const id = a.dataset.goto, t = (D.turns||[]).find(x => x.turn_id === id); if (!t) return;
-  openMsgs.add(id); shutMsgs.delete(id);
-  if (t.round != null){ openRounds.add(t.round); openRounds.delete(-t.round - 1); }
-  const q = `details.fold[data-t="${CSS.escape(id)}"]`;
-  if (!document.querySelector(q)){ shown.rounds = shown.thread = 1e9; tab = 'all'; }
-  render();
-  const el = document.querySelector(q); if (!el) return;
-  for (let p = el; p; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true;
-  el.scrollIntoView({block: 'start', behavior: 'smooth'}); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600);
-});
+  d.open ? openRoutes.add(d.dataset.route) : openRoutes.delete(d.dataset.route); }, true);
+document.addEventListener('click', e => {  // jump to a turn's reply: open its milestone and step, unfold it, show it
+  const a = e.target.closest('a[data-goto]'); if (!a) return; e.preventDefault(); gotoItem('t:' + a.dataset.goto); });
 function replyBubbles(c, name, note, tail){  // one agent reply: its own text, then each message it sent on, as separate bubbles
   const head = `${esc(name)} · ${tm(c.ts)}${note || ''}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}`;
   if (c.status === 'running') return `<div class="cm"><div class="w">${head}</div><div class="b"><div data-live="${esc(c.id)}"></div></div></div>`;
   const {plain, blocks} = routedBlocks(c.text);
   let h = '';
-  if (plain || !blocks.length) h += `<div class="cm"><div class="w">${head}</div><div class="b">${md(plain || c.text || '')}</div></div>`;
+  if (plain || !blocks.length) h += `<div class="cm"><div class="w">${head}</div><div class="b">${md(plain || c.text || '')}${clipNote(c)}</div></div>`;
   for (const b of blocks)
     h += `<div class="cm route"><div class="w">${plain || blocks.indexOf(b) ? '' : head + ' · '}→ to ${esc(who(b.to))}${b.urgent ? ' (urgent)' : ''}</div><div class="b">${md(b.body)}</div></div>`;
   return h + (tail ? `<div class="cm">${tail}</div>` : '');
@@ -874,7 +1074,10 @@ function relayLine(id){  // what became of the messages this reply passed on
     const a = (D.agents||[]).find(x => x.name === r.to), to = esc(a ? a.called : who(r.to || 'critic'));
     const s = r.status === 'delivered'
       ? `✓ passed to ${to}${r.at ? ' at ' + tm(r.at) : ''}${r.turn ? ` · read in ${esc(r.turn)} (${esc(r.purpose || '')}${r.turn_status === 'running' ? ', running now' : ''})` : ''}`
-      : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}'s next turn`);
+      : r.status === 'held' ? `⏸ held for ${to}: ${esc(r.reason || '')}`
+      : r.status === 'superseded' ? `↷ superseded: ${esc(r.reason || 'a later message replaced it')}`
+      : r.status === 'dropped' ? `⊘ dropped: ${esc(r.reason || 'nothing will carry it any more')}`
+      : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}: it is answered as soon as it is idle`);
     return `<div class="w">${s}</div>`; }).join('');
 }
 async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true;
@@ -898,12 +1101,19 @@ function setChat(open){ chatOpen = open; $('grid').classList.toggle('nochat', !o
   badge(); }
 setChat(location.hash === '#talk');
 $('chattoggle').addEventListener('click', () => setChat(!chatOpen));
+$('discpill').addEventListener('click', () => { if (chatWith && chatWith !== mgrName()){ chatWith = null; const cl = $('chatlog'); cl._first = undefined; } setChat(true); render(); });
 $('chatclose').addEventListener('click', () => setChat(false));
 document.querySelector('.side').addEventListener('mousedown', e => { if (e.target === e.currentTarget) setChat(false); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen) setChat(false); });
 $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
 function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_pending; }
+function discussWanted(){ return D.discussion_pending == null ? !!D.discussion : !!D.discussion_pending; }
+$('discuss').addEventListener('click', async () => { const on = !discussWanted();
+  if (!confirm(on ? 'Start a discussion? The manager sends nothing to the critic until you turn it off; then it sends one message with the new directions.' : 'Close the discussion? The manager sends the critic one message with the new directions.')) return;
+  D.discussion_pending = on; render(); await post('api/discussion', {on}); });
+$('reviewbtn').addEventListener('click', async () => { if (!confirm('Ask the manager for a review file you can comment in?')) return;
+  $('reviewbtn').disabled = true; await post('api/review', {}); });
 $('night').addEventListener('click', () => { const on = !nightWanted();
   if (confirm(on ? 'Turn night mode on? The manager answers your questions and passes gates itself until you turn it off; its choices are recorded in Questions and Decisions.' : 'Turn night mode off?')) post('api/night', {on}); });
 $('stop').addEventListener('click', () => { if (confirm('Stop the run after the current turn? You can resume it later.')) post('api/stop', {}); });

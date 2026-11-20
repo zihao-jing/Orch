@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .templates import DEFAULT_TEMPLATES
+from . import reminders as R
+from .templates import DEFAULT_TEMPLATES, RETIRED_TEMPLATES
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 TEXT_KEYS = ("goal", "instructions", "system_prompt", "task", "description")
@@ -26,7 +27,25 @@ MODES = ("pipeline", "llm", "managed")
 
 # Agent settings that take effect on the agent's next turn without restarting the run. Everything else
 # (prompts, memory, role, working folder, name) is read at start; a change there is reported, not applied.
-HOT_AGENT_FIELDS = ("backend", "backend_options", "env", "timeout", "retries", "fallback", "fallback_cooldown")
+HOT_AGENT_FIELDS = ("backend", "backend_options", "env", "timeout", "retries", "fallback", "fallback_cooldown",
+                    "safety_timeout", "check_every", "check_session", "compact_between_steps", "model_id",
+                    "retry_waits")
+# prompt_vars the run sets itself (not the config): kept when the config is re-read, so they never count as a change
+RUN_PROMPT_VARS = ("golden_board", "checklist_files")
+
+# B8: a failed turn (provider error, overload, rate limit, crash) is retried on the same model after each of these
+# waits (seconds), then the backups take over in order. `retry_waits` in the project settings or an agent's YAML.
+RETRY_WAITS = [60.0, 120.0, 240.0]
+# B8: the project's model list: `.orch/settings.yaml` (a project folder) or `models:` at the top of a config file
+SETTINGS_FILES = ("settings.yaml", "settings.yml", "settings.json")
+SETTINGS_KEYS = ("models", "retry_waits", "fallback_cooldown")
+MODEL_KEYS = ("backend", "backend_options", "env", "retries")  # a model is shown by its id
+
+# B5: a turn that progress checks watch (a worker's, in managed mode) may run long; only this high limit stops it
+SAFETY_TIMEOUT = 28800.0  # 8 h
+CHECK_EVERY = 20.0  # minutes between quick checks of a worker's turn or job
+MANAGER_CHECK_EVERY = 60.0  # minutes between status summaries for the manager while work runs
+CHECK_SESSIONS = ("own", "side")
 
 
 class ConfigError(Exception):
@@ -42,6 +61,7 @@ class Variant:
     options: Dict[str, Any]
     env: Dict[str, str]
     retries: int
+    model_id: str = ""  # its id in the project's model list, if it came from there
 
     @property
     def session_key(self) -> str:
@@ -72,22 +92,55 @@ class AgentConfig:
     memory_heading: str = "Things to keep in mind:"
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
-    fresh_session: str = ""  # "milestone": start a new session when each milestone starts (managed mode)
+    # "milestone": a new session when each milestone starts (managed mode); "never": keep it; "" = the role's default
+    # (the critic and workers start each milestone fresh, the manager keeps its session)
+    fresh_session: str = ""
     state_file: str = ""  # managed mode: the agent's working state (agents/<name>/state.md in a project folder)
     # backup models, tried in order when a turn still fails after its retries: each is a dict with any of
     # label, backend, backend_options, env, retries (already merged with the primary's settings when loaded)
     fallback: List[Dict[str, Any]] = field(default_factory=list)
     fallback_cooldown: float = 18000.0  # 5 h: seconds an agent stays on the backup that worked before trying its primary again
+    # B5 progress checks. safety_timeout: the hard per-turn limit in seconds (None: see turn_limit). check_every:
+    # minutes between quick checks while this agent works (a worker: its turns and jobs; the manager: its status
+    # summaries); None = the default, 0 = off. check_session: where this agent runs the checks it does (a monitor,
+    # or the critic when there is no monitor): "own" (its continuing session) or "side" (a fresh session per check)
+    safety_timeout: Optional[float] = None
+    check_every: Optional[float] = None
+    check_session: str = ""
+    # B7: orch asks the CLI to compact this agent's session between steps of the critic's plan (never mid-task);
+    # compaction otherwise stays the CLI's own (e.g. Claude Code's auto-compact, `--autocompact` in extra_args)
+    compact_between_steps: bool = False
+    # B8: `model: <id>` from the project's model list (the primary's id; backups carry theirs in `fallback`), and the
+    # waits before each retry of the same model
+    model_id: str = ""
+    retry_waits: List[float] = field(default_factory=lambda: list(RETRY_WAITS))
+
+    @property
+    def fresh_mode(self) -> str:
+        """When this agent starts a new session in managed mode: "milestone" or "" (never)."""
+        if self.fresh_session == "never":
+            return ""
+        return self.fresh_session or ("milestone" if self.role in ("verifier", "worker") else "")
+
+    def turn_limit(self, watched: bool = False) -> float:
+        """Seconds a turn may run before it is stopped. `safety_timeout` when set. Otherwise `timeout` keeps its
+        old meaning for turns nobody watches (manager, critic, auditor, monitor; a worker with checks off), and a
+        watched turn (a worker's, with progress checks on) gets at least the 8 h safety limit: an older `timeout`
+        below it no longer cuts the turn."""
+        if self.safety_timeout:
+            return float(self.safety_timeout)
+        return max(float(self.timeout or 0), SAFETY_TIMEOUT) if watched else float(self.timeout or 0)
 
     def variants(self) -> List[Variant]:
         """The primary model first, then each backup."""
-        out = [Variant(0, _variant_label(self.backend, self.backend_options), self.backend,
-                       dict(self.backend_options), dict(self.env), self.retries)]
+        out = [Variant(0, self.model_id or _variant_label(self.backend, self.backend_options), self.backend,
+                       dict(self.backend_options), dict(self.env), self.retries, self.model_id)]
         for i, f in enumerate(self.fallback, 1):
             b = str(f.get("backend") or self.backend)
             opts = dict(f.get("backend_options") or {})
             out.append(Variant(i, str(f.get("label") or _variant_label(b, opts)), b, opts,
-                               dict(f.get("env") or {}), int(f.get("retries", self.retries))))
+                               dict(f.get("env") or {}), int(f.get("retries", self.retries)),
+                               str(f.get("model_id") or "")))
         return out
 
     @property
@@ -158,7 +211,7 @@ def _build_fallback(raw: Any, primary: Dict[str, Any], where: str) -> List[Dict[
             item = {"backend_options": {"model": item}}
         if not isinstance(item, dict):
             raise ConfigError(f"{w} must be a model name or a mapping")
-        unknown = set(item) - {"label", "backend", "backend_options", "env", "retries"}
+        unknown = set(item) - {"label", "backend", "backend_options", "env", "retries", "model_id"}
         if unknown:
             raise ConfigError(f"{w}: unknown keys: {', '.join(sorted(unknown))}")
         backend = str(item.get("backend") or primary["backend"])
@@ -173,7 +226,101 @@ def _build_fallback(raw: Any, primary: Dict[str, Any], where: str) -> List[Dict[
                              "retries": int(item.get("retries", primary["retries"]))}
         if item.get("label"):
             f["label"] = str(item["label"])
+        if item.get("model_id"):
+            f["model_id"] = str(item["model_id"])
         out.append(f)
+    return out
+
+
+def parse_models(raw: Any, where: str = "models") -> Dict[str, Dict[str, Any]]:
+    """The project's model list: id -> {backend, backend_options, env, retries?}. `$VARS` in env values are
+    expanded, so a key can stay in the shell's environment (`ANTHROPIC_AUTH_TOKEN: ${GLM_KEY}`)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a mapping of id -> model settings")
+    out: Dict[str, Dict[str, Any]] = {}
+    for mid, entry in raw.items():
+        w = f"{where}.{mid}"
+        if not NAME_RE.match(str(mid)):
+            raise ConfigError(f"{w}: a model id may only use letters, digits, '_', '.', '-'")
+        if isinstance(entry, str):  # `opus: claude` is not meaningful; ask for the mapping
+            raise ConfigError(f"{w} must be a mapping with backend and backend_options")
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{w} must be a mapping")
+        unknown = set(entry) - set(MODEL_KEYS)
+        if unknown:
+            raise ConfigError(f"{w}: unknown keys: {', '.join(sorted(unknown))}")
+        opts = entry.get("backend_options") or {}
+        env = entry.get("env") or {}
+        if not isinstance(opts, dict) or not isinstance(env, dict):
+            raise ConfigError(f"{w}: backend_options and env must be mappings")
+        m: Dict[str, Any] = {"backend": str(entry.get("backend") or "claude"), "backend_options": dict(opts),
+                             "env": {str(k): os.path.expandvars(str(v)) for k, v in env.items() if v is not None}}
+        if entry.get("retries") is not None:
+            m["retries"] = int(entry["retries"])
+        out[str(mid)] = m
+    return out
+
+
+def _model(models: Dict[str, Dict[str, Any]], mid: Any, where: str) -> Dict[str, Any]:
+    mid = str(mid)
+    if mid not in models:
+        raise ConfigError(f"{where}: unknown model id {mid!r}; the project's model list has: "
+                          f"{', '.join(sorted(models)) or '(none: add `models:` to the project settings)'}")
+    return models[mid]
+
+
+def _resolve_models(merged: Dict[str, Any], own: Dict[str, Any], defaults: Dict[str, Any],
+                    models: Dict[str, Dict[str, Any]], where: str) -> Dict[str, Any]:
+    """`model: <id>`, `backup: <id>`, `backup2: <id>` in an agent's settings, resolved from the project's model list
+    into the inline form (backend, backend_options, env, fallback). Options the agent itself gives are applied on top
+    of its model's (and of a backup's on the same backend, except `model`); its env on top of every model's (a
+    backup's own env keys win). Without these keys the inline settings are used as they are."""
+    mid, b1, b2 = merged.get("model"), merged.get("backup"), merged.get("backup2")
+    if not (mid or b1 or b2):
+        return merged
+    if (b1 or b2) and merged.get("fallback") is not None:
+        raise ConfigError(f"{where}: give backups either as `backup`/`backup2` ids or as `fallback`, not both")
+    if b2 and not b1:
+        raise ConfigError(f"{where}: `backup2` needs a `backup`")
+    out = {k: v for k, v in merged.items() if k not in ("model", "backup", "backup2")}
+    own_opts = dict(own.get("backend_options") or {})
+    own_env = {str(k): str(v) for k, v in (own.get("env") or {}).items()}
+    def_opts = {k: v for k, v in (defaults.get("backend_options") or {}).items() if k != "model"}
+    def_env = {str(k): str(v) for k, v in (defaults.get("env") or {}).items()}
+    def_backend = defaults.get("backend")
+
+    def opts_for(entry: Dict[str, Any], primary: bool, primary_backend: str) -> Dict[str, Any]:
+        base = _deep_merge(def_opts if def_backend in (None, entry["backend"]) else {}, entry["backend_options"])
+        mine = own_opts if primary else {k: v for k, v in own_opts.items() if k != "model"}
+        if primary or entry["backend"] == primary_backend:
+            base = _deep_merge(base, mine)
+        return {k: v for k, v in base.items() if v is not None}
+
+    if mid:
+        e = _model(models, mid, f"{where}: model")
+        if own.get("backend") and str(own["backend"]) != e["backend"]:
+            raise ConfigError(f"{where}: backend {own['backend']!r} differs from model {mid!r} ({e['backend']}); "
+                              "the backend comes from the model list")
+        out.update(backend=e["backend"], backend_options=opts_for(e, True, e["backend"]),
+                   env={**def_env, **e["env"], **own_env}, model_id=str(mid))
+        if e.get("retries") is not None and "retries" not in own:
+            out["retries"] = e["retries"]
+    primary_backend = str(out.get("backend") or "claude")
+    backups = []
+    for key, bid in (("backup", b1), ("backup2", b2)):
+        if not bid:
+            continue
+        e = _model(models, bid, f"{where}: {key}")
+        f: Dict[str, Any] = {"backend": e["backend"], "backend_options": opts_for(e, False, primary_backend),
+                             "env": {**def_env, **own_env, **e["env"]}, "model_id": str(bid),
+                             "retries": int(e.get("retries", out.get("retries", 0)) or 0)}
+        f["label"] = str(bid)  # shown on the board and in the records by its id
+        backups.append(f)
+    if backups:
+        out["fallback"] = backups
+        out["_resolved_fallback"] = True
     return out
 
 
@@ -209,9 +356,15 @@ class ControllerConfig:
     approve_milestones: bool = True  # pause for my OK after the manager accepts each milestone
     min_score: Optional[float] = None  # a manager ACCEPT below this score counts as REVISE
     protocol: bool = True  # managed mode: add orch's fixed protocol (signals, who reads what, boundaries) to each prompt
-    job_ignore: List[str] = field(default_factory=list)  # regexes: commands never waited on (e.g. a status loop)
-    tag_reminder: float = 0.2  # managed mode: chance per turn of a short reminder of the tags (0 = never)
-    job_wait: int = 21600  # seconds the critic waits for a job the worker says it is waiting on (0 = never wait)
+    job_ignore: List[str] = field(default_factory=list)  # regexes: commands never listed as running jobs (a status loop)
+    # managed mode: older setting, the chance per turn of the protocol reminder (0 = off); now sets its schedule
+    tag_reminder: Optional[float] = None
+    # managed mode: short reminders at intervals (orch/reminders.py): [{id, text, to, every | random, skip}]
+    reminders: List[Dict[str, Any]] = field(default_factory=lambda: R.parse(None))
+    # 0 = don't look for jobs the worker left running. Otherwise the critic's review lists them and the critic decides
+    # whether the step waits (<wait-job/>); progress checks watch such a wait (B5), and this caps it (seconds) only for
+    # a worker whose checks are off
+    job_wait: int = 21600
     checkin_every: int = 0  # every N rounds a short update for the manager: from the critic's plan when it has one (0 = off)
     # a reply holding a line like this sends questions one level up (worker -> critic -> manager -> me)
     question_pattern: str = r"^\W*QUESTIONS? FOR\b"
@@ -220,8 +373,24 @@ class ControllerConfig:
     accept_pattern: str = r"DECISION:\s*\**\s*ACCEPT"
     revise_pattern: str = r"DECISION:\s*\**\s*REVISE"
     # ---- the auditor (an agent with role: auditor): reads how the agents talk, never the task
-    audit_every: int = 10  # rounds between audits (0 = only `orch audit`); one more when the run ends
+    audit_every: int = 10  # rounds between audits, plus one when the run ends (0 = none of them; only `orch audit`)
     audit_points: int = 5  # at most this many points per audit
+    # managed mode: an agent's session open in a terminal (orch/hooks/terminal_relay.py) holds its turns; a mark
+    # with no activity for this many seconds is stale (a crashed terminal) and orch continues the session
+    terminal_busy_timeout: float = 3600.0
+    # managed mode: the golden board (orch/boards.py): rules, preferences and key decisions every agent reads; the
+    # manager owns it. "" = `.orch/golden.md` in a project folder, else golden.md beside the monitor's runs
+    golden_board: str = ""
+    golden_limit: int = 8000  # characters; above it the board warns and the manager is asked once to prune
+    large_text: int = 50000  # B8: characters; a larger reply, input or raw stream gets a board warning (never cut)
+    # B11 parallel workers (orch/parallel.py): the manager approves alone up to max_workers (the first worker counts);
+    # above it I decide at a gate; in night mode the manager's number stands up to workers_hard_cap. parallel_turns caps
+    # the worker turns of one parallel section (0 = only max_rounds). worker_worktrees: each extra worker gets its own
+    # git worktree beside the repository (the critic merges).
+    max_workers: int = 3
+    workers_hard_cap: int = 6
+    parallel_turns: int = 0
+    worker_worktrees: bool = False
 
 
 @dataclass
@@ -335,6 +504,12 @@ def _load_text_files(d: Dict[str, Any], base: Path, where: str) -> Dict[str, Any
     return d
 
 
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
 def _as_list(v: Any) -> List[str]:
     if v is None:
         return []
@@ -343,10 +518,13 @@ def _as_list(v: Any) -> List[str]:
     return [str(x) for x in v]
 
 
-def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_wd: str, where: str) -> AgentConfig:
+def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_wd: str, where: str,
+                 models: Optional[Dict[str, Dict[str, Any]]] = None) -> AgentConfig:
     sp_path = _expand(raw["system_prompt_file"], base) if raw.get("system_prompt_file") else ""
     raw = _load_text_files(raw, base, where)
     merged = _deep_merge(defaults, raw)
+    merged = _resolve_models(merged, raw, defaults, models or {}, f"{where} ({raw.get('name', '?')})")
+    resolved_fallback = bool(merged.pop("_resolved_fallback", False))
     name = str(merged.get("name", "")).strip()
     if not name:
         raise ConfigError(f"{where}: agent needs a name")
@@ -358,19 +536,41 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
     working_dir = _expand(wd, Path(mon_wd)) if wd else mon_wd
     known = {"name", "role", "description", "system_prompt", "task", "backend", "backend_options",
              "working_dir", "timeout", "retries", "env", "reviews", "feedback_to", "display_name",
-             "memory_files", "memory_heading", "fresh_session", "state_file", "fallback", "fallback_cooldown"}
+             "memory_files", "memory_heading", "fresh_session", "state_file", "fallback", "fallback_cooldown",
+             "safety_timeout", "check_every", "check_session", "compact_between_steps", "model_id",
+             "retry_waits"}
     unknown = set(merged) - known
     if unknown:
         raise ConfigError(f"{where} ({name}): unknown keys: {', '.join(sorted(unknown))}")
     fresh = str(merged.get("fresh_session", "") or "").strip().lower()
     if fresh not in ("", "never", "milestone"):
         raise ConfigError(f"{where} ({name}): fresh_session must be 'milestone' or 'never'")
+    session = str(merged.get("check_session", "") or "").strip().lower()
+    if session and session not in CHECK_SESSIONS:
+        raise ConfigError(f"{where} ({name}): check_session must be 'own' or 'side'")
+    try:
+        safety = float(merged["safety_timeout"]) if merged.get("safety_timeout") is not None else None
+        every = float(merged["check_every"]) if merged.get("check_every") is not None else None
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"{where} ({name}): safety_timeout and check_every must be numbers") from e
+    if (safety is not None and safety < 0) or (every is not None and every < 0):
+        raise ConfigError(f"{where} ({name}): safety_timeout and check_every must be >= 0")
     primary = {"backend": str(merged.get("backend", "claude")),
                "backend_options": dict(merged.get("backend_options") or {}),
                "env": {str(k): str(v) for k, v in (merged.get("env") or {}).items()},
                "retries": int(merged.get("retries", 0))}
-    fallback = _build_fallback(merged.get("fallback"), primary, f"{where} ({name})")
+    fallback = (list(merged["fallback"]) if resolved_fallback
+                else _build_fallback(merged.get("fallback"), primary, f"{where} ({name})"))
+    waits = merged.get("retry_waits", RETRY_WAITS)
+    try:
+        waits = [float(x) for x in (waits if isinstance(waits, list) else [waits])] if waits is not None else []
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"{where} ({name}): retry_waits must be a list of seconds, e.g. [60, 120, 240]") from e
+    if any(x < 0 for x in waits):
+        raise ConfigError(f"{where} ({name}): retry_waits must be >= 0")
     return AgentConfig(
+        model_id=str(merged.get("model_id") or ""),
+        retry_waits=waits,
         fallback=fallback,
         fallback_cooldown=float(merged.get("fallback_cooldown", AgentConfig.fallback_cooldown) or 0),
         name=name,
@@ -390,14 +590,19 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
         system_prompt_path=sp_path,
         memory_files=[_expand(x, base) for x in _as_list(merged.get("memory_files"))],
         memory_heading=str(merged.get("memory_heading", AgentConfig.memory_heading) or ""),
-        fresh_session="" if fresh == "never" else fresh,
+        fresh_session=fresh,
         state_file=_expand(merged["state_file"], base) if merged.get("state_file") else "",
+        safety_timeout=safety or None,
+        check_every=every,
+        check_session=session,
+        compact_between_steps=_as_bool(merged.get("compact_between_steps", False)),
     )
 
 
 ROLE_ALIASES = {"critic": "verifier", "reviewer": "verifier", "writer": "worker"}
 PROMPTS_DIR = Path(__file__).with_name("prompts")
-DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "worker.md", "auditor": "auditor.md"}
+DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "worker.md", "auditor": "auditor.md",
+                  "monitor": "monitor.md"}
 # workflow settings an agent.yaml may carry (usually: the manager's goal and approvals, the critic's checklist
 # and rounds, the worker's snapshot). Two agents setting the same one differently is an error.
 MONITOR_KEYS = ("goal", "goal_file", "max_rounds", "output_dir", "workspace")
@@ -405,7 +610,9 @@ CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require",
              "stop_on_error", "max_report_chars", "provider_retry_wait", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
              "approve_milestones", "min_score", "question_pattern", "note_pattern", "accept_pattern", "revise_pattern",
-             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "audit_every", "audit_points")
+             "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder", "reminders", "audit_every", "audit_points",
+             "terminal_busy_timeout", "golden_board", "golden_limit", "large_text", "max_workers", "workers_hard_cap",
+             "parallel_turns", "worker_worktrees")
 
 
 def find_project(path: str) -> Optional[Path]:
@@ -451,7 +658,7 @@ def _project_raw(orch_dir: Path) -> Dict[str, Any]:
     owner: Dict[str, str] = {}
     ctrl: Dict[str, Any] = {}
     agents = []
-    order = {"manager": 0, "verifier": 1, "worker": 2}
+    order = {"manager": 0, "verifier": 1, "worker": 2, "monitor": 3}
     folders = [x for x in sorted((orch_dir / "agents").iterdir()) if (x / "agent.yaml").is_file()]
     for d in folders:
         raw = _agent_folder(d)
@@ -471,7 +678,27 @@ def _project_raw(orch_dir: Path) -> Dict[str, Any]:
     mon.setdefault("name", re.sub(r"[^A-Za-z0-9_.-]+", "-", root.name).strip("-.") or "project")
     mon.setdefault("workspace", str(root))
     mon.update(controller=ctrl, agents=agents)
-    return {"output_dir": mon.pop("output_dir", "runs"), "monitors": [mon]}
+    out = {"output_dir": mon.pop("output_dir", "runs"), "monitors": [mon]}
+    out.update(project_settings(orch_dir))
+    return out
+
+
+def settings_path(orch_dir: Path) -> Optional[Path]:
+    """The project's general settings file (`.orch/settings.yaml`), if there is one."""
+    return next((orch_dir / n for n in SETTINGS_FILES if (orch_dir / n).is_file()), None)
+
+
+def project_settings(orch_dir: Path) -> Dict[str, Any]:
+    """`.orch/settings.yaml`: the model list (`models:`) and the project-wide `retry_waits` and `fallback_cooldown`
+    (defaults every agent can override). Re-read with the agent files, so edits apply from the next turn."""
+    p = settings_path(orch_dir)
+    if p is None:
+        return {}
+    raw = _read_raw(p)
+    unknown = set(raw) - set(SETTINGS_KEYS)
+    if unknown:
+        raise ConfigError(f"{p.name}: unknown keys: {', '.join(sorted(unknown))} (known: {', '.join(SETTINGS_KEYS)})")
+    return raw
 
 
 def load_config(path: str) -> Config:
@@ -484,7 +711,11 @@ def load_config(path: str) -> Config:
     raw = _project_raw(proj) if proj else _read_raw(cfg_path)
 
     output_dir = _expand(raw.get("output_dir", "./orch-runs"), base)
-    top_defaults = raw.get("defaults") or {}
+    top_defaults = dict(raw.get("defaults") or {})
+    models = parse_models(raw.get("models"))
+    for k in ("retry_waits", "fallback_cooldown"):  # project-wide settings: defaults for every agent
+        if raw.get(k) is not None:
+            top_defaults.setdefault(k, raw[k])
     monitors_raw = raw.get("monitors")
     if not monitors_raw or not isinstance(monitors_raw, list):
         raise ConfigError("config needs a non-empty `monitors:` list")
@@ -513,6 +744,8 @@ def load_config(path: str) -> Config:
         mode = str(craw.get("mode", "pipeline"))
         templates = dict(DEFAULT_TEMPLATES)
         for k, v in (craw.get("templates") or {}).items():
+            if k in RETIRED_TEMPLATES:  # replaced by the reminder registry: accepted, not used
+                continue
             if k not in DEFAULT_TEMPLATES:
                 raise ConfigError(f"{where}.controller.templates: unknown template {k!r}; "
                                   f"known: {', '.join(DEFAULT_TEMPLATES)}")
@@ -522,16 +755,23 @@ def load_config(path: str) -> Config:
             araw = dict(craw.get("agent") or {})
             araw.setdefault("name", "controller")
             araw.setdefault("role", "controller")
-            ctrl_agent = _build_agent(araw, defaults, base, working_dir, f"{where}.controller.agent")
+            ctrl_agent = _build_agent(araw, defaults, base, working_dir, f"{where}.controller.agent", models)
         ctrl_known = {"mode", "instructions", "parallel", "require", "pass_pattern", "fail_pattern",
                       "stop_on_error", "max_report_chars", "provider_retry_wait", "templates", "agent",
                       "human_pattern", "permission_pattern", "snapshot", "checklist", "checklist_nudge", "answer_note",
                       "milestone_rounds", "approve_plan", "approve_milestones", "min_score", "question_pattern",
                       "note_pattern", "accept_pattern", "revise_pattern", "checkin_every", "job_wait", "job_ignore", "protocol", "tag_reminder",
-                      "audit_every", "audit_points"}
+                      "reminders", "audit_every", "audit_points", "terminal_busy_timeout", "golden_board",
+                      "golden_limit", "large_text", "max_workers", "workers_hard_cap", "parallel_turns",
+                      "worker_worktrees"}
         unknown = set(craw) - ctrl_known
         if unknown:
             raise ConfigError(f"{where}.controller: unknown keys: {', '.join(sorted(unknown))}")
+        tag_reminder = float(craw["tag_reminder"] or 0) if craw.get("tag_reminder") is not None else None
+        try:
+            reminders = R.parse(craw.get("reminders"), tag_reminder, f"{where}.controller.reminders")
+        except (R.ReminderError, TypeError, ValueError) as e:
+            raise ConfigError(str(e)) from e
         controller = ControllerConfig(
             mode=mode,
             instructions=str(craw.get("instructions", "") or "").strip(),
@@ -557,22 +797,32 @@ def load_config(path: str) -> Config:
             checkin_every=int(craw.get("checkin_every", 0) or 0),
             job_wait=int(craw.get("job_wait", ControllerConfig.job_wait) or 0),
             protocol=bool(craw.get("protocol", True)),
-            tag_reminder=float(craw.get("tag_reminder", ControllerConfig.tag_reminder) or 0),
+            tag_reminder=tag_reminder,
+            reminders=reminders,
             job_ignore=[str(x) for x in (craw.get("job_ignore") or [])],
             audit_every=int(craw.get("audit_every", ControllerConfig.audit_every) or 0),
             audit_points=int(craw.get("audit_points", ControllerConfig.audit_points) or 5),
+            terminal_busy_timeout=float(craw.get("terminal_busy_timeout", ControllerConfig.terminal_busy_timeout) or 0),
+            golden_board=(_expand(craw["golden_board"], base) if craw.get("golden_board")
+                          else str(proj / "golden.md") if proj else ""),
+            golden_limit=int(craw.get("golden_limit", ControllerConfig.golden_limit) or 0),
+            large_text=int(craw.get("large_text", ControllerConfig.large_text) or 0),
+            max_workers=int(craw.get("max_workers", ControllerConfig.max_workers) or 1),
+            workers_hard_cap=int(craw.get("workers_hard_cap", ControllerConfig.workers_hard_cap) or 1),
+            parallel_turns=int(craw.get("parallel_turns", 0) or 0),
+            worker_worktrees=bool(craw.get("worker_worktrees", False)),
             **{k: str(craw[k]) for k in ("question_pattern", "note_pattern", "accept_pattern", "revise_pattern")
                if craw.get(k)},
         )
         agents = [
-            _build_agent(a, defaults, base, working_dir, f"{where}.agents[{j}]")
+            _build_agent(a, defaults, base, working_dir, f"{where}.agents[{j}]", models)
             for j, a in enumerate(mraw.get("agents") or [])
         ]
         team = {key: " and ".join(a.called for a in agents if a.role == role) or key
                 for key, role in (("manager", "manager"), ("critic", "verifier"), ("worker", "worker"))}
         for a in agents:
             a.prompt_vars = dict(team)
-            proto = {"manager": "manager", "verifier": "critic", "worker": "worker"}.get(a.role)
+            proto = {"manager": "manager", "verifier": "critic", "worker": "worker", "monitor": "monitor"}.get(a.role)
             if controller.mode == "managed" and controller.protocol and proto:
                 a.protocol_path = str(PROMPTS_DIR / "protocol" / f"{proto}.md")
         m_known = {"name", "workspace", "working_dir", "goal", "max_rounds", "controller", "agents",
@@ -669,11 +919,17 @@ def validate(cfg: Config, check_paths: bool = False) -> List[str]:
             if m.max_rounds <= c.milestone_rounds:
                 warnings.append(f"{where}: max_rounds ({m.max_rounds}) counts rounds over all milestones; at or below "
                                 f"milestone_rounds ({c.milestone_rounds}) the run can stop in the middle of a milestone")
-            others = [a.name for a in m.agents if a.role not in ("worker", "verifier", "manager", "auditor")]
+            others = [a.name for a in m.agents if a.role not in ("worker", "verifier", "manager", "auditor", "monitor")]
             if others:
                 warnings.append(f"{where}: managed mode ignores agents with custom roles: {', '.join(others)}")
             if len(m.by_role("auditor")) > 1:
                 raise ConfigError(f"{where}: at most one agent with role: auditor")
+            if len(m.by_role("monitor")) > 1:
+                warnings.append(f"{where}: several agents with role: monitor; only "
+                                f"{m.by_role('monitor')[0].name!r} watches the work (each extra worker gets its own copy of it)")
+            if c.max_workers < 1 or c.workers_hard_cap < c.max_workers or c.parallel_turns < 0:
+                raise ConfigError(f"{where}: controller.max_workers must be >= 1, workers_hard_cap >= max_workers and "
+                                  f"parallel_turns >= 0")
             if c.audit_every < 0 or c.audit_points < 1:
                 raise ConfigError(f"{where}: controller.audit_every must be >= 0 and audit_points >= 1")
         if check_paths:

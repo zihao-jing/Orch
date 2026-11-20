@@ -29,8 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .backends import StopRequested, TurnRequest, TurnResult, get_backend
-from .config import HOT_AGENT_FIELDS, AgentConfig, MonitorConfig, load_config
+from .backends import StopRequested, TurnRequest, TurnResult, claude_stream_report, get_backend
+from .config import HOT_AGENT_FIELDS, RUN_PROMPT_VARS, AgentConfig, MonitorConfig, load_config
 from .recorder import Recorder, now_iso, read_json
 from . import jobs as _jobs
 from . import tags as T
@@ -136,6 +136,36 @@ def provider_error(res: TurnResult) -> str:
     return truncate((text.strip().splitlines() or [""])[0], 300)
 
 
+# B8: a billing or account problem: no retry or backup fixes it; the run stops and the user is told
+BILLING_ERROR = re.compile(r"credit balance is too low|insufficient[_ ]quota|exceeded your current quota|"
+                           r"billing|payment required|purchase (more )?credits|"
+                           r"account (has been |is )?(suspended|disabled|deactivated)", re.I)
+
+
+def billing_error(res: TurnResult) -> str:
+    """The provider's message when a failed turn is a billing or account problem; '' otherwise."""
+    if res.status != "error":
+        return ""
+    # the agent's own partial reply (a cut-off) is its work, not a provider message: only the CLI's error is read
+    said = "" if (res.meta or {}).get("partial") else (res.output or "")[:2000]
+    text = said + "\n" + (res.stderr or "")[-2000:]
+    m = BILLING_ERROR.search(text)
+    if not m:
+        return ""
+    line = next((ln for ln in text.splitlines() if BILLING_ERROR.search(ln)), m.group(0))
+    return truncate(line.strip(), 300)
+
+
+def _cut_input(sess: Dict[str, Any], t: Dict[str, Any]) -> str:
+    """What the session holds of a cut-off turn's message (a cut-off "continue" still holds the message before it)."""
+    before = (sess.get("cut_off") or {}).get("input") or "" if t.get("continues") else ""
+    return (before + "\n\n" + (t.get("input") or "")).strip()
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text or "").split())
+
+
 LARGE_TEXT = 50_000  # a prompt or reply longer than this is flagged in the progress log (never cut)
 
 
@@ -224,7 +254,7 @@ class MonitorRunner:
             self.log(f"resuming {rec.run_dir} after round {rec.state.get('completed_round', 0)}")
             self.switch_backends()
             self.recover_interrupted()
-        rec.set(status="running", ended_at=None, error=None)
+        rec.set(status="running", ended_at=None, error=None, stop_reason=None)
         answered = False
         try:
             self.snapshot(None)
@@ -279,9 +309,10 @@ class MonitorRunner:
             was = sess.get("backend")
             if not sess.get("session_id") or not was or was in {v.backend for v in a.variants()}:
                 continue  # still one of its models (a backup may be in use); a turn on another provider starts afresh
-            prev = {k: v for k, v in sess.items() if k != "previous"}
+            prev = {k: v for k, v in sess.items() if k not in ("previous", "resets", "cut_off")}
             self.rec.update_session(a.name, session_id=None, turns=0, backend=a.backend,
-                                    previous=(sess.get("previous") or []) + [prev])
+                                    previous=(sess.get("previous") or []) + [prev], cut_off=None)
+            self.note_session(a.name, f"backend changed ({was} → {a.backend})", previous=prev.get("session_id"))
             note = self.tpl("backend_switched", agent=a.called, cwd=a.working_dir).strip()
             q = self.st.setdefault("fwd", {}).setdefault(a.name, [])
             cut = render(self.mon.controller.templates.get("turn_interrupted", "")).strip()
@@ -289,7 +320,7 @@ class MonitorRunner:
             if note:
                 q.insert(0, note)
             # a turn cut off on the old backend is re-sent in full on the new one, not resumed
-            self.rec.event("backend_switched", agent=a.name, old=was, new=a.backend, session_id=sess.get("session_id"))
+            self.rec.event("backend_switched", agent=a.name, old=was, new=a.backend, session_id=prev.get("session_id"))
             self.rec.progress(f"🔁 **{a.name}** moved from `{was}` to `{a.backend}`; it starts a new session")
             self.log(f"{a.name}: backend {was} → {a.backend}, starting a new session")
         self.rec.save()
@@ -444,12 +475,14 @@ class MonitorRunner:
             reset_at = (self.st["sessions"].get(agent.name) or {}).get("reset_at") or ""
             if sid and reset_at and reset_at >= (t.get("started_at") or ""):
                 sid = None  # the agent was reset after this turn: start fresh, as the reset asked
+            reached = bool(sid) and self._reached_session(agent, t)
             if sid:
                 sess = self.st["sessions"].get(agent.name) or {}
                 rec.update_session(agent.name, session_id=sid, backend=agent.backend, role=agent.role,
-                                   turns=int(sess.get("turns", 0)) + 1, last_turn=t["turn_id"], last_status="interrupted")
+                                   turns=int(sess.get("turns", 0)) + 1, last_turn=t["turn_id"], last_status="interrupted",
+                                   cut_off={"turn": t["turn_id"], "input": _cut_input(sess, t)} if reached else None)
                 note = self.mon.controller.templates.get("turn_interrupted", "")
-                if note:
+                if note and not reached:  # not sure the message got there: it is sent again, with a note
                     self.st.setdefault("fwd", {}).setdefault(agent.name, []).insert(0, render(note).strip())
             rec.event("turn_recovered", turn=t["turn_id"], agent=agent.name, session_id=sid)
             rec.progress(f"↻ {agent.name}'s turn `{t['turn_id']}` was cut off by the restart; "
@@ -486,12 +519,41 @@ class MonitorRunner:
             return "cut"
         return None
 
+    def watched(self, agent: AgentConfig) -> bool:
+        """Do progress checks watch this agent's turns (then only its safety limit stops them; managed mode)?"""
+        return False
+
     def yields_to(self, agent: AgentConfig, to: List[str]) -> bool:
         """Does an urgent message for one of `to` end this agent's running turn?"""
         return False
 
     def cut_short_note(self, agent: AgentConfig) -> str:
         return self.tpl("urgent_cut_short").strip()
+
+    def _reached_session(self, agent: AgentConfig, t: Dict[str, Any]) -> bool:
+        """Did a cut-off turn's message reach its session? Then the session already holds it (Claude Code writes the
+        prompt to the transcript before it starts work), and the turn is resumed with "continue", not sent again.
+        Evidence: the backend reported anything for the turn (the live log), or a Claude transcript starts with it."""
+        try:
+            if any(ln.strip() for ln in (self.rec.run_dir / "live" / f"{t['turn_id']}.jsonl")
+                   .read_text(encoding="utf-8").splitlines()):
+                return True
+        except OSError:
+            pass
+        return bool((t.get("output") or "").strip()) or bool(self._claude_session(agent, t))
+
+    def note_session(self, agent: str, reason: str, change: str = "reset", **info: Any) -> None:
+        """A session reset (or another change to an agent's session) and why: kept on the session until its next
+        turn records it (`session_reset` in the turn record), logged as an event and shown on the board as a small
+        system line."""
+        entry = {"reason": reason, "change": change, "at": now_iso(), **{k: v for k, v in info.items() if v is not None}}
+        with self.rec.lock:
+            s = self.st["sessions"].setdefault(agent, {"session_id": None, "turns": 0})
+            s.setdefault("resets", []).append(entry)
+        self.rec.event("session_note", agent=agent, **entry)
+        icon = {"compact": "🗜", "model": "🔀"}.get(change, "↺")
+        self.rec.progress(f"{icon} {agent}: " + (reason if change != "reset" else f"new session ({reason})"))
+        self.rec.save()
 
     def _live_session(self, turn_id: str) -> Optional[str]:
         try:
@@ -631,11 +693,16 @@ class MonitorRunner:
                                                  "keeping the settings it had")
             return
         try:
-            new = next(m for m in cfg.monitors if m.name == self.mon.name).agent(agent.name)
+            new_mon = next(m for m in cfg.monitors if m.name == self.mon.name)
+            self.refresh_reminders(new_mon.controller.reminders)
+            new = new_mon.agent(agent.name)
         except (StopIteration, KeyError):
             note("gone", f"{agent.name} is not in the config any more; keeping its settings")
             return
 
+        for k in RUN_PROMPT_VARS:  # set by the run itself (the golden board's path), not by the config
+            if k in agent.prompt_vars and k not in new.prompt_vars:
+                new.prompt_vars[k] = agent.prompt_vars[k]
         changed = {f: (getattr(agent, f), getattr(new, f)) for f in HOT_AGENT_FIELDS
                    if getattr(agent, f) != getattr(new, f)}
         cold = [f.name for f in dataclasses.fields(AgentConfig)
@@ -669,6 +736,28 @@ class MonitorRunner:
         self.log(f"{agent.name}: settings reloaded from the config ({', '.join(sorted(changed))})")
         self._config_notes = {**getattr(self, "_config_notes", {}), agent.name: ""}
 
+    def refresh_reminders(self, reminders: List[Dict[str, Any]]) -> None:
+        """Reminders edited in the config apply from the next turn (their counters carry on)."""
+        c = self.mon.controller
+        if reminders == c.reminders:
+            return
+        old = {r["id"]: r for r in c.reminders}
+        new = {r["id"]: r for r in reminders}
+        changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+        c.reminders = reminders
+        self.rec.progress("🔧 reminders changed in the config; applied from the next turn: " + ", ".join(changed))
+        self.rec.event("reminders_reloaded", changed=changed)
+
+    def add_reminders(self, agent: AgentConfig, prompt: str, purpose: str) -> Tuple[str, List[str]]:
+        """The prompt with the reminders due this turn at its end, and their ids. None outside managed mode."""
+        return prompt, []
+
+    def before_inbox(self, agent: AgentConfig) -> None:
+        """Called before a turn takes the agent's notes from inbox/ (managed mode records them first)."""
+
+    def on_prompt(self, agent: AgentConfig, turn_id: str, text: str, how: str) -> None:
+        """Called with what an agent was actually given (its prompt, or a note cut into its turn)."""
+
     # ------------------------------------------------------------------ turns
 
     def turn(self, agent: AgentConfig, prompt: str, rnd: int, purpose: str,
@@ -677,9 +766,11 @@ class MonitorRunner:
             raise StopRequested()
         self.refresh_agent(agent)
         rec = self.rec
+        base = prompt
         updates = rec.pending_worker_messages(agent.name) if agent.role == "worker" else []
         if updates:
             prompt = "\n\n".join(m["message"] for m in updates) + "\n\n" + prompt
+        self.before_inbox(agent)
         human = self.human_text(agent.name, rec.take_inbox(agent.name, broadcast=self.inbox_broadcast(agent)))
         if human:  # queued with the relayed messages, so a restart mid-turn re-sends it instead of losing it
             self.st.setdefault("fwd", {}).setdefault(agent.name, []).append(human)
@@ -688,11 +779,22 @@ class MonitorRunner:
         late = "\n\n".join(x for x in fwd if x)
         if late:
             prompt = f"{late}\n\n{prompt}" if prompt.strip() else late
-        if len(prompt) > LARGE_TEXT:
-            rec.progress(f"⚠ {agent.name}: a large prompt for `{rnd}` ({len(prompt):,} characters)")
-        seq = seq or rec.next_seq(rnd)
         sess = self.st["sessions"].get(agent.name) or {}
         sid = sess.get("session_id")
+        cut = sess.get("cut_off") if sid else None
+        new: List[str] = []
+        if cut:  # B7: the session already has the cut-off turn's message: "continue", plus only what is new since
+            had = _norm(cut.get("input") or "")
+            new = [x.strip() for x in [m["message"] for m in updates] + fwd + [base] if x.strip() and _norm(x) not in had]
+            prompt = "\n\n".join(new + [self.tpl("turn_continue").strip() or "continue"])
+        reminders: List[str] = []
+        if not cut or new:
+            prompt, reminders = self.add_reminders(agent, prompt, purpose)  # last, so the message ends with them
+        if reminders:
+            extra = {**(extra or {}), "reminders": reminders}
+            rec.save()  # the reminder counters
+        big_input = len(prompt) > self.large_text
+        seq = seq or rec.next_seq(rnd)
         record: Dict[str, Any] = {
             "turn_id": rec.turn_id(rnd, seq, agent.name),
             "round": rnd, "seq": seq, "agent": agent.name, "role": agent.role, "purpose": purpose,
@@ -702,14 +804,28 @@ class MonitorRunner:
             "system_prompt": agent.current_system_prompt(), "input": prompt, "output": "",
             **(extra or {}),
         }
+        resets_before, terminal_before = list(sess.get("resets") or []), sess.get("terminal_use")
+        resets = [x for x in resets_before if x.get("change") != "model"]
+        if resets:  # why this turn starts a new (or compacted) session: recorded with the turn
+            record["session_reset"] = resets
+        if cut:
+            record["continues"] = cut.get("turn")
+        if sid and sess.get("terminal_use"):  # turns typed in a terminal report no cost; this turn's increase has them
+            record["cost_includes_terminal"] = sess["terminal_use"]
         rec.write_turn(record)  # relayed messages stay queued until the turn ends, so a restart re-sends them
+        if big_input:
+            self.size_warning(agent, record, f"a large input ({len(prompt):,} characters)")
+        self.on_prompt(agent, record["turn_id"], prompt, "prompt")
         for m in updates:
             rec.worker_message_status(m["id"], "in_prompt", delivery_turn=record["turn_id"], via="prompt")
 
         def message_status(ident: str, status: str, details: Dict[str, Any]) -> None:
             rec.worker_message_status(ident, status, delivery_turn=record["turn_id"], **details)
 
+        reached: List[bool] = []  # the backend reported something in this attempt: the message is in the session
+
         def live_event(ev: Dict[str, Any]) -> None:
+            reached.append(True)
             if ev.get("k") == "input_accepted":
                 for m in updates:
                     message_status(m["id"], "accepted", {"via": "prompt"})
@@ -721,12 +837,19 @@ class MonitorRunner:
                                    session_key=v.session_key, model=v.label)
             rec.live(record["turn_id"], ev)
         self.log(f"r{rnd} ▶ {agent.name} ({purpose}{', resume ' + sid[:8] if sid else ', new session'})")
+        if sid and sess.get("model") and agent.variants() and sess["model"] != agent.variants()[0].label \
+                and sess.get("session_key") == agent.variants()[0].session_key and not self.start_variant(agent, len(agent.variants())):
+            # the model changed in the config; the session goes on (same provider), and the turn says so
+            record["model_change"] = {"from": sess["model"], "to": agent.variants()[0].label}
+            rec.event("session_note", agent=agent.name, change="model", at=now_iso(),
+                      reason=f"model changed ({sess['model']} → {agent.variants()[0].label}); same session")
+            rec.progress(f"🔀 {agent.name}: model changed ({sess['model']} → {agent.variants()[0].label}); same session")
         t0 = time.monotonic()
         res: TurnResult = TurnResult("error", "", sid)
         attempts: List[Dict[str, Any]] = []
         reason = ""
         lock = rec.agent_lock(agent.name)
-        lock.__enter__()
+        self.enter_agent_lock(lock)
         hit: List[str] = []
         cancel = self.turn_cancel(agent, hit)
         chain = agent.variants()
@@ -735,7 +858,8 @@ class MonitorRunner:
                                                else str(sess.get("backend")))
         v = chain[vi]
         backend = get_backend(v.backend)
-        attempt, urgent_send, entering = 0, "", True
+        attempt, urgent_send, entering, got_there = 0, "", True, False
+        waited, fixes = 0, 0  # B8: retries of the current model after a wait, and immediate corrections
         last_pe = ""  # the provider's message from the last attempt, if it refused the request
         while True:
             if entering:  # the primary model, or a backup taking over this turn
@@ -746,23 +870,36 @@ class MonitorRunner:
                 record.update(backend=v.backend, model=v.label, endpoint=host or None,
                               cost_basis=cost_basis(v.backend, [str(v.options.get("model") or "")], host))
                 if sid and v.session_key != sess_key:  # another provider can't continue this session: a new one
-                    sid = None
+                    old_sid, sid = sid, None
+                    if cut:  # the new session has none of it: the whole message goes again
+                        prompt = "\n\n".join(x for x in [m["message"] for m in updates] + fwd + [base] if x.strip())
+                        cut = None
                     note = self.fresh_session_note(agent)
                     if note:
                         prompt = f"{note}\n\n{prompt}"
+                    why = {"reason": f"backup {v.label} on another provider", "change": "reset", "at": now_iso(),
+                           "previous": old_sid}
+                    record.setdefault("session_reset", []).append(why)
                     record.update(session_id=None, resumed_session=False, input=prompt)
+                    rec.event("session_note", agent=agent.name, **why)
+                    rec.progress(f"↺ {agent.name}: new session ({why['reason']})")
                     rec.write_turn(record)
                 sess_key = v.session_key
             send = prompt
             if urgent_send:  # an urgent message cut in: the same session carries on with it
                 send, urgent_send = urgent_send, ""
+            elif attempt and sid and got_there:  # B7: the session has the message; don't send it again
+                send = self.tpl("turn_continue").strip() or "continue"
+                if not last_pe and res.status == "error" and (res.output or "").strip() == "" and res.exit_code == 0:
+                    send = self.tpl("turn_unusable", reason=reason or res.status).strip() or send
             elif attempt and res.session_id and not last_pe:  # correction: tell the agent what went wrong in its own session
                 send = (f"Your previous reply was unusable ({reason or res.status}). "
                         f"Please redo the last request and reply with text.\n\n{prompt}")
             hit.clear()
+            reached.clear()
             req = TurnRequest(
                 agent=agent.name, role=agent.role, prompt=send, system_prompt=record["system_prompt"],
-                session_id=sid, cwd=agent.working_dir, timeout=agent.timeout,
+                session_id=sid, cwd=agent.working_dir, timeout=agent.turn_limit(self.watched(agent)),
                 options=v.options, env={**v.env, _jobs.TAG_VAR: _jobs.tag_for(rec.run_dir.name, agent.name)},
                 context={"round": rnd, "purpose": purpose, "monitor": self.mon.name,
                          "roster": [a.name for a in self.mon.agents], **(extra or {})},
@@ -772,15 +909,17 @@ class MonitorRunner:
                 on_message=message_status if agent.role == "worker" else None,
             )
             try:
-                res = backend.run(req, cancel)
+                res = self.run_backend(backend, req, cancel)
             except Exception:
                 res = TurnResult("error", "", sid, None, traceback.format_exc(), [], {})
+            got_there = bool(reached) or bool((res.output or "").strip()) or bool(res.meta)
             pe = provider_error(res)
             if pe:  # the provider's refusal is not the agent's reply: it stays out of the turn's output
                 res = dataclasses.replace(res, output="")
             last_pe = pe
             if res.status == "stopped" and hit and not self.should_stop():
                 if hit[0] == "resume":  # the message is for this agent: it continues, with the message first
+                    self.before_inbox(agent)
                     note = self.human_text(agent.name, rec.take_inbox(agent.name, broadcast=self.inbox_broadcast(agent)))
                     sid = res.session_id or self._live_session(record["turn_id"]) or sid
                     if note:  # queued like any message until the turn ends, so a restart re-sends it
@@ -789,6 +928,8 @@ class MonitorRunner:
                         prompt = f"{note}\n\n{prompt}"  # what a correction or a fresh session re-sends
                     urgent_send = self.tpl("urgent_resume", note=note or "(no text)") if sid else prompt
                     record.setdefault("interruptions", []).append({"at": now_iso(), "message": note})
+                    if note:
+                        self.on_prompt(agent, record["turn_id"], note, "cut in")
                     record["session_id"] = sid
                     rec.write_turn(record)
                     rec.event("urgent", turn=record["turn_id"], how="resume")
@@ -814,9 +955,38 @@ class MonitorRunner:
             if res.status in ("ok", "stopped", "needs_human", "timeout") or self.should_stop():
                 break  # a timed-out turn is not re-run from scratch (it may have been running a long job)
             self.log(f"r{rnd} ✗ {agent.name} attempt {attempt + 1} ({v.label}) → {res.status}" + (f" ({pe})" if pe else ""))
-            if attempt < v.retries:
+            bill = (billing_error(dataclasses.replace(res, output=pe or res.output)) if res.status == "error"
+                    else "")  # the provider's message was taken out of the output above
+            if bill:  # B8: a billing or account problem: no retry or backup; the run stops and the user is told
+                record["billing_error"] = bill
+                reason = f"billing or account problem: {bill}"
+                attempts[-1]["reason"] = reason
+                rec.event("billing_error", turn=record["turn_id"], agent=agent.name, model=v.label,
+                          problem=f"{agent.name} ({v.label}): billing or account problem; the run stops: {bill}")
+                rec.progress(f"⛔ `{record['turn_id']}` **{agent.name}** (`{v.label}`): billing or account problem "
+                             f"({bill}). No retry or backup; the run stops. Fix the account and resume.")
+                self.log(f"r{rnd} ⛔ {agent.name}: billing or account problem; stopping")
+                break
+            # B8: a provider error, overload, rate limit or crash (anything but an unusable reply) is retried on the
+            # same model after each of the configured waits (1, 2, 4 min); an unusable reply (exit 0, no text) gets
+            # the `retries` immediate corrections. Then the backups take over in order.
+            waits = list(getattr(agent, "retry_waits", []) or [])
+            transient = bool(pe) or not reason
+            if transient and waits:
+                if waited < len(waits):
+                    secs = waits[waited]
+                    waited += 1
+                    self.retry_wait(agent, record, v, waited, len(waits), secs, pe or reason or res.status)
+                    if self.should_stop():
+                        break
+                    attempt += 1
+                    continue
+            elif fixes < v.retries:
+                fixes += 1
                 if pe:
                     self.wait_provider(agent, pe)
+                if self.should_stop():
+                    break
                 attempt += 1
                 continue
             if vi + 1 >= len(chain):
@@ -825,16 +995,27 @@ class MonitorRunner:
             record.setdefault("fallbacks", []).append({"at": now_iso(), "from": v.label, "to": nxt.label,
                                                        "reason": reason or res.status})
             rec.event("fallback", turn=record["turn_id"], agent=agent.name, old=v.label, new=nxt.label,
-                      reason=reason or res.status)
+                      reason=reason or res.status, backup=vi + 1)
+            self.set_reliability(agent, model=nxt.label, state="switched", reason=reason or res.status)
             rec.progress(f"↪ `{record['turn_id']}` **{agent.name}**: `{v.label}` failed ({reason or res.status}); "
                          f"switching to backup `{nxt.label}`")
             self.log(f"r{rnd} ↪ {agent.name}: {v.label} failed, switching to backup {nxt.label}")
-            vi, attempt, entering = vi + 1, 0, True
+            vi, attempt, entering, waited, fixes = vi + 1, 0, True, 0, 0
         lock.__exit__(None, None, None)
+        if attempts:  # the model this turn ended on (after any switch to a backup)
+            self.turn_models = {**(getattr(self, "turn_models", None) or {}), agent.name: v.label}
+        if res.status == "ok" and v.index and agent.fallback_cooldown > 0:  # the board says it is on a backup
+            self.set_reliability(agent, model=v.label, state="backup", primary=chain[0].label, reason=None,
+                                 until=time.time() + agent.fallback_cooldown)
+        elif res.status == "ok":
+            self.set_reliability(agent, state=None)
+        elif res.status == "error":
+            self.set_reliability(agent, model=v.label, state="failed", reason=reason or res.status)
         if res.status == "ok":
             for m in updates:
                 message_status(m["id"], "accepted", {"via": "prompt"})
-        if fwd and res.status != "stopped" and not self.should_stop():  # a stopped turn is re-sent on resume
+        billing = bool(record.get("billing_error"))
+        if fwd and res.status != "stopped" and not billing and not self.should_stop():  # a stopped turn is re-sent on resume
             left = (self.st.get("fwd") or {}).get(agent.name) or []
             if left[:len(fwd)] == fwd:
                 del left[:len(fwd)]
@@ -858,17 +1039,33 @@ class MonitorRunner:
                                session_key=v.session_key, model=v.label,
                                turns=int(sess.get("turns", 0)) + 1, last_turn=record["turn_id"],
                                last_status=res.status)
+        if res.status != "stopped":  # recorded with this turn; a stopped turn is recovered (and records them) later
+            now = self.st["sessions"].get(agent.name) or {}  # (notes made during the turn stay for the next one)
+            rec.update_session(agent.name, cut_off=None,
+                               resets=[x for x in now.get("resets") or [] if x not in resets_before],
+                               terminal_use=None if now.get("terminal_use") == terminal_before else now.get("terminal_use"))
         rec.write_turn(record)
         try:
             self.snapshot(record)
         except Exception:
             self.log("snapshot failed:\n" + traceback.format_exc())
-        if len(res.output or "") > LARGE_TEXT:
-            rec.progress(f"⚠ `{record['turn_id']}` **{agent.name}**: a large reply ({len(res.output):,} characters)")
+        if getattr(res, "raw", ""):  # B8: the raw event stream is never the reply; kept beside it for debugging
+            path = rec.write_raw_stream(record, res.raw)
+            record["raw_stream"] = {"file": path.name, "chars": len(res.raw)}
+            rec.write_turn(record)
+            if len(res.raw) > self.large_text:
+                self.size_warning(agent, record, f"its raw event stream ({len(res.raw):,} characters) was kept "
+                                                 f"apart in {path.name}; the reply is the final message only")
+        if len(res.output or "") > self.large_text:
+            self.size_warning(agent, record, f"a large reply ({len(res.output):,} characters)")
         rec.progress(f"- `{record['turn_id']}` **{agent.name}** · {purpose} → **{res.status}** ({dur}s)"
                      + (f" · provider: {last_pe}" if last_pe else ""))
         self.log(f"r{rnd} ■ {agent.name} → {res.status} in {dur}s")
         if res.status == "stopped":
+            raise StopRequested()
+        if billing:  # B8: stop the whole run (as `orch stop` would); the board says why; resume once it is fixed
+            rec.set(stop_reason=f"billing or account problem ({agent.name}, {v.label}): {record['billing_error']}")
+            (rec.run_dir / "STOP").write_text("billing or account problem\n", encoding="utf-8")
             raise StopRequested()
         if res.status == "ok" and (self.st.get("asked") or {}).get("agent") == agent.name:
             rec.set(asked=None)  # the question has been dealt with
@@ -877,6 +1074,14 @@ class MonitorRunner:
             raise NeedsHuman(record, reason)
         record["reason"] = reason
         return record
+
+    def run_backend(self, backend: Any, req: TurnRequest, cancel: Callable[[], bool]) -> TurnResult:
+        """The backend's turn itself (managed mode lets other threads use the run state meanwhile)."""
+        return backend.run(req, cancel)
+
+    def enter_agent_lock(self, lock: Any) -> None:
+        """Take an agent's turn lock (managed mode waits for it without holding the run state)."""
+        lock.__enter__()
 
     def stage(self, items: List[Tuple[AgentConfig, str, str]], rnd: int, parallel: bool) -> List[Dict[str, Any]]:
         """Run several turns, in order or concurrently. Returns records in item order."""
@@ -940,10 +1145,62 @@ class MonitorRunner:
         while time.monotonic() < end and not self.should_stop():
             time.sleep(min(0.5, max(0.0, end - time.monotonic())))
 
+    @property
+    def large_text(self) -> int:
+        return int(getattr(self.mon.controller, "large_text", 0) or LARGE_TEXT)
+
+    def size_warning(self, agent: AgentConfig, record: Dict[str, Any], what: str) -> None:
+        """B8: an out-of-range size is a board warning; nothing is cut."""
+        record.setdefault("size_warnings", []).append(what)
+        self.rec.progress(f"⚠ `{record['turn_id']}` **{agent.name}**: {what}")
+        self.rec.event("size_warning", turn=record["turn_id"], agent=agent.name,
+                       problem=f"{agent.name} `{record['turn_id']}`: {what}")
+
+    def set_reliability(self, agent: AgentConfig, **kw: Any) -> None:
+        """The agent's live retry / switch state in state.json (`reliability`), for the board; cleared on success."""
+        st = self.st.setdefault("reliability", {})
+        if kw.get("state") is None:
+            if st.pop(agent.name, None) is not None:
+                self.rec.save()
+            return
+        st[agent.name] = {**{k: v for k, v in kw.items() if v is not None}, "at": now_iso()}
+        self.rec.save()
+
+    def retry_wait(self, agent: AgentConfig, record: Dict[str, Any], v: Any, n: int, of: int, secs: float,
+                   reason: str) -> None:
+        """B8: wait, then run the turn again on the same model; recorded with the turn, in state and on the board."""
+        rec = self.rec
+        entry = {"at": now_iso(), "model": v.label, "retry": n, "of": of, "wait_s": secs, "reason": reason}
+        record.setdefault("retries", []).append(entry)
+        rec.write_turn(record)
+        rec.event("retry", turn=record["turn_id"], agent=agent.name, **{k: entry[k] for k in entry if k != "at"})
+        rec.progress(f"⏳ `{record['turn_id']}` **{agent.name}**: `{v.label}` failed ({reason}); retry {n}/{of} "
+                     f"on the same model in {secs:g}s")
+        self.log(f"{agent.name}: {v.label} failed ({reason}); retry {n}/{of} in {secs:g}s")
+        self.set_reliability(agent, model=v.label, state="retrying", retry=n, of=of, wait_s=secs, reason=reason,
+                             until=time.time() + secs)
+        self.pause(secs)
+
+    def pause(self, secs: float) -> None:
+        """Sleep for `secs`; a stop request ends the wait. (Tests replace it with a fake clock.)"""
+        end = time.monotonic() + max(0.0, float(secs))
+        while time.monotonic() < end and not self.should_stop():
+            time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+
     def report_text(self, r: Optional[Dict[str, Any]]) -> str:
         if not r:
             return "(no report yet)"
-        body = relayed(r.get("output") or "(empty output)", self.mon.controller.max_report_chars)
+        output = r.get("output") or ""
+        incomplete = r.get("status") in ("timeout", "stopped", "error", "interrupted")
+        if incomplete:
+            # Older records stored the raw stream in output. Recover without changing history or sessions.
+            recovered = claude_stream_report(output)
+            if recovered is not None:
+                output = recovered
+        body = relayed(output or "(empty output)", self.mon.controller.max_report_chars)
+        if incomplete:
+            notice = "The text below may be incomplete." if output else "No assistant text was recovered."
+            body = f"[Incomplete turn: {r['status']}. {notice}]\n\n" + body
         if r.get("status") != "ok" and r.get("stderr"):
             body += "\n\nstderr (tail):\n```\n" + r["stderr"][-1500:] + "\n```"
         return body

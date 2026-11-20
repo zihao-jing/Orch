@@ -193,6 +193,8 @@ class Recorder:
             meta = rec.get("meta") or {}
             if rec.get("status") != "running" and isinstance(meta.get("total_cost_usd"), (int, float)) \
                     and "turn_cost_usd" not in meta:
+                # board chats in this session that ended before this turn are charged first, each on its own
+                self.charge_chats(rec.get("ended_at") or now_iso())
                 meta["turn_cost_usd"] = self.turn_cost(rec.get("session_id"), meta["total_cost_usd"])
             write_json(d / f"{stem}.json", rec)
             (d / f"{stem}.input.md").write_text(rec.get("input", ""), encoding="utf-8")
@@ -211,6 +213,49 @@ class Recorder:
                    turn=rec["turn_id"], agent=rec["agent"], status=rec["status"],
                    session_id=rec.get("session_id"), duration_s=rec.get("duration_s"))
         self.refresh_reports()
+
+    def write_raw_stream(self, rec: Dict[str, Any], raw: str) -> Path:
+        """B8: a turn's raw event stream, kept only for debugging when the reply had to be parsed out of it (an
+        error or a cut-off): `tNN-<agent>.stream.jsonl` beside the turn. Never the reply itself."""
+        p = self.round_dir(rec["round"]) / f"t{rec['seq']:02d}-{rec['agent']}.stream.jsonl"
+        p.write_text(raw, encoding="utf-8")
+        return p
+
+    def charge_chats(self, upto: str = "") -> List[Dict[str, Any]]:
+        """Board-chat turns run in the agents' own sessions (orch/board.py), and Claude reports a session's running
+        total. Each finished chat turn is an entry of its own: its cost is the increase over the session's last
+        report (the baseline is kept per session, for orch's turns and chat turns alike), so the next orch turn in
+        that session is charged only its own. Chat turns that ended up to `upto` are taken in time order, once."""
+        out: List[Dict[str, Any]] = []
+        p = self.run_dir / "chat.jsonl"
+        if not p.is_file():
+            return out
+        with self.lock:
+            done = self.state.setdefault("chat_costs", {})
+            rows = []
+            for ln in p.read_text(encoding="utf-8").splitlines():
+                try:
+                    c = json.loads(ln)
+                except ValueError:
+                    continue
+                if not isinstance(c, dict) or c.get("role") not in ("manager", "agent") or c.get("id") in done \
+                        or c.get("status") in (None, "running") or not isinstance(c.get("cost"), (int, float)):
+                    continue
+                if upto and (c.get("ts") or "") > upto:
+                    continue
+                rows.append(c)
+            for c in sorted(rows, key=lambda c: c.get("ts") or ""):
+                cost = self.turn_cost(c.get("session_id"), float(c["cost"]))
+                entry = {"agent": c.get("who") or c.get("with") or "manager", "session_id": c.get("session_id"),
+                         "ts": c.get("ts"), "cost_usd": cost}
+                done[c["id"]] = entry
+                self.state["cost_usd"] = round(self.state.get("cost_usd", 0.0) + cost, 6)
+                out.append({"id": c["id"], **entry})
+            if out:
+                self.save()
+        for e in out:
+            self.event("chat_cost", chat=e["id"], agent=e["agent"], session_id=e["session_id"], cost_usd=e["cost_usd"])
+        return out
 
     def turn_cost(self, session_id: Optional[str], total: float) -> float:
         """Claude reports a resumed session's running total, not the turn's own cost: take the increase."""
@@ -335,7 +380,9 @@ class Recorder:
             out.append({"to": [to] if isinstance(to, str) else to})
         return out
 
-    def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause", "night")) -> List[Dict[str, Any]]:
+    def take_control(self, kinds: tuple = ("answer", "gate", "job", "pause", "night", "reply", "correction",
+                                           "terminal", "discussion", "milestone", "review",
+                                           "review_comments", "chat_question")) -> List[Dict[str, Any]]:
         """Consume answer / approval files from inbox/ (oldest first)."""
         inbox = self.run_dir / "inbox"
         out: List[Dict[str, Any]] = []
@@ -361,6 +408,19 @@ class Recorder:
 
     def agent_lock(self, agent: str):
         return agent_lock(self.run_dir, agent)
+
+    def agent_busy(self, agent: str) -> bool:
+        """Is a turn of this agent running now (in this process or another, e.g. a board chat)?"""
+        import fcntl
+        d = self.run_dir / "locks"
+        d.mkdir(exist_ok=True)
+        with open(d / f"{agent}.lock", "w") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            return False
 
     def claim(self) -> Optional[str]:
         """Take the run lock: one controller per run, also across processes. Returns None when taken, else a

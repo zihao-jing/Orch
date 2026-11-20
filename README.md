@@ -25,7 +25,8 @@ in the terminal.
 ```bash
 cd Orch
 pip install -e .            # or: pip install pyyaml  and use `python -m orch`
-python -m unittest discover tests     # mock backend, no API calls
+python tests/run.py                   # all tests in parallel (~25 s); mock backend, no API calls
+python tests/run.py routing opencode  # only tests whose id contains a word; --failed reruns last failures
 
 cd ~/code/my-project
 orch init . --project       # scaffolds .orch/agents/{manager,critic,worker}/
@@ -51,8 +52,9 @@ There is no separate project file: the team is the set of agent folders.
       system_prompt.md   this agent's prompt in this project (starts as a copy of the role's default)
       memory.md          your notes and preferences for it (also memory/*.md); added to its system prompt
       state.md           its working state in the current run, kept by orch (gitignored; you can edit it)
-    critic/   agent.yaml  system_prompt.md  memory.md  state.md
+    critic/   agent.yaml  system_prompt.md  memory.md  state.md  checklist-m<N>.md (its steps and checklist)
     worker/   agent.yaml  system_prompt.md  memory.md  state.md
+  golden.md              the golden board: rules, my preferences, key decisions; every agent reads it
   runs/                  run logs (gitignored)
 ```
 
@@ -63,13 +65,13 @@ of update for each piece:
 
 | file | holds | written |
 |---|---|---|
-| `manager/state.md` | the standing instruction for the critic and the decisions that still hold | by the manager, in a `<state>` tag, whenever it writes to the critic (a milestone starts or is sent back, an answer changes the work, a restart) |
-| `critic/state.md` | that standing instruction ("my standing instruction") and the critic's checklist | by orch, after every review and every change of the manager's state |
+| `manager/state.md` | the standing instruction for the critic and what still holds for the current work | by the manager, in a `<state>` tag (or by editing the file) only when it changes |
+| `critic/state.md` | that standing instruction ("my standing instruction"), the critic's steps and current checklist (from its checklist file) | by orch, after every critic turn and every change of the manager's state |
 | `worker/state.md` | the worker's latest report | by orch, after every worker turn |
 
-Whenever an agent starts a fresh session (`orch reset-sessions`, a changed backend, or `fresh_session: milestone`
-for the manager or critic), its notes are built from its `state.md` and what happened since it was written (for the
-manager: the decisions made since), at the moment its next turn starts. The agents are not asked to read the files
+Whenever an agent starts a fresh session outside a milestone start (`orch reset-sessions`, a changed backend, or
+`fresh_session: milestone` for the manager), its notes are built from its `state.md` and what happened since it was written, at the
+moment its next turn starts; the golden board comes with that first message. The agents are not asked to read the files
 themselves: orch puts what they need into the message. You can edit any of them between turns: orch notices, and the agent's
 next turn starts with "I edited your working notes; they now read: …" (an edit of the manager's also updates the
 critic's). Each file names its run; a new run moves the previous run's files into that run's folder
@@ -104,8 +106,10 @@ checkin_every: 2            # a status line for the manager every 2 rounds (0 = 
 role: worker
 backend: claude
 backend_options: {model: sonnet, effort: medium, permission_mode: auto}
-timeout: 7200               # per turn; long jobs run in the background, and orch waits for them between turns
-fresh_session: milestone    # a new session for each milestone
+safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
+check_every: 20             # minutes between quick checks of a running turn or job (0 = off)
+fresh_session: milestone    # a new session for each milestone (the default for the critic and workers; "never" keeps it)
+# compact_between_steps: true  # Claude Code: /compact between steps of the critic's plan (never mid-task)
 ```
 
 | You want to set… | Where |
@@ -116,9 +120,11 @@ fresh_session: milestone    # a new session for each milestone
 | **An agent's prompt** | its `system_prompt.md` (missing: the role default in `orch/prompts/<role>.md`) |
 | Project notes and preferences | its `memory.md` and `memory/*.md`, added after the prompt ("Things to keep in mind:"; HTML comments are ignored) |
 | Display names used in messages | `display_name:` in each `agent.yaml`; fills `{{manager}}`, `{{critic}}`, `{{worker}}` in the prompts |
-| Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `tag_reminder` |
+| Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `reminders` |
 | Rounds per milestone, checklist, check-ins, job waiting | `critic/agent.yaml`: `milestone_rounds`, `checklist`, `checklist_nudge`, `checkin_every`, `job_wait`, `job_ignore` |
-| Fresh sessions, saved versions of files | `worker/agent.yaml`: `fresh_session`, `snapshot` |
+| Fresh sessions, compacting, saved versions of files | `worker/agent.yaml` (or any agent's): `fresh_session`, `compact_between_steps`, `snapshot`; context length: `backend_options.extra_args: ["--autocompact", "400k"]` |
+| Progress checks: interval, turn limit | `worker/agent.yaml`: `check_every`, `safety_timeout`; `manager/agent.yaml`: `check_every` (its status lines) |
+| Who checks, and where | `monitor/agent.yaml` (model, tools, `check_session`); without it, `critic/agent.yaml`: `check_session` |
 | Where runs are recorded | `output_dir:` in any `agent.yaml` (default `.orch/runs`) |
 | The agents' working directory | `working_dir:` per agent (relative to the project root) |
 | The exact wording of routed prompts | `templates:` (see `orch/templates.py` for the names and `{{placeholders}}`) |
@@ -141,8 +147,8 @@ Three layers of review, so each layer above reads less. Agents: exactly one `rol
 |---|---|---|
 | plan | manager | splits the goal into a numbered milestone list + a scored rubric → **I approve** (`approve_plan`) |
 | kickoff | manager → critic | a high-level note for the milestone |
-| brief | critic → worker | the critic breaks the note into a `<plan>` of steps and gives the worker the first one, with a checklist for it |
-| rounds | worker ↔ critic | one step of the critic's `<plan>` at a time; each review ends with `<plan>` + `<checklist>` (current step) + `<verdict>`; up to `milestone_rounds` rounds without a step finishing |
+| brief | critic → worker | the critic writes its steps and the first step's checklist in its checklist file and gives the worker the first step |
+| rounds | worker ↔ critic | one step at a time; at each review the critic edits its checklist file in place and ends with `<verdict>`; up to `milestone_rounds` rounds without a step finishing |
 | report | critic → manager | milestone report (tables first) |
 | review | manager | scores per criterion + `<score>` + `<decision>ACCEPT/REVISE</decision>` (`min_score` optional); REVISE → guidance to the critic |
 | gate | me | the manager's summary → **I approve** or send it back (`approve_milestones`) |
@@ -162,9 +168,8 @@ When the manager asks a side question during a critic review, the critic puts it
 manager without exposing that role in the prompt; explicit agent names remain supported. The manager speaks
 as "I" to the critic, and the critic addresses it as "you". Downstream messages present decisions as the
 sender's own, without naming an upstream user. Use neutral display names to keep role names out of prompts.
-With the protocol enabled, every
-critic review/instruction turn includes this routing reminder, including resumed sessions; it is independent
-of `tag_reminder`. Tagged answers are queued for the manager's next run turn, without creating an immediate
+With the protocol enabled, a
+critic review/instruction turn that carries a message from the manager ends with a one-line routing reminder. Tagged answers are queued for the manager's next run turn, without creating an immediate
 board-chat response. Dedicated critic reports and check-ins still address the manager directly.
 
 | tag | written by | what orch does |
@@ -172,44 +177,99 @@ board-chat response. Dedicated critic reports and check-ins still address the ma
 | `<message to="…">…</message>` | anyone | delivers the block to that agent only (the manager's instructions and answers to the critic, the critic's notes to the manager) |
 | `<question>…</question>` | worker → critic, critic → manager, manager → me | one decision per tag; recorded (Q1, Q2 …) and passed up one level; the run does not wait |
 | `<pause>…</pause>` | critic (a proposal) / manager (a pause) | the critic's goes to the manager; the manager's stops the whole run until I continue it |
-| `<state>…</state>` | manager | saved as `manager/state.md` (and the critic's standing instruction); a fresh session starts from it |
-| `<plan>…</plan>` | critic | its steps for the current work, `- [x]` done / `- [ ]` not yet. The worker gets one step at a time and never sees the plan. A step ticked is progress: the `milestone_rounds` count starts again, the board shows "step k of n", and a check-in is one status line from the plan (no model turn). Kept across fresh sessions; a new milestone starts without one |
-| `<checklist>…</checklist>` + `<verdict>PASS\|FAIL</verdict>` | critic | the checklist covers the current step and standing rules; a PASS counts only when every item and every step of the plan is `[x]` (a PASS with steps open goes back with "hand out the next step"). The list is the critic's own: the worker never gets it (also when the critic forgets the tag), and the manager sees the latest plan and list with each milestone report |
+| `<state>…</state>` | manager | only when it changes: saved as `manager/state.md` (and the critic's standing instruction); a fresh session starts from it |
+| `<verdict>PASS\|FAIL</verdict>` | critic | checked against its checklist file: a PASS counts only when every item of every step is `[x]` (a PASS with steps open goes back with "hand out the next step") |
+| `<plan>`, `<checklist>` | critic (older protocol) | still accepted: written into the checklist file, unless the critic edited the file in that turn (then the file holds and the block is ignored) |
+
+**Step checklist.** The critic keeps its steps and checklist in one file per milestone,
+`agents/critic/checklist-m<N>.md`, and edits it in place (agents edit boards; they don't re-output them): one
+`## Step N: …` section per step with its `- [ ]` / `- [x]` items, and `## Standing rules` for items that hold for every
+step. A step is done when all its items are `[x]`; a finished step is progress (the `milestone_rounds` count starts
+again, the board shows "step k of n", a check-in is one status line from the steps, no model turn). The worker never
+sees the file; the manager sees the steps and the current list with each milestone report. Above about 25 items in
+the current step's list the critic is asked once to merge them. A file left from an earlier run is moved aside
+(`checklist-m1.earlier-<time>.md`) when the milestone starts.
+
+**Golden board.** `.orch/golden.md` (`golden_board:` to move it; golden.md beside the runs for a config file) holds
+the rules, my preferences and the key decisions. The manager owns it and edits it in place: it adds what I settle,
+merges and prunes. Every agent gets it at the end of a message (the `golden_board` reminder): once whenever it
+changed, with the first message of a new session, and every 10th turn; the manager's own edit is not sent back to
+it. The critic and the worker read it as their user's standing rules; a board that names a layer above one of them
+(the manager's or critic's name, "manager", "orch") is held from it, with a warning and a note to the manager. Above
+`golden_limit` (8000 characters) the board warns and the manager is asked once to prune; again only after it grows.
+The board page shows it in place of the decisions list.
 | `<score>x</score>` + `<decision>ACCEPT\|REVISE</decision>` | manager, milestone review | accepts the milestone or sends it back |
 | `<decision>PAUSE\|CONTINUE</decision>` | manager, on a proposed pause | stops the run, or sends the critic what to do meanwhile |
-| `<no-wait pid="…"/>` | worker | the review does not wait for that process (orch finds the worker's detached jobs itself) |
+| `<wait-job/>` | critic | in place of a verdict: the step waits for the worker's running job(s) (`pid="…"` for some) |
 
 The boundaries: the manager doesn't edit files and keeps milestones, rubric and scores to itself; the critic only
 reviews (no edits, no fixes written for the worker, no wider scope); the worker changes only what the work needs,
 commits nothing unless asked, writes no notes or status files, caps and pilots anything that spends, never starts
 a job twice and never keeps its turn open to wait (orch waits for its jobs between turns).
 
-**Tag reminders.** With probability `tag_reminder` (default 0.2) a turn's message ends with a short
-`<system-reminder>` listing that role's tags, worded as a reminder rather than a request, so an agent deep in a long
-session keeps the protocol in view without being pushed to add tags it doesn't need. The board marks those turns.
+**Reminders.** Short `<system-reminder>` lines at the end of a turn's message, at intervals rather than every turn
+(`orch/reminders.py`): `concise` (all, every 3–6 turns), `protocol` (whom the agent may address and the tag form; all,
+every 3–10 turns at random), `report_length` (worker, every 3rd turn), `chat_voice` (board chat with the manager:
+write to the critic as "I", keep the chat out of it; the first chat message of a session, then every 3rd);
+`golden_board` (the golden board itself, see above; every 10 turns and on each change). `only: [chat]` limits a reminder to board chat, where it counts
+chat messages instead of turns. Change them under `reminders:` in any agent.yaml; edits apply from the next turn:
+
+```yaml
+reminders:
+  concise: {every: 4}        # a default's schedule
+  report_length: false       # a default off
+  cite_files:                # a new one: text (or role: text), to (roles, agent names or all), every N or random [lo, hi]
+    text: "Name the file behind every number you report."
+    to: [worker]
+    random: [3, 8]
+```
+
+`reminders: false` turns them off; the older `tag_reminder: <chance>` sets the protocol reminder's schedule (0 = off).
+Each turn record lists the reminders sent (`reminders`), and the board marks them. Automatic checks read messages
+without them.
 
 **Fresh sessions mid-run.** `orch reset-sessions <project> [--agent NAME]` (with the run stopped) clears the agents'
 conversations and keeps everything else: the phase, milestone, rounds, questions, decisions and records. When the
 manager is reset in the middle of a milestone (the default, all three), the work restarts top-down: the manager gets
-the goal, its approved plan and rubric, the milestone table, its `state.md`, the critic's newest message and the
-decisions made since its state was written, and writes the critic a short instruction on what to continue with (and
-a fresh `<state>`); the critic, with its checklist and a pointer to the decisions file, turns that into concrete
+the goal, its approved plan and rubric, the milestone table, its `state.md` and the critic's newest message, and
+writes the critic a short instruction on what to continue with (and a fresh `<state>`); the critic, with its
+checklist file, turns that into concrete
 steps for the worker; the worker starts with only that. A cut-off turn is replaced by this, not sent again. Resetting one agent alone gives it
 a handover instead, from its `state.md`: the critic its standing instruction, checklist and latest review in short;
-the worker its latest report in short. The worker never gets the decisions list or anything about the people above the critic:
+the worker its latest report in short. The worker never gets anything about the people above the critic:
 what the work must keep to reaches it in the critic's instructions. The notes are written when each agent's next turn starts, not at the reset, so they show where the run is then; until that turn, the agent's queue in `state.json` (`fwd`) holds a placeholder. The manager's notes include the critic's newest message of any kind with its checklist count, not just its last report. The board chat follows the new session.
 
 **Decisions register.** Everything settled during the run is kept in one list, `decisions.md` in the run folder: my
 answers and notes, messages I add at a gate, and the manager's answers to the critic, each with who decided and
-when (S1, S2 …; where two say different things, the later one holds). The manager's kickoff, the critic's brief
-and a fresh worker session get the whole list at the start of every milestone, so decisions don't have to survive
-a chain of relayed notes. The board shows it under **Decisions**. A run started before the register existed has it
-rebuilt from its history on resume.
+when (S1, S2 …; where two say different things, the later one holds). It is a record: the agents read the golden
+board instead, which the manager keeps. The board shows it folded under the golden board. A run started before the
+register existed has it rebuilt from its history on resume.
 
-**Fresh worker sessions.** `fresh_session: milestone` on an agent starts it in a new session when each milestone
-starts; its work is in the files, and the critic's brief plus the register tell it what it needs. A long session
-re-reads its whole history on every step, so this keeps worker turns from getting slower and dearer as a run goes
-on. The manager and critic are best left in one session: they are cheap, and they need to remember the decisions.
+**Sessions and context.** At each milestone start the critic and the workers start new sessions (`fresh_session`:
+default `milestone` for them; `never` keeps the session): their system prompt and a short natural instruction ("We are
+starting a new part of the work…", then the manager's or the critic's instruction), nothing pasted from earlier rounds.
+What holds is on the golden board (sent with a new session's first message) and in the critic's checklist file,
+which the agents read. The manager keeps its session (unless set to `fresh_session: milestone`). Within a milestone
+the worker keeps its session across the steps of the critic's plan.
+
+Compaction is the CLI's job: Claude Code compacts on its own (set the window per agent with
+`backend_options.extra_args: ["--autocompact", "400k"]`); orch doesn't count context. `compact_between_steps: true`
+adds one explicit compact when a step of the critic's plan finishes, before the agent's next turn (never mid-task):
+Claude Code gets `/compact` as the prompt of `claude -p --resume <session>` (`backend_options.compact_instructions`
+are passed after it). It is recorded as a `compact` turn with its own cost. Codex and the other backends have no
+compact on request: the setting is skipped there with one note, and their own context handling applies.
+
+A turn cut off after its message reached the session (a restart, a crash, a provider error; Claude Code writes the
+prompt to the session before it starts work) is resumed with `continue`, plus only what is new since; the message is
+not sent again. When orch can't tell whether it arrived, the message is sent again with a note. Every session reset
+(milestone start, refresh, backend change, fallback to another provider, a board chat or terminal that moved the
+session) and every compact or model change is recorded with its reason in the next turn's record (`session_reset`,
+`model_change`) and in `events.jsonl` (`session_note`), and shown on the board as a small system line.
+
+**Cost per turn.** Claude Code reports a session's running total, so a turn's cost is the increase over the session's
+previous report. Board-chat turns run in the agents' own sessions and are entries of their own (`chat_costs` in
+`state.json`, `chat_cost` events), so the next orch turn is charged only its own. Turns typed in a terminal session
+report nothing to orch; the next orch turn's increase includes them (`cost_includes_terminal` in its record).
 
 **Pausing the whole run.** A pause stops the pipeline itself: no agent works and no rounds are spent until I
 continue it. It is for the point where everything the agents can do is done and the rest waits on people
@@ -222,14 +282,64 @@ then tells the worker what to do next.
 
 **Waiting for the worker's own jobs.** orch finds them itself: a process that started during the worker's turn, is
 still running after the turn ends, runs inside the workspace and was detached from the agent (`nohup … &`, so its
-parent is the system's init process) is a job; processes of mine, an editor or a terminal never count. While a job
-runs, the critic's review is held (no review spent on unfinished work, and none of it counts against the worker's
-turn time limit); when it exits, the worker gets the turn back to finish, and the critic then reviews both replies
-together. `job_wait` (seconds, default 21600; 0 = off) caps the wait, after which the worker is asked for progress;
-`job_ignore` (regexes on the command line) and a worker's `<no-wait pid="…"/>` exclude long-lived helpers.
+parent is the system's init process) is a job; processes of mine, an editor or a terminal never count. orch never
+holds a review on its own: the critic's review lists what still runs, and the critic decides. If the work depends on
+a job, it replies `<wait-job/>` (or `<wait-job pid="…"/>`) instead of a verdict; the step then waits, the progress
+checks below watch the job, and when it exits the worker gets the turn back to finish before the critic reviews.
+A message for the worker while the job runs gives the worker a turn now; the critic decides again afterwards.
+`job_wait: 0` turns job detection off; any other value caps a wait only when progress checks are off for that
+worker (`check_every: 0`). `job_ignore` (regexes on the command line) excludes long-lived helpers.
 **Review now** on the board skips the wait.
 
-**The board** — `orch run --serve [--open]`, or `orch serve` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). The **📜 Log** button opens the full log at `/log/` on the same server: every run, and for each run every turn's input, output, system prompt and command, grouped by milestone and round with everything folded except the newest round, a one-line preview on each folded turn, filters by agent and a search box. Files under `.orch/runs/` are served read-only at their path below `/log/`; nothing outside that folder is. To look from another machine, start it with `--host 0.0.0.0` (it then prints your network address). There is no password, so anyone who can reach the port can also steer and stop the run: use it on a network you trust, or keep the default and tunnel in (`ssh -L 8765:127.0.0.1:8765 you@this-machine`). Without the board: `orch approve [--note … | --revise …]`, `orch answer . Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
+**The board** — `orch run --serve [--open]`, or `orch serve` any time: a local page (stdlib server, http://127.0.0.1:8765) with what needs me (approvals, my questions), milestones, the critic's checklist progress, the manager's scores and reports, the manager↔critic thread, every worker↔critic round with live streaming, and a chat with the manager (it resumes the manager's own session). Every message is on the dashboard (B9b): milestone → step → one block per level (you ↔ manager, manager ↔ critic, critic ↔ worker, monitor → critic), one line per message that unfolds to its full text (loaded on demand and cached), checks, jobs and system lines behind a filter, a search box over all messages, and what needs you pinned at the top. There is no separate log page any more; **📄 Report** opens the run's static `report.html` (on a large run it cuts long prompts and replies and says where the whole text is). Files under `.orch/runs/` are served read-only at their path below `/log/`; nothing outside that folder is. To look from another machine, start it with `--host 0.0.0.0` (it then prints your network address). There is no password, so anyone who can reach the port can also steer and stop the run: use it on a network you trust, or keep the default and tunnel in (`ssh -L 8765:127.0.0.1:8765 you@this-machine`). Without the board: `orch approve [--note … | --revise …]`, `orch answer . Q3 "B"`, or type `Q3: B` / press Enter at a gate in the terminal.
+
+**Progress checks (B5).** Long worker turns are allowed, as long as someone watches. While a worker's turn or job
+runs, a quick check every `check_every` minutes (in the worker's `agent.yaml`, else the monitor's; default 20; 0 =
+off) looks at the logs and status: "Quick check: how is the run going?", with how long it has run, the latest lines of
+the turn's output (or which job processes still run) and the current step's items from the critic's checklist file.
+
+* **Who checks.** An agent with `role: monitor` (scaffolded in `agents/monitor/`: Claude Code `haiku`, low effort,
+  edit tools disallowed). It reports to the critic only, never talks to the worker, and gives evidence, never a
+  verdict ("item 2: done, results/x.json has 120 rows"; "log quiet for 25 min"), ending with
+  `<status>ok|quiet|off-track|stopped</status>`. Without a monitor (older projects), the critic does the check in a
+  side session with the monitor's prompt. `check_session` in the checker's `agent.yaml`: `own` (its continuing
+  session; the monitor's default; for the critic, its own conversation, where it messages the worker itself) or
+  `side` (a fresh session for each check; the critic's default).
+* **What the critic sees.** The report arrives as an observation about the work: "Progress check, 14 min into Sam's
+  current turn: …", with no word of a monitor or of orch. orch removes verdict words (PASS/FAIL, `<verdict>`) and
+  lines about its own tooling before the critic reads it, and flags both on the board.
+* **When the critic is woken.** All fine (`ok`): the report waits for the critic's next turn (only the newest one).
+  Quiet, off track or stopped: a short critic turn starts now; the critic messages the worker only if needed, and
+  nothing of it goes up to the manager. A turn that wrote nothing to its output for a whole interval counts as quiet,
+  whatever the check says.
+* **The manager** gets a one-line status (the latest checks and the plan) every `check_every` minutes of its own
+  (default 60), waiting for its next turn; it starts no manager turn.
+* **Turn limit.** `safety_timeout` (seconds) is an agent's hard per-turn limit. Without it, a watched worker turn
+  gets 8 h: an older `timeout` below that no longer cuts it; the other agents (and a worker with checks off) keep
+  `timeout` as before.
+* **The board** shows a live line per working agent from its latest check: "Sam: step 3, running 14 min — log
+  active".
+
+**Parallel workers (B11).** When steps don't depend on each other, the critic (or the manager) can propose several
+workers: `<workers n="3" steps="2,3,4">why</workers>` (n counts the worker already on the job).
+
+* **Who decides.** The manager, up to `max_workers` (controller, default 3), as long as enough rounds are left and,
+  when `parallel_turns` is set, n is within it. More goes to me as a gate. In night mode the manager's number stands up
+  to `workers_hard_cap` (default 6). A critic proposal reaches the manager as a note that wakes it.
+* **The workers.** `writer-2` … `writer-N` are copies of the worker: same settings, own session, lane, job tag, state
+  file and monitor (`monitor-2` …; without a monitor, a side session of the critic). Each sees only the critic, never
+  each other; a prompt that names another worker is flagged on the board.
+* **The critic's format.** It hands out steps with one `<to worker="writer-2" step="3" out="results/s3/">instruction</to>`
+  per worker. Each finished step is reviewed in its own critic turn, one at a time: text outside the tags goes to
+  that worker, `<verdict>PASS</verdict>` is checked against that step's items in the checklist file, and `<to>`
+  sections hand the next step to whoever is free. A worker whose step passed with no step left stops.
+* **The work board.** `work-m<N>.md` beside the critic's checklist file: who does which step, status, output folder,
+  workspace, turns and the monitor's last line. orch keeps it up to date; the critic edits only its "Shared limits".
+* **Workspaces.** By default every worker uses the same folder and the critic gives each its own output folder.
+  `worker_worktrees: true` gives each copy a git worktree (`<repo>-worktrees/<run>-writer-2`, branch
+  `parallel/<run>-writer-2`); the critic merges. A worktree is removed at the end only when nothing would be lost.
+* When every worker is done, the critic takes stock in one review, and the run goes on with the one worker.
+  `parallel_turns` (0 = only `max_rounds`) caps the worker turns of one parallel section.
 
 ## Steering and inspecting a live run
 
@@ -249,6 +359,7 @@ orch stop .                                    # stops after terminating the cur
 orch run --resume --serve                      # continue the same run, same agent sessions
 orch reset-sessions .                          # with the run stopped: fresh conversations, same run state
 orch audit .                                   # how the agents talk: findings in agents/auditor/audit.md
+orch terminal .                                # the command that opens the manager's session in a terminal
 orch report .orch/runs                         # regenerate HTML
 ```
 
@@ -258,13 +369,62 @@ Pressing Ctrl-C in `orch run` stops cleanly: running agent processes are termina
 Only one `orch run` drives a run at a time: a second `--resume` on a run another process is driving says which
 process holds it and does nothing else (with `--serve` it still shows the board). Stop the first one to take over.
 
+### Message routing: every reply, delivery as activation
+
+Every reply is scanned for `<message to="…">`, whatever produced it: a turn of the run, a chat on the board, or the
+manager's session open in a terminal. Each message is recorded in the run's ledger (`state.json` → `messages`) and
+shown on the board with its status: **sent** (waiting), **delivered** (found in the recipient's actual prompt, or in a
+note that cut into its turn), **held** (with the reason: an address the sender may not use, the recipient open in a
+terminal, or *held by design*, e.g. the critic's checklist and verdict, which never go to the worker) or
+**superseded**.
+
+- **Delivery is activation.** A message for an idle manager or critic starts a short turn of its own (purpose
+  `incoming`): right away for a chat, terminal or note message; during a gate, a job wait or a worker's turn for
+  messages written in a round. A recipient in the middle of a turn gets it when that turn ends; an urgent message
+  (`urgent="yes"`) cuts in. A turn started by a message can start one more; past that (two hops) messages wait for
+  the next regular turn, so the manager and critic can't ping-pong. Workers are never started this way: their
+  messages reach the running turn live where the backend can, else their next turn. A note up from the critic to the
+  manager starts a turn only when it has something to decide (a `<question>`, a `<pause>`, or `urgent="yes"`);
+  otherwise it is **held** ("waits for next turn") and delivered in the manager's next regular turn.
+- **One instruction per step.** When the critic amends its review after the manager answers a question, and the
+  review has not reached the worker yet, the amended instruction replaces it (the worker gets one instruction); an
+  amend with nothing for the worker leaves the review as it was, and `additive="yes"` sends both.
+- **Supersede rule.** A message sent down (manager → critic or worker, critic → worker) replaces the same sender's
+  older messages to the same recipient that are still waiting, unless it is marked `additive="yes"`. Blocks of one
+  reply never replace each other; notes up and messages from people are always additive.
+- **Tooling stays hidden.** The critic and worker are told to ignore `.orch/` and the processes that run them; job
+  lists never include orch's own processes, and a critic or worker reply that mentions orch, the run folder or a
+  `.orch/` path (other than its own files) is flagged as a warning on the board.
+- **Worker in a board chat.** The worker's user in a chat is the person chatting, so its `<message>` tags go nowhere;
+  each is listed under the reply and corrected in one line at its next turn (as for any bad address).
+- A `<question>` inside a message is delivered whole to the agent the message is for.
+
+**Talking to the manager in a terminal.** `orch terminal .` prints the command that resumes the manager's session
+(`orch terminal . critic` for another agent), with `ORCH_RUN_DIR`/`ORCH_AGENT` set. With the relay hook
+(`orch/hooks/terminal_relay.py`) installed, orch holds that agent's turns while the session is open, routes the
+`<message>` tags of each reply you get there, and continues the session when you close it; a mark with no activity
+for `controller.terminal_busy_timeout` seconds (default 3600) counts as stale. orch never edits your Claude settings:
+`orch terminal --hooks` prints the snippet to merge into `.claude/settings.local.json`:
+
+```json
+{"hooks": {
+  "SessionStart":     [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}],
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}],
+  "Stop":             [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}],
+  "SessionEnd":       [{"hooks": [{"type": "command", "command": "python3 /path/to/orch/hooks/terminal_relay.py"}]}]
+}}
+```
+
+The hook does nothing in sessions outside an orch run or in the turns orch runs itself.
+
 ## The auditor: how the agents talk, not what they do
 
 An agent with `role: auditor` (scaffolded by `orch init --project` in `agents/auditor/`) sits outside the team. Every
 `audit_every` rounds (default 10), and once more when the run ends, it reads a digest of what was passed between the
 agents and keeps a short list of findings in `agents/auditor/audit.md`: repetition, unneeded context, messages that
 crossed a boundary (leakage), turns that achieved nothing, roles doing each other's jobs. It never judges the task,
-and nothing it writes reaches the agents; the agents are not told it exists.
+and nothing it writes reaches the agents; the agents are not told it exists. `audit_every: 0` turns automatic audits
+off, the one at the end of the run included; `orch audit` still runs one on demand.
 
 The digest holds only the messages, already compared by orch: each message's size, the part that repeats what that
 agent was already sent, where each paragraph came from (another agent, the human, the manager's chat replies, or
@@ -310,8 +470,8 @@ orch audit .                           # audit the last audit_every rounds now (
   raised with `--max-rounds` stays when you resume without the flag; pass `--max-rounds` again to lower it.
 - **Changing models or backends mid-run** (for cost, or Codex ↔ Claude): edit the agent's `agent.yaml` and resume.
   A changed backend can't resume the old session, so the agent starts a new one with a handover note.
-- **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` sends it again in the same session,
-  so a restart costs at most one repeated turn. The cheapest moment is just after a worker turn ends with nothing
+- **Restarting.** Ctrl-C (or `orch stop`) ends the current turn, and `--resume` continues it in the same session
+  with `continue` (the session has the message), so a restart costs at most part of one turn. The cheapest moment is just after a worker turn ends with nothing
   waiting in the run's `inbox/` (only `consumed*` and `merged` folders). Notes queued for an agent survive a restart.
 - **Cost.** Long sessions get dearer per turn because each turn re-reads the history: use `fresh_session:
   milestone` for workers, a cheaper model for the worker, and a low effort for the critic if the reviews stay good.
@@ -330,9 +490,9 @@ orch audit .                           # audit the last audit_every rounds now (
   "nothing changed" to a few lines. Long messages cost twice: tokens for the reader, and attention for the next
   agent, who has to find what is new.
 
-More, from auditing a 110-round run and checking every finding against the records (cost meters behind other
-providers' endpoints, messages dropped at gates, what an auditor's digest must say): see
-[`docs/insights-from-audits.md`](docs/insights-from-audits.md).
+More lessons from building orch and running a 272-round project: [`docs/lessons.md`](docs/lessons.md).
+The user's writing and collaboration preferences from that run: [`docs/writing-preferences.md`](docs/writing-preferences.md),
+[`docs/collaboration-preferences.md`](docs/collaboration-preferences.md).
 
 ## Other setups: one config file, `pipeline` and `llm` modes
 
@@ -384,7 +544,7 @@ monitors:
         task: ...                   # pipeline: the worker's round-1 task
         reviews: [..]               # verifier only
         feedback_to: [..]           # verifier only
-        backend: claude | codex | agy | command | mock
+        backend: claude | qwen | opencode | codex | agy | command | mock
         backend_options: {...}
         working_dir: ...
         timeout: 1800
@@ -428,6 +588,7 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
 
 * **claude**: runs `claude -p --output-format json` with the prompt on stdin. The first turn uses `--session-id <uuid>`, and later turns use `--resume <uuid>`. The system prompt is passed with `--append-system-prompt`, or with `--system-prompt` if you set `system_prompt_mode: replace`. Options: `model`, `effort`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `add_dirs`, `max_turns`, `mcp_config`, `extra_args`, `executable`. Cost, number of turns and error flags are recorded for each turn.
   Agents run with no one watching, so set `permission_mode` (for example `acceptEdits`) and `allowed_tools`. Use `bypassPermissions` only in a sandbox.
+* **opencode**: the OpenCode CLI (tested with 2.3.2). Runs `opencode run --format json` with the prompt on stdin, and continues sessions with `--session <id>` (the `ses_…` id is read from the events). Orch never uses the default connection, where `opencode run` talks to OpenCode's shared background service, which does not see the per-turn config Orch passes in `OPENCODE_CONFIG_CONTENT`. OpenCode has no system-prompt flag: by default the system prompt goes in front of a session's first message; with `system_prompt_mode: replace` it becomes the `system` of an agent defined for the run (`orch-<role>`), which replaces OpenCode's own built-in prompt. A turn shown on the board, and every worker turn, runs against a private `opencode serve` that Orch starts for that turn (with a password of its own): the board gets the text word by word from the server's event stream, and an update for a worker (an urgent message, a critic's check-in) is steered into its running turn, as with Codex's app-server. Such a message counts as delivered once OpenCode reports it delivered to the model; one that arrives as the turn ends is answered before the turn returns. Set `transport: run` for a plain `opencode run --standalone` instead (text a part at a time, updates at the next turn); Orch also falls back to that when the server does not start. Options: `model` (`provider/model#variant`; `opencode models` lists them), `agent` (one of your own OpenCode agents), `auto` (default true: `--auto` approves every permission not explicitly denied, so a turn never waits on a permission that asks; `auto: false` turns it off), `disallowed_tools` (deny rules, with OpenCode's action names: `shell`, `edit`, `read`, `webfetch`, ...), `add_dirs` (`external_directory` allow rules), `config` (any OpenCode config merged into the per-run config; your own `OPENCODE_CONFIG_CONTENT` is kept), `system_prompt_mode` (`prepend|replace`), `archived` (default true: new sessions stay out of your session list), `thinking`, `transport` (`serve`, the default, or `run`), `extra_args`, `executable`. Claude-only options (`effort`, `max_turns`, `allowed_tools`, `disable_hooks`, `mcp_config`) are ignored; put effort in the model variant. Tokens are summed over the turn's steps; cost is recorded when the provider reports one. Sessions are compacted through a private `opencode serve` (`POST /api/session/<id>/compact`). Deny rules (`disallowed_tools`) still apply with `auto`; use them for hard limits. Experimental: OpenCode's CLI changes quickly.
 * **codex**: runs `codex exec --json` and continues sessions with `codex exec resume <id>`. Options: `model`, `effort` (sent as `model_reasoning_effort`), `sandbox`, `full_auto`, `extra_args`. This backend is experimental: Codex flags change between versions, so check them with `codex exec --help`.
   For incremental text on the board, set `backend_options.transport: app-server` (tested with Codex CLI 0.167.0).
   This uses `codex app-server` with `thread/start`, `thread/resume` and `turn/start`; text deltas and tool activity
@@ -439,6 +600,7 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
   `extra_args`. Exec-only flags such as `--ignore-user-config` and `--full-auto` are not supported by app-server.
   App-server reads normal Codex configuration plus these overrides, uses `approval_policy="never"`, and defaults
   to `workspace-write` if `sandbox` is omitted. It does not automatically approve tool requests.
+* **qwen**: the Qwen Code CLI (`npm i -g @qwen-code/qwen-code`). Its headless mode follows Claude Code's, so it runs the same way: `qwen -p --output-format stream-json --include-partial-messages` (live text on the board) or `--output-format json` with `stream: false`, sessions via `--session-id` / `--resume`, and the system prompt via `--append-system-prompt` (`system_prompt_mode: replace` for `--system-prompt`). Options: `model` (an id from your `~/.qwen/settings.json` model providers), `approval_mode` (`plan|default|auto-edit|auto|yolo`; Claude's `permission_mode` names are mapped), `allowed_tools`, `disallowed_tools` (passed as `--exclude-tools`), `add_dirs`, `mcp_config`, `compact_instructions`, `stream`, `extra_args`, `executable`. Claude-only options (`effort`, `max_turns`, `disable_hooks`) are ignored. Sessions are compacted with `/compress`. Qwen reports tokens but no dollar cost; a turn's `usage` is that turn's own (Qwen's running session total is kept as `session_usage`). Set the provider and key up once in Qwen Code itself. Qwen's background memory extractor adds about 6K tokens to every resumed turn; turn it off with `"memory": {"enableManagedAutoMemory": false}` in `~/.qwen/settings.json` or the workspace's `.qwen/settings.json`.
 * **agy**: the Antigravity CLI, for Gemini models. Runs `agy --output-format json -p <prompt>` and continues sessions with `--conversation <id>` (the id is read from the JSON output). There is no system-prompt flag, so the system prompt goes in front of a session's first message. Options: `model`, `effort`, `mode` (`accept-edits|auto|plan`), `dangerously_skip_permissions`, `sandbox`, `add_dirs`, `agent`, `project`, `settings`, `print_timeout`, `prompt_via` (`arg`, the default, or `stdin`), `extra_args`, `executable`. Sign in once by running `agy` interactively; `agy models` lists the model names. Experimental: the JSON field names are read leniently (`result`/`response`/`text`, `conversation_id`/`session_id`).
 * **command**: wraps any CLI. Options:
   * `command` and an optional `resume_command`, with the placeholders `{session_id} {cwd} {agent} {prompt} {prompt_file} {system_prompt} {system_prompt_file}`
@@ -446,9 +608,44 @@ The turn record lists each interruption (`interruptions`, `cut_short`), and the 
   * `output_format: text|json` together with `output_field` and `session_field`, or `session_regex`
 * **mock**: a deterministic fake for dry runs and tests. Options: `delay`, `script`, `pass_after`, `done_after`, `fail_turns`, `write_file`.
 
+### Project model list, retries and backups (`models:`)
+
+Models are defined once for the project, in `.orch/settings.yaml` (or `models:` at the top of a config file), and
+each agent picks them by id:
+
+```yaml
+# .orch/settings.yaml
+models:
+  opus:   {backend: claude, backend_options: {model: opus, effort: high}}
+  glm:    {backend: claude, backend_options: {model: glm-4.6},
+           env: {ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic, ANTHROPIC_AUTH_TOKEN: "${GLM_KEY}"}}
+  gemini: {backend: agy, backend_options: {model: gemini-3.6-pro}}
+retry_waits: [60, 120, 240]     # seconds before each retry of the same model (default)
+fallback_cooldown: 18000        # 5 h on a backup that worked before the primary again (default)
+
+# agents/worker/agent.yaml
+model: opus
+backup: glm
+backup2: gemini
+backend_options: {permission_mode: auto}   # options on top of the model's (on a backup of the same backend too)
+```
+
+* A failed turn (API error, overload, rate limit, crash) is retried on the same model after each of `retry_waits`,
+  then on `backup`, then `backup2` (each with the same waits). An unusable reply (exit 0, no text) gets the
+  `retries` immediate corrections instead. A billing or account problem is not retried: the run stops and the
+  board says why. Each retry and switch is in the turn record (`retries`, `fallbacks`), in `state.json`
+  (`reliability`) and on the board. `retry_waits` and `fallback_cooldown` can be set per agent too.
+* Edits to the model list or to an agent file apply from the agent's next turn. `$VARS` in a model's `env` come
+  from the shell, so keys need not be written into the file.
+* When a worker's model changes (a switch, or an edit), its critic is told once at its next turn that the person
+  it instructs is on a different model.
+* The stored reply is the agent's final message (or the text so far, on a cut-off), never the raw event stream;
+  that is kept only as `tNN-<agent>.stream.jsonl` beside the turn when the reply had to be parsed out of it.
+  Sizes over `large_text` (controller, default 50000 characters) are a board warning; nothing is cut.
+
 ### Backup models (`fallback`)
 
-Each agent can list backup models, tried in order when a turn still fails after its `retries` (an API error,
+Each agent can list backup models, tried in order when a turn still fails after its retries (`retry_waits`, above; an API error,
 a refusal from the provider, a crash; not a timeout, a stop or a question):
 
 ```yaml
@@ -479,11 +676,14 @@ fallback_cooldown: 18000                     # seconds to stay on a backup that 
 
 ```
 orch/config.py      schema, defaults merging, *_file includes, validation
-orch/backends.py    claude / codex / agy / command / mock + process runner (timeouts, stop, kill process group)
+orch/backends.py    claude / qwen / opencode / codex / agy / command / mock + process runner (timeouts, stop, kill process group)
 orch/controller.py  MonitorRunner: pipeline + llm modes, sessions, routing, retries, parallel stages
 orch/recorder.py    run directory, state, events, turn and round records, inbox / STOP control files
 orch/report.py      static HTML viewers
 orch/templates.py   all default prompts ({{goal}}, {{feedback}}, {{worker_reports}}, …)
+orch/progress.py    progress checks (B5): reading a check's status, keeping verdicts and tooling from the critic, turn activity
 orch/audit.py       the auditor's digest (origins, repeats, relays, flags), its findings file, one audit
-orch/cli.py         orch init | validate | run | status | show | stop | inject | audit | report
+orch/routing.py     message routing: who may address whom, the message ledger, the supersede rule
+orch/hooks/         terminal_relay.py: Claude Code hook for an agent's session open in a terminal
+orch/cli.py         orch init | validate | run | status | show | stop | inject | audit | terminal | report
 ```
