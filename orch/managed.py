@@ -77,6 +77,7 @@ QUESTION_TAG = re.compile(r"<question>.*?</question>", re.S | re.I)  # a questio
 TERMINAL_HOLD = "its session is open in a terminal; delivered when the terminal closes"
 # purposes whose <message> blocks orch delivers itself; in the others a phase of the run carries the manager's
 # message to the critic (critic_message) and the critic's message to the worker (its feedback)
+CARRIED = "carried by the manager's turn after my decision at the gate"  # a discussion closed at a gate
 SELF_DELIVERED = ("incoming", "ack", "discussion", "review_file")  # turns whose messages orch delivers itself (route_reply)
 # B6: phases that send the manager's words to the critic; they wait while I discuss with the manager
 DISCUSSION_WAITS = ("kickoff", "answer", "pause", "mreview", "restart")
@@ -1117,14 +1118,42 @@ class ManagedRunner(MonitorRunner):
                         if m.get("activate") is True or (m.get("activate") == "wait" and mode != "between")]
                 if not want or (mode == "between" and self.next_agent() == a.name):
                     continue
-                self.message_turn(a, want)
+                self.message_turn(a, want, mode)
                 ran = True
                 if self.should_stop():
                     return
             if not ran:
                 return
 
-    def message_turn(self, a: AgentConfig, want: List[Dict[str, Any]]) -> None:
+    def worker_working(self, mode: str = "") -> bool:
+        """A worker is in a turn now (orch's, or its session open in a terminal)."""
+        return mode == "stage" or any(self.rec.agent_busy(w.name) or self.terminal_busy(w) for w in self.workers)
+
+    def worker_idle_why(self) -> str:
+        """Why no worker is working now, in a few words for the critic's message turn."""
+        mg = self.mg
+        g = mg.get("gate") or {}
+        if g.get("kind") in ("plan", "milestone", "workers"):
+            return "the run is waiting for my decision at a gate"
+        if g.get("kind") == "wait" or mg.get("phase") == "wait":
+            return "the work is paused until a task of mine is done"
+        if mg.get("phase") == "job" or mg.get("job"):
+            return "its background job is still running, and your review waits for the job to end"
+        if mg.get("held"):
+            return "the work is held until I answer a question or close a discussion"
+        return "it is between two turns"
+
+    def critic_turn_prompt(self, mode: str) -> str:
+        """The critic's message turn. The worker in a turn: the update goes to it now. Its next turn comes before the
+        critic's (the step is given): an update goes with that step. Otherwise the critic's next step carries the
+        change, so no separate update is written to wait in the queue and stack with that step."""
+        if self.worker_working(mode):
+            return self.mtpl("critic_message_turn")
+        if self.mg.get("phase") in ("work", "parallel", "workers_gate"):
+            return self.mtpl("critic_message_turn_next")
+        return self.mtpl("critic_message_turn_idle", why=self.worker_idle_why())
+
+    def message_turn(self, a: AgentConfig, want: List[Dict[str, Any]], mode: str = "wait") -> None:
         self._activating = True
         self._hops = max(int(m.get("hops") or 1) for m in want)
         frm = sorted({m["from"] for m in want})
@@ -1132,8 +1161,8 @@ class ManagedRunner(MonitorRunner):
         self.rec.event("activation", agent=a.name, msgs=[m["id"] for m in want])
         checks = a.role == "verifier" and all(m.get("kind") == "progress_check" for m in want)
         try:  # woken by a progress check that found a problem: it messages the worker if needed, nothing goes up
-            prompt = self.mtpl("manager_message_turn" if a.role == "manager" else
-                               "critic_check_turn" if checks else "critic_message_turn")
+            prompt = (self.mtpl("manager_message_turn") if a.role == "manager" else
+                      self.mtpl("critic_check_turn") if checks else self.critic_turn_prompt(mode))
             gate = self.mg.get("gate") or {}
             if a.role == "manager" and gate.get("kind") == "milestone":
                 prompt = prompt.rstrip() + "\n\n" + self.mtpl("manager_message_at_gate",
@@ -1269,12 +1298,63 @@ class ManagedRunner(MonitorRunner):
             self.st["discussion_since"] = now_iso()
             self.rec.progress(f"💬 discussion on: nothing from {self.manager.called} goes to the others until it closes")
         else:
-            self.mg["discussion_batch"] = {"at": now_iso(), "since": self.st.pop("discussion_since", "")}
-            self.rec.progress(f"💬 discussion closed: {self.manager.called} sends one batch with the new directions")
+            gate = self.discussion_gate()
+            self.mg["discussion_batch"] = {"at": now_iso(), "since": self.st.pop("discussion_since", ""),
+                                           **({"gate": gate} if gate else {})}
+            self.rec.progress(f"💬 discussion closed at the gate: approve or send back; {self.manager.called} then "
+                              "sends one message with the discussion and my decision" if gate else
+                              f"💬 discussion closed: {self.manager.called} sends one batch with the new directions")
         self.rec.save()
+
+    # gates where a discussion I close waits for my decision, and the phases that wait at them
+    DISCUSSION_GATES = ("plan", "milestone")
+    DISCUSSION_GATE_PHASES = ("plan_gate", "gate")
+
+    def discussion_gate(self) -> str:
+        """The key of an open plan or milestone gate ('' when none): a discussion I close there is not sent at once;
+        it goes into the manager's turn after my decision, so the critic gets one message, not two."""
+        g = self.mg.get("gate") or {}
+        return str(g.get("key") or "") if g.get("kind") in self.DISCUSSION_GATES else ""
 
     def discussion_held(self) -> List[Dict[str, Any]]:
         return [m for m in self.ledger.rows if m["status"] == "held" and m.get("reason") == RT.DISCUSSION]
+
+    def discussion_held_text(self) -> str:
+        held = self.discussion_held()
+        if not held:
+            return self.mtpl("discussion_held_none").strip()
+        names = {x.name: x.called for x in self.mon.agents}
+        msgs = "\n\n".join(f"To {names.get(m['to'], m['to'])}:\n<<<\n{m['body']}\n>>>" for m in held)
+        return self.mtpl("discussion_held", messages=msgs).strip()
+
+    def discussion_done(self, r: Dict[str, Any], why_none: str = "the discussion closed with nothing new to send",
+                        at_gate: bool = False) -> None:
+        """After the manager's turn that carried the discussion: what was held is replaced by what it sent."""
+        a = self.manager
+        held = self.discussion_held()
+        new = [m for m in self.ledger.rows if r.get("turn_id") and m.get("source") == r.get("turn_id")
+               and m["from"] == a.name and m["status"] in ("sent", "delivered")]
+        for m in held:  # not superseded by a message to the same agent: replaced by the batch
+            self.ledger.mark(m, "superseded", by=new[0]["id"] if new else "",
+                             reason="replaced by the batch sent when the discussion closed" if new else why_none)
+        self.rec.event("discussion_batch", turn=r.get("turn_id"), held=[m["id"] for m in held],
+                       sent=[m["id"] for m in new], **({"at_gate": True} if at_gate else {}))
+        self.rec.progress(f"💬 after the discussion: {len(new)} message(s) sent, {len(held)} held one(s) replaced")
+        self.rec.save()
+
+    def gate_discussion(self) -> str:
+        """Right after my decision at a gate: the discussion I closed while it was open, as text for the manager's
+        next turn ('' when there is none). It is taken off the queue, so it goes once, with my decision."""
+        b = self.mg.get("discussion_batch") or {}
+        if not b.get("gate") or self.discussion_on():
+            return ""
+        self.mg.pop("discussion_batch")
+        return self.mtpl("manager_discussion_at_gate", held=self.discussion_held_text()).strip()
+
+    def discussion_carried(self, r: Dict[str, Any]) -> None:
+        """The turn that carried a discussion closed at the plan gate (the plan or the kickoff) ran: close it out."""
+        if self.mg.pop("discussion_carry", None):
+            self.discussion_done(r, why_none=CARRIED, at_gate=True)
 
     def discussion_batch(self) -> None:
         """The manager's one turn after I close the discussion: one message for the critic, which supersedes what
@@ -1282,16 +1362,12 @@ class ManagedRunner(MonitorRunner):
         a, mg = self.manager, self.mg
         if not mg.get("discussion_batch") or self.discussion_on():
             return
+        if mg["discussion_batch"].get("gate") and mg.get("phase") in self.DISCUSSION_GATE_PHASES:
+            return  # closed at a gate: it goes with my decision there (gate_discussion), in one turn
         if self.terminal_busy(a) or self.rec.agent_busy(a.name):
             return  # the manager is busy (a board chat, the terminal): the batch comes when it is free
         mg.pop("discussion_batch")
-        held = self.discussion_held()
-        if held:
-            names = {x.name: x.called for x in self.mon.agents}
-            msgs = "\n\n".join(f"To {names.get(m['to'], m['to'])}:\n<<<\n{m['body']}\n>>>" for m in held)
-            held_text = self.mtpl("discussion_held", messages=msgs).strip()
-        else:
-            held_text = self.mtpl("discussion_held_none").strip()
+        held_text = self.discussion_held_text()
         self._activating = True
         try:
             r = self.say(a, self.mtpl("manager_discussion_end", held=held_text), "discussion")
@@ -1302,16 +1378,7 @@ class ManagedRunner(MonitorRunner):
             r = {}
         finally:
             self._activating = False
-        new = [m for m in self.ledger.rows if m.get("source") == r.get("turn_id") and m["from"] == a.name
-               and m["status"] in ("sent", "delivered")]
-        for m in self.discussion_held():  # not superseded by a message to the same agent: replaced by the batch
-            self.ledger.mark(m, "superseded", by=new[0]["id"] if new else "",
-                             reason="replaced by the batch sent when the discussion closed" if new
-                             else "the discussion closed with nothing new to send")
-        self.rec.event("discussion_batch", turn=r.get("turn_id"), held=[m["id"] for m in held],
-                       sent=[m["id"] for m in new])
-        self.rec.progress(f"💬 after the discussion: {len(new)} message(s) sent, {len(held)} held one(s) replaced")
-        self.rec.save()
+        self.discussion_done(r)
 
     # ---- B9: work that waits for me (a blocking question) or for a discussion to close
 
@@ -2569,7 +2636,10 @@ class ManagedRunner(MonitorRunner):
             prompt = self.mtpl("manager_plan_revise", comment=mg["comment"])
         else:
             prompt = self.mtpl("manager_plan", human_messages="")
+        if mg.get("discussion_carry"):  # a discussion I closed at the plan gate before sending the plan back
+            prompt = prompt.rstrip() + "\n\n" + mg["discussion_carry"] + "\n"
         r = self.say(self.manager, prompt, "plan")
+        self.discussion_carried(r)
         ms = parse_milestones(r["output"])
         if not ms:
             r = self.say(self.manager, "I could not find the milestone list in your reply. Please give it again as a "
@@ -2589,6 +2659,9 @@ class ManagedRunner(MonitorRunner):
     def ph_plan_gate(self, mg: Dict[str, Any]) -> Optional[str]:
         d = self.wait_gate({"kind": "plan", "title": "Milestone plan", "text": mg.get("plan_text", ""),
                             "summary": mg.get("plan_summary", ""), "turn": mg.get("plan_turn")})
+        disc = self.gate_discussion()
+        if disc:  # the manager's next turn (the reworked plan, or the first instruction) carries the discussion
+            mg["discussion_carry"] = disc
         if d["decision"] == "approve":
             if d.get("message"):
                 self.forward(self.manager, d["message"])
@@ -2605,8 +2678,10 @@ class ManagedRunner(MonitorRunner):
         self.fresh_sessions()
         ms.pop("rubric", None)  # set afresh for this milestone (take_rubric, in the turn)
         r = self.say(self.manager, self.mtpl("manager_kickoff", n=mg["ms"] + 1, total=len(mg["milestones"]),
-                                             milestone=ms["text"], human_messages=""), "kickoff")
+                                             milestone=ms["text"], human_messages=mg.get("discussion_carry") or ""),
+                     "kickoff")
         self.after_manager(r, relay=False)
+        self.discussion_carried(r)
         if not ms.get("rubric"):
             self.rubric_off(0)
         mg.update(note=self.critic_message(r, "kickoff"), note_at=now_iso(), ms_round=0, stall=0,
@@ -4294,6 +4369,7 @@ class ManagedRunner(MonitorRunner):
         if d.get("message"):
             self.decide(f"Milestone {mg['ms'] + 1} ({ms['title']}): {d['decision']}. {d['message']}", "you", "gate")
         held = (mg.get("guidance") or "").strip()  # the manager's message for the critic, held while I decide
+        disc = self.gate_discussion()  # a discussion I closed while the gate was open: one turn carries both
         if d["decision"] == "approve":
             if d.get("message"):
                 self.forward(self.manager, d["message"])
@@ -4301,13 +4377,20 @@ class ManagedRunner(MonitorRunner):
                 self.rec.event("message_superseded", turn=ms.get("summary_turn"), to=self.critic.name,
                                reason="milestone approved at the gate")
                 self.drop_phase_messages(ms.get("summary_turn") or "", self.critic.name, "milestone approved at the gate")
+            if disc and mg["ms"] + 1 < len(mg.get("milestones") or []):
+                mg["discussion_carry"] = disc  # the next milestone's kickoff carries it
+            elif disc:
+                self.discussion_done({}, why_none="the last milestone was approved; nothing more goes to the critic",
+                                     at_gate=True)
             mg.update(phase="next", guidance="")
             return None
         comment = d.get("message") or held or "Please keep going on this milestone."
         # with my comment in its place, the held message would vanish unseen: show it to the manager to carry over
         unsent = self.mtpl("unsent_message", message=held).strip() if held and d.get("message") else ""
-        r = self.say(self.manager, self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment,
-                                             unsent=unsent), "feedback")
+        prompt = self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment, unsent=unsent)
+        if disc:
+            prompt = prompt.rstrip() + "\n\n" + disc + "\n"
+        r = self.say(self.manager, prompt, "feedback")
         if held:
             why = ("replaced by the manager's message after the gate"
                    + ("" if unsent or comment == held else "; not shown to the manager"))
@@ -4316,6 +4399,8 @@ class ManagedRunner(MonitorRunner):
             self.drop_phase_messages(ms.get("summary_turn") or "", self.critic.name, why, by=r["turn_id"])
         ms.update(status="active")
         self.after_manager(r, relay=False)
+        if disc:
+            self.discussion_done(r, why_none=CARRIED, at_gate=True)
         mg.update(guidance=self.critic_message(r, "feedback"), guidance_at=now_iso(), ms_round=0, stall=0,
                   limit=False, phase="guidance")
         return None

@@ -375,12 +375,25 @@ self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to
 holds, without mentioning me. It reaches them at the next pause in their work, or at their next turn; don't claim
 it was acted on before you see evidence. No checklist or verdict is needed.
 """,
-    # a turn started only because a message arrived for an idle agent (delivery is activation)
+    # a turn started only because a message arrived for an idle agent (delivery is activation); for the critic, one
+    # of three by what the worker is doing: in a turn now, about to start one with the step already given, or neither
     "critic_message_turn": """\
-Please answer my message above now. {{worker}} may still be working: leave that work running and don't start a new
-review. Reply to me inside `<message to="you">…</message>`. If it changes what {{worker}} should do, also send a
+Please answer my message above now. {{worker}} is working: leave that work running and don't start a new review.
+Reply to me inside `<message to="you">…</message>`. If it changes what {{worker}} should do, also send a short,
+self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you", saying what it replaces. No
+checklist or verdict is needed.
+""",
+    "critic_message_turn_next": """\
+Please answer my message above now. {{worker}} is not working right now; its next turn starts with the step you
+already gave. Reply to me inside `<message to="you">…</message>`. If my message changes that step, also send a
 short, self-contained update inside `<message to="{{worker}}">…</message>`, as "I" to "you", saying what it
-replaces. No checklist or verdict is needed.
+replaces; it goes with that step. No checklist or verdict is needed.
+""",
+    "critic_message_turn_idle": """\
+Please answer my message above now. {{worker}} is not working right now: {{why}}. Reply to me inside
+`<message to="you">…</message>`, and don't write to {{worker}} now: if my message changes what {{worker}} should
+do, say so to me and put it in the next step you give {{worker}}, in your next regular turn. No checklist or verdict
+is needed.
 """,
     "manager_message_turn": """\
 The message above came in while the work goes on. Act on it if it needs something: only a
@@ -597,6 +610,17 @@ discussion; carry over what in them still applies.
 
 If nothing changes for {{critic}}, write no message; one line for me is enough. Anything settled that should hold
 beyond this goes on the golden board.
+""",
+    # a discussion I closed while a plan or milestone gate was open: added to the manager's turn after my decision
+    "manager_discussion_at_gate": """\
+We closed our discussion before this decision, and nothing from it has reached {{critic}} yet. Fold everything we
+settled there that changes the work into what you write now, together with the above, so that {{critic}} gets one
+message, complete on its own. It replaces the messages held during the discussion; carry over what in them still
+applies.
+
+{{held}}
+
+Anything settled that should hold beyond this goes on the golden board.
 """,
     "discussion_held_none": "Nothing was held during the discussion.",
     "discussion_held": "Held during the discussion (not sent):\n\n{{messages}}",
