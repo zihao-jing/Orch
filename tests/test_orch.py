@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1946,7 +1947,8 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker"),
                                                                 ("auditor", "auditor"), ("monitor", "monitor")])
         mo = mon.agent("monitor")  # B5: a small read-only watcher; reports only to the critic
-        self.assertEqual((mo.backend_options["model"], mo.backend_options["effort"], mo.check_session), ("haiku", "low", "own"))
+        self.assertEqual((mo.backend, mo.backend_options["model"], mo.check_session), ("opencode", "alibaba-token-plan-cn/qwen3.8-flash", "own"))
+        self.assertEqual([f["backend_options"]["model"] for f in mo.fallback], ["zenmux/deepseek/deepseek-v4.1-flash"])
         self.assertIn("Edit", mo.backend_options["disallowed_tools"])
         self.assertIn("Quick check", mo.current_system_prompt())
         self.assertNotRegex(mo.current_system_prompt().lower().replace("`.orch/`", ""), r"manager|orch\b")
@@ -1984,8 +1986,9 @@ class TestProjectFolder(unittest.TestCase):
         for name, extra in (("manager", "approve_plan: false\napprove_milestones: false\nmax_rounds: 20\n"),
                             ("critic", ""), ("worker", ""), ("auditor", ""), ("monitor", "")):
             y = d / "agents" / name / "agent.yaml"
-            text = y.read_text().replace("backend: claude", "backend: mock").replace("approve_plan: true\n", "") \
+            text = y.read_text().replace("approve_plan: true\n", "") \
                 .replace("approve_milestones: true\n", "").replace("max_rounds: 20 ", "# ").replace("max_rounds: 3\n", "")
+            text = re.sub(r"(?m)^backend: \w+", "backend: mock", text)
             y.write_text(text + extra)
         self.assertTrue(all(a.backend == "mock" for a in load_config(str(self.tmp)).monitors[0].agents))
         self.assertEqual(cli.main(["run", str(self.tmp)]), 0)

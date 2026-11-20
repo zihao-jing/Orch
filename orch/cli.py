@@ -87,6 +87,8 @@ role: manager
 description: Owns the milestones and the rubric; reports to me.
 backend: claude
 backend_options: {model: opus, effort: medium, permission_mode: auto}
+fallback:                   # tried in order when a turn still fails after its retries
+  - {label: codex-astra, backend: codex, backend_options: {model: gpt-6.2-astra, effort: medium}}
 timeout: 2400
 retries: 1
 # check_every: 60           # minutes between status lines for me from the progress checks (no turn; 0 = off)
@@ -102,8 +104,11 @@ approve_milestones: true    # and after each milestone the manager accepts
         "agents/critic/agent.yaml": """\
 role: critic
 description: Turns milestones into instructions and reviews every change.
-backend: claude
-backend_options: {model: opus, effort: medium, permission_mode: auto}
+backend: codex
+backend_options: {model: gpt-6.2-sol, effort: medium}
+fallback:
+  - {label: claude-haiku, backend: claude, backend_options: {model: haiku, effort: medium, permission_mode: auto}}
+  - {label: qwen4-max-preview, backend: opencode, backend_options: {model: alibaba-token-plan-cn/qwen4-max-preview}}
 timeout: 2400
 retries: 1
 checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
@@ -117,7 +122,10 @@ checkin_every: 2            # every 2 rounds, a status line for the manager (fro
 role: worker
 description: Does the work in the repository.
 backend: claude
-backend_options: {model: sonnet, effort: medium, permission_mode: auto}
+backend_options: {model: haiku, effort: medium, permission_mode: auto}
+fallback:
+  - {label: deepseek-v4-pro, backend: opencode, backend_options: {model: zenmux/deepseek/deepseek-v4-pro}}
+  - {label: glm-5.3, backend: opencode, backend_options: {model: alibaba-token-plan-cn/glm-5.3}}
 # Codex instead: backend: codex, backend_options: {model: <model>, sandbox: workspace-write,
 #                extra_args: ["-c", "sandbox_workspace_write.network_access=true"]}
 safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
@@ -150,13 +158,13 @@ fresh_session: milestone    # a new session for each milestone: turns stay fast 
 AUDITOR_YAML = """\
 role: auditor
 description: Reads how the agents talk to each other (never the task) and keeps a short list of findings in audit.md.
-backend: claude
+backend: opencode
 backend_options:
-  model: sonnet
-  effort: low
-  disable_hooks: true
+  model: alibaba-token-plan-cn/deepseek-v4-pro
   # everything it needs is in the digest orch sends; no files, no tools
   disallowed_tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
+fallback:
+  - {label: deepseek-v4-pro-zenmux, backend_options: {model: zenmux/deepseek/deepseek-v4-pro}}
 timeout: 900
 audit_every: 10             # rounds between audits, plus one when the run ends (0 = no automatic audits, not even the final one; only `orch audit`)
 audit_points: 5             # at most this many points per audit
@@ -165,14 +173,13 @@ audit_points: 5             # at most this many points per audit
 MONITOR_YAML = """\
 role: monitor
 description: Watches the worker's long turns and jobs; reports evidence (never verdicts) to the critic.
-backend: claude
+backend: opencode
 backend_options:
-  model: haiku
-  effort: low
-  permission_mode: auto
-  disable_hooks: true
+  model: alibaba-token-plan-cn/qwen3.8-flash
   # read-only: it may run status commands and read logs and files, never edit
   disallowed_tools: [Edit, Write, NotebookEdit, Task, WebFetch, WebSearch]
+fallback:
+  - {label: deepseek-v4.1-flash, backend_options: {model: zenmux/deepseek/deepseek-v4.1-flash}}
 timeout: 600
 check_session: own          # own: one continuing session for its checks; side: a fresh session per check
 """
