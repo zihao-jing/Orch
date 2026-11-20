@@ -225,7 +225,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
   <button class="sm" id="theme" title="Toggle light/dark">◐</button>
   <button class="sm" id="reviewbtn" title="Ask the manager for a review file: a short Markdown review you can comment in and send back">📝 Review file</button>
-  <button class="sm ok" id="discpill" hidden title="A discussion with the manager is open: it sends nothing to the critic until you close it. Click to open the conversation">💬 Discussing</button>
+  <button class="sm ok" id="discpill" hidden title="A discussion with the manager is open: it sends nothing to the critic until you end it. Click to open the conversation">💬 Discussing</button>
   <button class="sm" id="night" title="Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review">🌙 Night</button>
   <button class="sm" id="stop" title="Stop after the current turn">Stop run</button>
  </header>
@@ -247,7 +247,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   </main>
   <aside class="side">
    <div class="card chat">
-    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" title="Who to talk to" style="font-size:13px;max-width:45%"></select><button class="sm" id="discuss" title="Discussion: while it is on, the manager sends nothing to the critic; when you turn it off, it sends one message with the new directions">💬 Discuss</button><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
+    <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" title="Who to talk to" style="font-size:13px;max-width:45%"></select><button class="sm" id="discuss" title="Discussion: while it is on, the manager sends nothing to the critic; when you end it, it sends one message with the new directions">💬 Discuss</button><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
     <div class="chatlog" id="chatlog"></div>
     <div class="row"><textarea id="chatin" rows="2" placeholder="Ask anything or give direction… (Enter to send, Shift+Enter for a new line)"></textarea></div>
     <div class="row" style="justify-content:space-between;align-items:center"><span class="mute" style="font-size:12px" id="chat-hint"></span><button class="pri" id="chatsend">Send</button></div>
@@ -411,7 +411,10 @@ function renderNow(mg){  // the switches, and the status area: only the agents w
   nb.disabled = qOpen && !(D.night_pending != null && D.night_pending !== !!D.night);
   nb.title = qOpen ? 'A question for you is open: night mode can switch once it is answered' : 'Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review';
   const db = $('discuss'), dw = discussWanted();  // B6: shown as last set, at once
-  db.textContent = dw ? '💬 Discussing · close' : '💬 Discuss'; db.classList.toggle('ok', dw);
+  db.textContent = dw ? '✓ End discussion' : '💬 Discuss'; db.classList.toggle('ok', dw);
+  db.title = dw ? (gateTakesDiscussion() ? 'End the discussion, then approve or send back at the gate: the manager sends the critic one message with both'
+    : 'End the discussion: the manager sends the critic one message with the new directions')
+    : 'Discussion: while it is on, the manager sends nothing to the critic; when you end it, it sends one message with the new directions';
   db.hidden = !(dw || !chatWith || chatWith === mgrName());  // a discussion is with the manager: shown there, or while open
   $('discpill').hidden = !dw;  // on the main page only while a discussion is open, as a reminder
   const rb = $('reviewbtn'); rb.disabled = !!mg.review_req; rb.textContent = mg.review_req ? '📝 Review asked…' : '📝 Review file';
@@ -455,7 +458,7 @@ function renderNeeds(mg){
   const g = mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !QA[q.id]);  // settled ones leave
   const threads = Object.fromEntries(mine.map(q => [q.id, qThread(q.id)]));
   const revs = (D.review_files||[]).filter(r => r.status === 'written' && r.exists);  // B9: a review file to comment in
-  const job = mg.job, sig = JSON.stringify([job && job.since, g && g.key, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status)), revs.map(r => r.path)]);
+  const job = mg.job, sig = JSON.stringify([job && job.since, g && g.key, discussWanted(), !!(mg.discussion_batch||{}).gate, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status)), revs.map(r => r.path)]);
   const el = $('needs'); if (el._sig === sig) return; el._sig = sig;
   const typed = {}; el.querySelectorAll('textarea,input').forEach(x => { if (x.id) typed[x.id] = x.value; });
   if (!g && !mine.length && !job && !revs.length){ el.innerHTML = ''; return; }
@@ -478,6 +481,11 @@ function renderNeeds(mg){
     } else {
       h += `<div class="md">${md(g.text)}</div>`;
     }
+    const db_ = mg.discussion_batch || {};
+    if (g.kind !== 'wait' && db_.gate && !discussWanted())
+      h += `<div class="rec" id="disc-ended"><div class="k">💬 Discussion ended: approve or send back now</div>Nothing from it has gone to ${esc(called('critic'))} yet. After your choice, ${esc(called(mgrName()))} sends one message with what you settled and your decision.</div>`;
+    else if (g.kind !== 'wait' && discussWanted())
+      h += `<div class="ink2" style="font-size:12px">💬 A discussion is open. End it first (✓ End discussion), so what you settle goes with your decision in one message.</div>`;
     h += g.kind === 'wait'
       ? `<div class="ink2" style="font-size:12px">The worker and the critic are paused; no rounds are spent while you work on this.</div>
       <div class="row"><textarea id="gate-msg" rows="2" placeholder="What you did, where the files are, anything the critic should know"></textarea></div>
@@ -1112,9 +1120,15 @@ $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
 function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_pending; }
 function discussWanted(){ return D.discussion_pending == null ? !!D.discussion : !!D.discussion_pending; }
-$('discuss').addEventListener('click', async () => { const on = !discussWanted();
-  if (!confirm(on ? 'Start a discussion? The manager sends nothing to the critic until you turn it off; then it sends one message with the new directions.' : 'Close the discussion? The manager sends the critic one message with the new directions.')) return;
-  D.discussion_pending = on; render(); await post('api/discussion', {on}); });
+// a plan or milestone gate open: a discussion ended there waits for my decision, then goes in one message with it
+function gateTakesDiscussion(){ const g = (D.managed||{}).gate; return !!g && (g.kind === 'plan' || g.kind === 'milestone'); }
+$('discuss').addEventListener('click', async () => { const on = !discussWanted(), atGate = gateTakesDiscussion();
+  if (!confirm(on ? 'Start a discussion? The manager sends nothing to the critic until you end it; then it sends one message with the new directions.'
+      : atGate ? 'End the discussion? Nothing is sent yet: next, approve or send back at the gate, and the manager sends the critic one message with the discussion and your decision.'
+      : 'End the discussion? The manager sends the critic one message with the new directions.')) return;
+  D.discussion_pending = on; render(); await post('api/discussion', {on});
+  if (!on && atGate){ setChat(false); const n = $('needs'); if (n) n.scrollIntoView({behavior: 'smooth', block: 'start'});
+    setTimeout(() => { const t = $('gate-msg'); if (t) t.focus(); }, 300); } });
 $('reviewbtn').addEventListener('click', async () => { if (!confirm('Ask the manager for a review file you can comment in?')) return;
   $('reviewbtn').disabled = true; await post('api/review', {}); });
 $('night').addEventListener('click', () => { const on = !nightWanted();

@@ -815,7 +815,7 @@ def _clip(x: Any, n: int = 300) -> Any:
 
 _MS_KEYS = ("title", "done_when", "status", "score", "rounds", "summary", "gate_summary", "rubric", "reopened_at",
             "accepted", "name")
-_MG_KEYS = ("ms", "phase", "gate", "job", "held", "review_req")
+_MG_KEYS = ("ms", "phase", "gate", "job", "held", "review_req", "discussion_batch")
 
 
 def _slim_managed(mg: Dict[str, Any]) -> Dict[str, Any]:
