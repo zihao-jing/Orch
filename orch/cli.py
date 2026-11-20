@@ -86,7 +86,7 @@ def init_project(root: Path, force: bool) -> int:
 role: manager
 description: Owns the milestones and the rubric; reports to me.
 backend: claude
-backend_options: {model: opus, effort: medium, permission_mode: auto}
+backend_options: {model: opus, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
 fallback:                   # tried in order when a turn still fails after its retries
   - {label: codex-astra, backend: codex, backend_options: {model: gpt-6.2-astra, effort: medium}}
 timeout: 2400
@@ -107,7 +107,7 @@ description: Turns milestones into instructions and reviews every change.
 backend: codex
 backend_options: {model: gpt-6.2-sol, effort: medium}
 fallback:
-  - {label: claude-haiku, backend: claude, backend_options: {model: haiku, effort: medium, permission_mode: auto}}
+  - {label: claude-haiku, backend: claude, backend_options: {model: haiku, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}}
   - {label: qwen4-max-preview, backend: opencode, backend_options: {model: alibaba-token-plan-cn/qwen4-max-preview}}
 timeout: 2400
 retries: 1
@@ -122,7 +122,7 @@ checkin_every: 2            # every 2 rounds, a status line for the manager (fro
 role: worker
 description: Does the work in the repository.
 backend: claude
-backend_options: {model: haiku, effort: medium, permission_mode: auto}
+backend_options: {model: haiku, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
 fallback:
   - {label: deepseek-v4-pro, backend: opencode, backend_options: {model: zenmux/deepseek/deepseek-v4-pro}}
   - {label: glm-5.3, backend: opencode, backend_options: {model: alibaba-token-plan-cn/glm-5.3}}
