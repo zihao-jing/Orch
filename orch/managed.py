@@ -1118,14 +1118,42 @@ class ManagedRunner(MonitorRunner):
                         if m.get("activate") is True or (m.get("activate") == "wait" and mode != "between")]
                 if not want or (mode == "between" and self.next_agent() == a.name):
                     continue
-                self.message_turn(a, want)
+                self.message_turn(a, want, mode)
                 ran = True
                 if self.should_stop():
                     return
             if not ran:
                 return
 
-    def message_turn(self, a: AgentConfig, want: List[Dict[str, Any]]) -> None:
+    def worker_working(self, mode: str = "") -> bool:
+        """A worker is in a turn now (orch's, or its session open in a terminal)."""
+        return mode == "stage" or any(self.rec.agent_busy(w.name) or self.terminal_busy(w) for w in self.workers)
+
+    def worker_idle_why(self) -> str:
+        """Why no worker is working now, in a few words for the critic's message turn."""
+        mg = self.mg
+        g = mg.get("gate") or {}
+        if g.get("kind") in ("plan", "milestone", "workers"):
+            return "the run is waiting for my decision at a gate"
+        if g.get("kind") == "wait" or mg.get("phase") == "wait":
+            return "the work is paused until a task of mine is done"
+        if mg.get("phase") == "job" or mg.get("job"):
+            return "its background job is still running, and your review waits for the job to end"
+        if mg.get("held"):
+            return "the work is held until I answer a question or close a discussion"
+        return "it is between two turns"
+
+    def critic_turn_prompt(self, mode: str) -> str:
+        """The critic's message turn. The worker in a turn: the update goes to it now. Its next turn comes before the
+        critic's (the step is given): an update goes with that step. Otherwise the critic's next step carries the
+        change, so no separate update is written to wait in the queue and stack with that step."""
+        if self.worker_working(mode):
+            return self.mtpl("critic_message_turn")
+        if self.mg.get("phase") in ("work", "parallel", "workers_gate"):
+            return self.mtpl("critic_message_turn_next")
+        return self.mtpl("critic_message_turn_idle", why=self.worker_idle_why())
+
+    def message_turn(self, a: AgentConfig, want: List[Dict[str, Any]], mode: str = "wait") -> None:
         self._activating = True
         self._hops = max(int(m.get("hops") or 1) for m in want)
         frm = sorted({m["from"] for m in want})
@@ -1133,8 +1161,8 @@ class ManagedRunner(MonitorRunner):
         self.rec.event("activation", agent=a.name, msgs=[m["id"] for m in want])
         checks = a.role == "verifier" and all(m.get("kind") == "progress_check" for m in want)
         try:  # woken by a progress check that found a problem: it messages the worker if needed, nothing goes up
-            prompt = self.mtpl("manager_message_turn" if a.role == "manager" else
-                               "critic_check_turn" if checks else "critic_message_turn")
+            prompt = (self.mtpl("manager_message_turn") if a.role == "manager" else
+                      self.mtpl("critic_check_turn") if checks else self.critic_turn_prompt(mode))
             gate = self.mg.get("gate") or {}
             if a.role == "manager" and gate.get("kind") == "milestone":
                 prompt = prompt.rstrip() + "\n\n" + self.mtpl("manager_message_at_gate",

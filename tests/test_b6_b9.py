@@ -217,6 +217,46 @@ class TestDiscussion(unittest.TestCase):
         self.assertEqual(r.held_by("kickoff"), "")
 
 
+class TestCriticMessageTurn(unittest.TestCase):
+    """The critic's message turn says what the worker is actually doing (it said "may still be working" always,
+    also at a gate, so the critic wrote the idle worker an update that waited and stacked with its next step)."""
+
+    def test_prompt_follows_what_the_worker_does(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        r.mg.update(phase="gate", gate={"kind": "milestone", "key": "milestone-0-1"})
+        p = r.critic_turn_prompt("wait")
+        self.assertIn("Sam is not working right now: the run is waiting for my decision at a gate", p)
+        self.assertIn("don't write to Sam now", p)
+        self.assertNotIn('<message to="Sam">', p)
+        self.assertNotIn("may still be working", p)
+        r.mg.update(phase="job", gate=None, job={"since": "x"})
+        self.assertIn("its background job is still running", r.critic_turn_prompt("wait"))
+        r.mg.update(phase="work", job=None)  # the step is given; the worker's turn comes next
+        p = r.critic_turn_prompt("between")
+        self.assertIn("its next turn starts with the step you\nalready gave", p)
+        self.assertIn('<message to="Sam">', p)
+        p = r.critic_turn_prompt("stage")  # the worker's turn runs
+        self.assertIn("Sam is working: leave that work running", p)
+        self.assertIn('<message to="Sam">', p)
+
+    def test_message_at_a_milestone_gate_gets_the_idle_prompt(self):
+        cfg = make_cfg(Path(tempfile.mkdtemp()), [managed(controller={"approve_milestones": True}, mgr={"milestones": 1})])
+        L = Live(self, cfg)
+        st, _ = L.gate("milestone")
+        L.control({"to": ["critic"], "message": "GATE-NOTE: the tables can stay long.", "from": "boss", "via": "chat",
+                   "source": "chat-001"}, "board-note")
+        L.until(lambda st: any("GATE-NOTE" in m.get("body", "") and m["status"] == "delivered"
+                               for m in st.get("messages") or []), "the note delivered to the critic")
+        L.control({"kind": "gate", "decision": "approve", "message": "", "gate": st["managed"]["gate"]["key"]}, "ok")
+        status, rec = L.done()
+        self.assertEqual(status, "completed")
+        inc = [t for t in turns(rec) if t["agent"] == "critic" and t["purpose"] == "incoming"]
+        self.assertEqual(len(inc), 1)
+        self.assertIn("GATE-NOTE", inc[0]["input"])
+        self.assertIn("is not working right now: the run is waiting for my decision at a gate", inc[0]["input"])
+        self.assertNotIn("may still be working", inc[0]["input"])
+
+
 class TestMilestoneFallback(unittest.TestCase):
     def test_reopen_marks_state_and_checklist(self):
         r = unit(Path(tempfile.mkdtemp()))
