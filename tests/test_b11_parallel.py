@@ -3,6 +3,7 @@ budget (more goes to me at a gate); copies of the worker run at the same time, e
 tag and monitor; the critic hands out steps by id and reviews each step on its own, one review at a time; orch keeps
 the work board. All with the mock backend: no live agents."""
 
+import copy
 import json
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from orch import parallel as PW  # noqa: E402
+from orch.backends import MockBackend, TurnResult  # noqa: E402
 from orch.recorder import Recorder, read_json  # noqa: E402
 from role_view_checks import assert_no_role_leaks  # noqa: E402
 from test_b6_b9 import Live  # noqa: E402
@@ -165,6 +168,167 @@ class TestParallelRun(Base):
         self.assertIn("are not all ticked", (rec.run_dir / "progress.md").read_text())
         nudged = [t for t in turns(rec) if t["purpose"] == "par_review" and "not all `[x]`" in t["input"]]
         self.assertEqual(len(nudged), 1)
+
+
+class TestParallelResume(Base):
+    def fail_assignment(self, cfg, stop=None):
+        original = MockBackend.run
+
+        def fail(backend, req, should_stop):
+            if req.context.get("purpose") == "par_assign":
+                if stop is not None:
+                    stop.set()
+                return TurnResult("stopped" if stop is not None else "timeout", "", req.session_id)
+            return original(backend, req, should_stop)
+
+        with mock.patch.object(MockBackend, "run", fail):
+            status, rec = run(cfg, stop=stop)
+        self.assertEqual(status, "stopped" if stop is not None else "failed")
+        self.assertEqual(rec.state["managed"]["phase"], "parallel")
+        self.assertFalse(any(t["purpose"] == "work" for t in turns(rec)))
+        return rec
+
+    def assert_completed_once(self, cfg):
+        status, rec = run(cfg, resume=True)
+        self.assertEqual(status, "completed", rec.state.get("error"))
+        work = [t for t in turns(rec) if t["purpose"] == "work"]
+        self.assertEqual(sorted(t["agent"] for t in work), ["writer", "writer-2", "writer-3"])
+        self.assertNotIn("par", rec.state["managed"])
+        return rec
+
+    def test_assignment_timeout_keeps_assignment_pending_on_resume(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}})
+        rec = self.fail_assignment(cfg)
+        par = read_json(rec.run_dir / "state.json")["managed"]["par"]
+        self.assertTrue(par["active"])
+        self.assertTrue(par["assign_due"])
+        self.assertEqual({s["status"] for s in par["slots"].values()}, {PW.IDLE})
+        rec = self.assert_completed_once(cfg)
+        assignments = [t for t in turns(rec) if t["purpose"] == "par_assign"]
+        self.assertEqual([t["status"] for t in assignments], ["timeout", "ok"])
+        self.assertEqual(assignments[0]["session_id"], assignments[1]["session_id"])
+
+    def test_stop_during_assignment_keeps_assignment_pending(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}})
+        rec = self.fail_assignment(cfg, stop=threading.Event())
+        self.assertTrue(rec.state["managed"]["par"]["assign_due"])
+        self.assert_completed_once(cfg)
+
+    def test_assignment_failure_preserves_worktrees_until_completion(self):
+        git_repo(self.tmp / "ws")
+        cfg = self.cfg(controller={"worker_worktrees": True},
+                       worker={"files": {}, "delays": {"work": 0.01}})
+        rec = self.fail_assignment(cfg)
+        paths = [Path(s["worktree"]["path"]) for s in rec.state["managed"]["par"]["slots"].values()
+                 if s.get("worktree")]
+        self.assertEqual(len(paths), 2)
+        self.assertTrue(all(p.is_dir() for p in paths))
+        self.assertFalse(any(e["event"] == "worktree_end" for e in events(rec)))
+        rec = self.assert_completed_once(cfg)
+        self.assertFalse(any(p.exists() for p in paths))
+        self.assertEqual(len([e for e in events(rec) if e["event"] == "worktree_end"]), 2)
+
+    def archive_unstarted(self, rec):
+        mg = rec.state["managed"]
+        last = mg.pop("par")
+        last.update(active=False, assign_due=False, ended_at="2026-11-20T00:00:00Z")
+        mg["par_last"] = last
+        rec.save()
+        return last
+
+    def test_legacy_unstarted_archive_is_recovered(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}})
+        rec = self.fail_assignment(cfg)
+        self.archive_unstarted(rec)
+        rec = self.assert_completed_once(cfg)
+        self.assertTrue(any(e["event"] == "parallel_recovered" for e in events(rec)))
+
+    def test_unsafe_or_missing_legacy_archive_is_rejected_without_work(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}})
+        rec = self.fail_assignment(cfg)
+        pristine = copy.deepcopy(self.archive_unstarted(rec))
+        cases = [{}, {**pristine, "ms": 99}, {**pristine, "turns": 1},
+                 {**pristine, "worktrees": True}, {**pristine, "reviews": ["writer"]}]
+        for change in ({"status": PW.DONE}, {"step": 1}, {"turns": 1}, {"worktree": {"path": "gone"}},
+                       {"done_steps": [1]}):
+            last = copy.deepcopy(pristine)
+            last["slots"]["writer"].update(change)
+            cases.append(last)
+        for last in cases:
+            with self.subTest(archive=last):
+                rec.state["managed"]["par_last"] = last
+                rec.save()
+                status, resumed = run(cfg, resume=True)
+                self.assertEqual(status, "failed")
+                self.assertIn("cannot safely restore", resumed.state.get("error", ""))
+                self.assertNotIn("Traceback", resumed.state["error"])
+                self.assertNotIn("par", resumed.state["managed"])
+                self.assertEqual(resumed.state["managed"]["par_last"], last)
+                self.assertFalse(any(t["purpose"] == "work" for t in turns(resumed)))
+
+    def test_review_timeout_keeps_reports_and_collects_workers_before_resume(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}})
+        original = MockBackend.run
+        review_failed = threading.Event()
+        finished = []
+
+        def fail(backend, req, should_stop):
+            purpose = req.context.get("purpose")
+            if purpose == "par_review":
+                self.assertEqual(finished, ["writer"])
+                review_failed.set()
+                return TurnResult("timeout", "", req.session_id)
+            if purpose == "work" and req.agent != "writer":
+                self.assertTrue(review_failed.wait(10), "first worker was never reviewed")
+            result = original(backend, req, should_stop)
+            if purpose == "work":
+                finished.append(req.agent)
+            return result
+
+        with mock.patch.object(MockBackend, "run", fail):
+            status, rec = run(cfg)
+        self.assertEqual(status, "failed")
+        self.assertIn("critic par_review turn ended with status timeout", rec.state["error"])
+        par = read_json(rec.run_dir / "state.json")["managed"]["par"]
+        self.assertEqual(sorted(par["reviews"]), ["writer", "writer-2", "writer-3"])
+        for name, slot in par["slots"].items():
+            self.assertEqual(slot["status"], PW.REVIEW)
+            self.assertIn(f"out/{name}.txt", slot["report"])
+        rec = self.assert_completed_once(cfg)
+        reviews = [t for t in turns(rec) if t["purpose"] == "par_review"]
+        self.assertEqual(len(reviews), 4)
+        for review in reviews:
+            self.assertIn(f"out/{review['par_worker']}.txt", review["input"])
+
+    def test_worker_error_during_failed_review_does_not_discard_other_results(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}}, worker_cfg={"retry_waits": []})
+        original = MockBackend.run
+        review_failed = threading.Event()
+
+        def fail(backend, req, should_stop):
+            purpose = req.context.get("purpose")
+            if purpose == "par_review":
+                review_failed.set()
+                return TurnResult("timeout", "", req.session_id)
+            if purpose == "work" and req.agent != "writer":
+                self.assertTrue(review_failed.wait(10))
+                if req.agent == "writer-2":
+                    return TurnResult("error", "worker failed", req.session_id)
+            return original(backend, req, should_stop)
+
+        with mock.patch.object(MockBackend, "run", fail):
+            status, rec = run(cfg)
+        self.assertEqual(status, "failed")
+        self.assertIn("critic par_review turn ended with status timeout", rec.state["error"])
+        par = rec.state["managed"]["par"]
+        self.assertEqual(sorted(par["reviews"]), ["writer", "writer-3"])
+        self.assertTrue(par["slots"]["writer-2"]["prompt"])
+        self.assertTrue(any(e["event"] == "parallel_worker_failed" and e["agent"] == "writer-2"
+                            for e in events(rec)))
+        status, rec = run(cfg, resume=True)
+        self.assertEqual(status, "completed", rec.state.get("error"))
+        work = [t for t in turns(rec) if t["purpose"] == "work"]
+        self.assertEqual(sorted(t["agent"] for t in work), ["writer", "writer-2", "writer-2", "writer-3"])
 
 
 CK4_OPEN = CK_OPEN + "\n## Step 4: index\n- [ ] index D done\n"

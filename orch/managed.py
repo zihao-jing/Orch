@@ -2568,7 +2568,11 @@ class ManagedRunner(MonitorRunner):
             self.rec.save()
         self.adopt_state_files()
         self.setup_boards()
-        self.par_restore()  # B11: a parallel section a restart cut off gets its workers back
+        try:
+            self.par_restore()  # B11: a parallel section a restart cut off gets its workers back
+        except _Failed as f:
+            self.rec.set(error=str(f))
+            return "failed"
         while True:
             self.check_control()
             self.audit_collect()  # an audit that finished while the rounds went on
@@ -3547,6 +3551,25 @@ class ManagedRunner(MonitorRunner):
         """After a restart in the middle of a parallel section: its copies come back; a turn that was cut off runs
         again (with the prompt it had)."""
         par = self.mg.get("par") or {}
+        if self.mg.get("phase") == "parallel" and not par:
+            # Older failure cleanup archived the section without changing its phase. Only an untouched
+            # assignment can be recovered from that archive: ended worktrees or completed work cannot be replayed.
+            last = self.mg.get("par_last") or {}
+            slots = last.get("slots") or {}
+            if (slots and last.get("ms") == self.mg.get("ms") and last.get("turns") == 0
+                    and not last.get("worktrees") and not last.get("reviews")
+                    and all(s.get("status") == PW.IDLE and s.get("turns") == 0 and s.get("step") is None
+                            and not s.get("worktree") and not s.get("done_steps") for s in slots.values())):
+                import copy
+                par = copy.deepcopy(last)
+                par.update(active=True, assign_due=True)
+                par.pop("ended_at", None)
+                self.mg["par"] = par
+                self.rec.event("parallel_recovered", reason="unassigned section archived by older failure cleanup")
+                self.rec.save()
+            else:
+                raise _Failed("Cannot resume parallel work: active section state is missing and its archive "
+                              "cannot safely restore an unstarted assignment; inspect the saved run state.")
         if not par.get("active"):
             return
         base = self.workers[0]
@@ -3613,7 +3636,7 @@ class ManagedRunner(MonitorRunner):
                     self.par_after_turn(futs.pop(f), f.result())
                 self.par_poll_jobs()
                 if par["reviews"]:  # one review at a time, in the order the steps finished
-                    self.par_review(par["reviews"].pop(0))
+                    self.par_review(par["reviews"][0])
                     continue
                 slots = par["slots"]
                 idle = [n for n, s in slots.items() if s["status"] == PW.IDLE]
@@ -3648,8 +3671,16 @@ class ManagedRunner(MonitorRunner):
             with self.unlocked():
                 checks()
                 ex.shutdown(wait=True)
-            if not ok and not self.should_stop():  # failed: the section ends here
-                self.par_end(mg)
+            if not ok and not self.should_stop():
+                # A failed critic turn must not destroy resumable slots, queues, or worktrees. Workers may
+                # have completed while the critic failed: collect them after shutdown so resume reviews their
+                # results instead of replaying their work. Failed workers retain their saved session/prompt.
+                for future, name in futs.items():
+                    try:
+                        self.par_after_turn(name, future.result())
+                    except Exception as error:  # keep the original failure and collect the other workers too
+                        self.rec.event("parallel_worker_failed", agent=name, error=str(error))
+                self.rec.save()
         return self.par_finish(mg)
 
     def par_checks(self, n: int) -> Callable[[], None]:
@@ -3930,7 +3961,6 @@ class ManagedRunner(MonitorRunner):
     def par_assign(self, idle: List[str]) -> None:
         """The critic hands out steps to the workers without one (one turn, one <to> section each)."""
         par, c = self.par, self.critic
-        par["assign_due"] = False
         ids = ", ".join(f"`{n}`" + (f" ({self.mon.agent(n).called})" if self.mon.agent(n).called != n else "")
                         for n in par["slots"])
         base = self.workers[0]
@@ -3952,6 +3982,7 @@ class ManagedRunner(MonitorRunner):
             raise _Failed(f"{c.name}'s assignment turn ended with status {r['status']}")
         self.rec.set(nudge=None)
         given = self.par_give(PW.to_sections(r.get("output") or ""), r["turn_id"])
+        par["assign_due"] = False
         self.par_questions_up(r)
         left = [n for n in idle if n not in given]
         if left:
@@ -3971,7 +4002,7 @@ class ManagedRunner(MonitorRunner):
         """One review of one worker's step (main thread; one at a time)."""
         par, c, v = self.par, self.mon.controller, self.critic
         s, w = par["slots"][name], self.mon.agent(name)
-        summary = self._par_rounds.pop(name, None) or {"round": s.get("round") or self.st.get("round", 0),
+        summary = self._par_rounds.get(name) or {"round": s.get("round") or self.st.get("round", 0),
                                                        "turns": [x for x in [s.get("turn_id")] if x]}
         try:
             ck = self.checklist_board()
@@ -3983,16 +4014,20 @@ class ManagedRunner(MonitorRunner):
         tail = (self.mtpl("critic_par_next", next_step=PW.step_title(ck, nxt)[1], who=f"`{name}`") if nxt
                 else self.mtpl("critic_par_last", who=f"`{name}`"))
         nudge = (self.st.get("nudge") or {}).get(v.name, "")
-        raw_report = s.pop("report", "")
+        raw_report = s.get("report", "")
         report = self.report_text({"output": raw_report, "status": s.get("report_status", "ok")})
         prompt = self.mtpl("critic_par_review", human_messages=nudge, who=w.called, id=name, step=title,
                            report=report, next=tail.strip() and " " + tail.strip(), board=str(self.work_board_path()))
-        held = s.pop("running_jobs", None) or {}
+        held = s.get("running_jobs") or {}
         running = self.alive_jobs({name: held}) if held else {}
         if running:  # processes it left running: the critic decides whether its step waits for them
             prompt = prompt.rstrip() + "\n\n" + self.mtpl(
                 "critic_jobs_running", who=w.called, jobs="; ".join(running[name]["lines"])).strip()
         r = self.say(v, prompt, "par_review", rnd=int(summary.get("round") or 0), extra={"par_worker": name})
+        par["reviews"].remove(name)  # consume only after the critic returns, before saving its decisions
+        self._par_rounds.pop(name, None)
+        s.pop("report", None)
+        s.pop("running_jobs", None)
         summary["turns"] = (summary.get("turns") or []) + [r["turn_id"]]
         chosen = self.wait_job_choice(r.get("output") or "", running).get(name)
         if chosen:  # the step waits for the job, watched by the progress checks (par_poll_jobs)
