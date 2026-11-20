@@ -127,6 +127,9 @@ Goal: the manager reviews as the user would, from a limited view.
 - Add the research guidance from `collaboration-preferences.md` to the manager prompt.
 - Discussion mode: an explicit board switch. While on, the manager sends nothing to the critic. When the user turns
   it off, the manager sends one batch with the new directions; the critic decides whether to interrupt the worker.
+  Ended while a plan or milestone gate is open, nothing is sent yet: the board asks for approve or send back, and the
+  manager's one turn after that decision (feedback, kickoff, or the reworked plan) carries both the discussion and the
+  decision, so the critic and the worker get one message instead of two.
 - Milestone fallback: the board can move a milestone back to open (display and checklist state). No extra prompt to
   the manager.
 
