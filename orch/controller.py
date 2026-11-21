@@ -814,6 +814,8 @@ class MonitorRunner:
             record["continues"] = cut.get("turn")
         if sid and sess.get("terminal_use"):  # turns typed in a terminal report no cost; this turn's increase has them
             record["cost_includes_terminal"] = sess["terminal_use"]
+        if (self.st.get("reliability", {}).get(agent.name) or {}).get("state") == "failed":
+            self.set_reliability(agent, state=None)  # the new attempt replaces the previous turn's failure
         rec.write_turn(record)  # relayed messages stay queued until the turn ends, so a restart re-sends them
         if big_input:
             self.size_warning(agent, record, f"a large input ({len(prompt):,} characters)")

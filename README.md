@@ -368,6 +368,11 @@ orch terminal .                                # the command that opens the mana
 orch report .orch/runs                         # regenerate HTML
 ```
 
+The live board shows current status while loading older messages in the background. On slow or shared storage,
+you can also create an empty `DISABLE_HTML_REPORTS` file inside a run directory to stop rebuilding its legacy
+HTML reports after every turn. The live board and original run records remain available; `orch report` can
+still regenerate the HTML explicitly.
+
 Pressing Ctrl-C in `orch run` stops cleanly: running agent processes are terminated and the run is marked
 `stopped`, so `--resume` can pick it up later.
 

@@ -467,6 +467,10 @@ class Recorder:
     # ------------------------------------------------------------------ reports
 
     def refresh_reports(self) -> None:
+        # The live board reads the recorded data directly. Runs that do not use the legacy HTML
+        # reports can avoid rebuilding all history on every turn, especially on network storage.
+        if (self.run_dir / "DISABLE_HTML_REPORTS").exists():
+            return
         from . import report
         try:
             with self.lock:

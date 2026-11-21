@@ -92,6 +92,31 @@ class TimelineTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
+    def test_message_models_come_from_each_turn_and_chat(self):
+        rd = make_run(self.tmp, milestones=1, rounds=1, chats=1)
+        for path in rd.glob("rounds/r*/t*.json"):
+            t = json.loads(path.read_text())
+            t["model"] = "historical-backup"
+            if t["agent"] == "writer":
+                t.update(status="running", model="worker-primary")
+            path.write_text(json.dumps(t))
+        with (rd / "chat.jsonl").open("a") as f:
+            f.write(json.dumps({"id": "chat-000-1", "model": "chat-backup",
+                               "text": '<message to="critic">Proceed</message>'}) + "\n")
+        b = Board("m", lambda: rd)
+        state = b.state()
+        self.assertEqual(state["running"][0]["model"], "worker-primary")
+        items = [it for g in state["tl_groups"] for it in b.items(g["key"], all_=True)["items"]]
+        for it in items:
+            if it["id"].startswith("t:"):
+                self.assertEqual(it["model"], "worker-primary" if it["from"] == "writer" else "historical-backup")
+            elif it["id"].startswith("c:chat-000-1"):
+                if it["from"] == "you":
+                    self.assertNotIn("model", it)
+                else:
+                    self.assertEqual(it["model"], "chat-backup")
+        self.assertEqual(next(c for c in state["chat"] if c["id"] == "chat-000-1")["model"], "chat-backup")
+
     def test_helpers(self):
         self.assertEqual(block_of("human", "manager"), "user")
         self.assertEqual(block_of("manager", "verifier"), "mc")

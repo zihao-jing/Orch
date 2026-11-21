@@ -1797,7 +1797,7 @@ def _redact(cmd: List[str], req: TurnRequest) -> List[str]:
 
 
 def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
-                 session_key: Optional[str] = None) -> TurnResult:
+                 session_key: Optional[str] = None, on_model: Optional[Callable[[str], None]] = None) -> TurnResult:
     """One turn outside the main loop (an audit, a chat from the board): the agent's primary model, then its
     backups in order until one works. When the turn continues a session, only the models that can continue it
     (same backend and provider: `session_key`) are tried."""
@@ -1807,6 +1807,8 @@ def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
     for v in agent.variants():
         if req.session_id and session_key and v.session_key != session_key:
             continue
+        if on_model:
+            on_model(v.label)
         try:
             marks = {k: x for k, x in (req.env or {}).items() if k.startswith("ORCH_")}  # orch's own, kept for backups
             res = get_backend(v.backend).run(dataclasses.replace(req, options=v.options, env={**v.env, **marks}),

@@ -242,14 +242,14 @@ class Builder:
             self.add(f"t:{tid}", ts, agent, to, kind, line, status, tid=tid, purpose=purpose,
                      ms=t.get("milestone") if t.get("milestone") is not None else -1, _turn=True,
                      len=t.get("output_len"), in_len=t.get("input_len"), verdict=t.get("verdict"),
-                     round=t.get("round"))
+                     round=t.get("round"), model=t.get("model"))
             for r in rows:  # each <message> it passed on to another level: an item in that block too
                 if r.get("status") == "you" or not r.get("to") or self.role_of(r.get("to")) == to_role:
                     continue
                 self.add(f"t:{tid}:{r.get('i')}", ts, agent, str(r.get("to")), "msg",
                          r.get("preview") or "", _ROUTE_STATUS.get(str(r.get("status")), str(r.get("status") or "")),
                          tid=tid, ms=t.get("milestone") if t.get("milestone") is not None else -1, _turn=True,
-                         urgent=r.get("urgent"))
+                         urgent=r.get("urgent"), model=t.get("model"))
             rem = list(t.get("reminders") or []) or (["tags"] if t.get("tag_reminder") else [])
             if rem:
                 self.add(f"r:{tid}", ts, "orch", agent, "reminder", "reminder added: " + ", ".join(map(str, rem)),
@@ -275,7 +275,7 @@ class Builder:
             status = "running" if run else ("" if c.get("status") in ("ok", None) else str(c.get("status")))
             self.add(f"c:{cid}", c.get("ts"), who, "you", "msg", "writing…" if run else line_of(c.get("text") or ""),
                      status, block=blk, qid=c.get("qid"), via="chat", tid=cid if run else None,
-                     problems=len(c.get("problems") or []) or None)
+                     problems=len(c.get("problems") or []) or None, model=c.get("model"))
             if run:
                 continue
             bodies = T.blocks(c.get("text") or "", "message")
@@ -284,7 +284,7 @@ class Builder:
                 body = bodies[i][1] if isinstance(i, int) and i < len(bodies) else ""
                 self.add(f"c:{cid}:{i}", c.get("ts"), who, str(r.get("to") or ""), "msg", line_of(body),
                          _ROUTE_STATUS.get(str(r.get("status")), str(r.get("status") or "")), via="chat",
-                         urgent=r.get("urgent"))
+                         urgent=r.get("urgent"), model=c.get("model"))
 
     def notes(self) -> None:
         """Notes I left for an agent (board notes) and my answers, from inbox/ (read or still waiting)."""

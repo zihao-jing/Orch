@@ -204,6 +204,7 @@ details.bcard>summary:before{content:"▸";color:var(--mute)}details.bcard[open]
 .bmore{display:flex;gap:10px;align-items:center;font-size:12px;color:var(--mute);padding:4px 4px 2px}
 .sz{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--mute)}.sz.big{color:var(--warn-ink)}
 .rtag{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--mute)}
+.modeltag{font-size:11px;color:var(--mute);overflow-wrap:anywhere}
 details.inp{border:1px dashed var(--ring);border-radius:8px;margin:4px 0 8px;padding:0 8px}details.inp>summary{cursor:pointer;font-size:12px;color:var(--ink2);padding:4px 0}
 .step .cnt{font-size:11px;color:var(--mute);margin-top:4px}
 .blk{border:1px solid var(--ring);border-radius:10px;background:var(--surface);padding:6px 6px 4px;min-width:0}
@@ -461,16 +462,21 @@ function renderNow(mg){  // the switches, and the status area: only the agents w
   $('discpill').hidden = !dw;  // on the main page only while a discussion is open, as a reminder
   const rb = $('reviewbtn'); rb.disabled = !!mg.review_req; rb.textContent = mg.review_req ? '📝 Review asked…' : '📝 Review file';
   const lines = [], lined = new Set();
+  if (D.history_loading) lines.push('<div class="mute">Loading earlier messages… Current project status is shown below.</div>');
+  if (D.history_error) lines.push(`<div class="mute">${esc(D.history_error)}</div>`);
   Object.values(D.status_lines||{}).forEach(x => {  // B5: "Sam: step 3, running 14 min — log active"
     const m = x.since_ts ? Math.max(0, Math.round((Date.now()/1000 - x.since_ts)/60)) : 0, bad = x.status && x.status !== 'ok';
     lined.add(x.agent);
-    lines.push(`<div class="${bad ? 'bad' : ''}" title="${esc(x.checked_at ? 'last check ' + x.checked_at : 'no check yet')}"><span class="dot live"></span> <b>${esc(called(x.agent))}</b>: ${x.step ? esc(x.step) + ', ' : ''}${x.kind === 'job' ? 'job running' : 'running'} ${m} min — ${esc(x.summary||'')}</div>`); });
+    const running = (D.running||[]).find(t => t.agent === x.agent);
+    lines.push(`<div class="${bad ? 'bad' : ''}" title="${esc(x.checked_at ? 'last check ' + x.checked_at : 'no check yet')}"><span class="dot live"></span> <b>${esc(called(x.agent))}</b>${running ? ' · ' + modelBadge(running.model) : ''}: ${x.step ? esc(x.step) + ', ' : ''}${x.kind === 'job' ? 'job running' : 'running'} ${m} min — ${esc(x.summary||'')}</div>`); });
   (D.running||[]).forEach(t => { if (lined.has(t.agent)) return; lined.add(t.agent);
-    lines.push(`<div><span class="dot live"></span> <b>${esc(called(t.agent))}</b>: ${esc(DOING[t.purpose]||t.purpose)}, running ${mins(t.started_at)} min</div>`); });
+    lines.push(`<div><span class="dot live"></span> <b>${esc(called(t.agent))}</b> · ${modelBadge(t.model)}: ${esc(DOING[t.purpose]||t.purpose)}, running ${mins(t.started_at)} min</div>`); });
   if (D.auditing) {  // the auditor reads how the agents talked (not the task): shown so the run does not look idle
     const au = D.auditing;
     lines.push(`<div><span class="dot live"></span> <b>${esc(called(au.agent || 'auditor'))}</b>: reading how the agents talked, rounds ${au.lo}–${au.hi}, running ${mins(au.since)} min</div>`); }
   Object.entries(D.reliability||{}).forEach(([n, x]) => {  // B8: a retry waiting, or a backup in use
+    // A previous turn's failure is history once a newer turn is running. Keep current retries and backups visible.
+    if (x.state === 'failed' && x.at && (D.running||[]).some(t => t.agent === n && Date.parse(t.started_at) > Date.parse(x.at))) return;
     const what = x.state === 'retrying' ? `${esc(x.model)} failed (${esc(x.reason||'error')}); retry ${x.retry}/${x.of} in ${x.wait_s}s`
       : x.state === 'switched' ? `switched to backup ${esc(x.model)} (${esc(x.reason||'error')})`
       : x.state === 'backup' ? `on backup ${esc(x.model)}; ${esc(x.primary||'primary')} again after ${x.until ? new Date(x.until * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'the cooldown'}`
@@ -810,6 +816,9 @@ function itemBody(it){
     return (m.problems||[]).map(p => `<div class="w" style="color:var(--warn-ink)">⚠ ${esc(p)}</div>`).join('') + routedHTML(text, chatRoutes(it.id.slice(2), m.relays), it.id);
   return `<div class="md">${md(text || '(empty)')}</div>`;
 }
+function modelBadge(model){
+  return `<span class="modeltag" title="${esc(model || 'No model was recorded for this message')}">${esc(model ? String(model).split('/').pop() : 'model not recorded')}</span>`;
+}
 function lineHTML(it, where){  // one message: time, sender → recipient, status, kind, first line; unfolds to the full text
   const other = OTHER.has(it.kind), open = openItems.has(it.id);
   const cls = 'ln k-' + it.kind + (other ? ' other' : '') + (it.needs ? ' needs' : '');
@@ -819,10 +828,13 @@ function lineHTML(it, where){  // one message: time, sender → recipient, statu
   const extra = (it.urgent ? '<span class="st running">⚡</span>' : '') + (it.verdict ? pill(it.verdict === 'PASS' ? 'p-good' : 'p-warn', it.verdict === 'PASS' ? '✓ pass' : '↻ needs work') : '')
     + (it.purpose && it.kind === 'msg' ? `<span class="mute" style="font-size:11px">${esc(it.purpose)}</span>` : '');
   const wh = where ? `<span class="ktag">${esc(groupName(it.ms, it.step))}</span>` : '';
+  const generated = it.id.startsWith('t:') || (it.id.startsWith('c:') && it.from !== 'you');
+  const active = it.status === 'running' && (D.running||[]).find(t => t.turn_id === it.tid);
+  const model = generated ? modelBadge((active && active.model) || it.model) : '';
   const whole = it.tid && it.id === 't:' + it.tid;  // a turn's reply: its round and how much went in and came out
   const rd = whole && it.round != null ? `<span class="rtag" title="round ${esc(it.round)}">R${esc(it.round)}</span>` : '';
   const sz = whole && it.in_len != null && it.kind === 'msg' ? `<span class="sz${it.in_len > SZ_BIG ? ' big' : ''}" title="characters in the input to this turn → in its reply">${kchars(it.in_len)} → ${kchars(it.len||0)}</span>` : '';
-  return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${rd}${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${extra}${wh}<span class="pv">${esc(it.line || '')}</span>${sz}</summary>`
+  return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${rd}${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${model}${extra}${wh}<span class="pv">${esc(it.line || '')}</span>${sz}</summary>`
     + (open ? `<div class="fb">${itemBody(it)}</div>` : '') + '</details>';
 }
 const SZ_BIG = 30000;  // an input above this is marked
@@ -837,7 +849,12 @@ function groupName(ms, step){ return (ms < 0 ? 'plan' : 'M' + (ms + 1)) + (step 
 // One milestone at a time (picked in the Milestones card; the current one by default). Below it, one card per level of
 // communication, stacked at full width; in each card the steps of that milestone, the newest open, older ones folded.
 let selMs = null;  // the milestone picked; null follows the current one
-const curMs = () => ((D.tl_groups||[]).find(g => g.key === D.tl_cur) || {}).ms;
+function curMs(){
+  const mg = D.managed || {};
+  // The live run owns the current milestone; history can still be loading or point to an older message.
+  if (Number.isInteger(mg.ms) && (mg.milestones || [])[mg.ms]) return mg.ms;
+  return ((D.tl_groups||[]).find(g => g.key === D.tl_cur) || {}).ms;
+}
 function shownMs(){
   const gs = D.tl_groups || [], mss = (D.managed||{}).milestones || [];
   if (selMs !== null && (mss[selMs] || gs.some(g => g.ms === selMs))) return selMs;
@@ -1192,13 +1209,13 @@ document.addEventListener('toggle', e => { const d = e.target; if (!d.dataset ||
 document.addEventListener('click', e => {  // jump to a turn's reply: open its milestone and step, unfold it, show it
   const a = e.target.closest('a[data-goto]'); if (!a) return; e.preventDefault(); gotoItem('t:' + a.dataset.goto); });
 function replyBubbles(c, name, note, tail){  // one agent reply: its own text, then each message it sent on, as separate bubbles
-  const head = `${esc(name)} · ${tm(c.ts)}${note || ''}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}`;
+  const head = `${esc(name)} · ${tm(c.ts)} · ${modelBadge(c.model)}${note || ''}${c.status && c.status!=='ok' && c.status!=='running' ? ' · ' + esc(c.status) : ''}`;
   if (c.status === 'running') return `<div class="cm"><div class="w">${head}</div><div class="b"><div data-live="${esc(c.id)}"></div></div></div>`;
   const {plain, blocks} = routedBlocks(c.text);
   let h = '';
   if (plain || !blocks.length) h += `<div class="cm"><div class="w">${head}</div><div class="b">${md(plain || c.text || '')}${clipNote(c)}</div></div>`;
   for (const b of blocks)
-    h += `<div class="cm route"><div class="w">${plain || blocks.indexOf(b) ? '' : head + ' · '}→ to ${esc(who(b.to))}${b.urgent ? ' (urgent)' : ''}</div><div class="b">${md(b.body)}</div></div>`;
+    h += `<div class="cm route"><div class="w">${head} · → to ${esc(who(b.to))}${b.urgent ? ' (urgent)' : ''}</div><div class="b">${md(b.body)}</div></div>`;
   return h + (tail ? `<div class="cm">${tail}</div>` : '');
 }
 function problemLine(c){  // <message> blocks in this reply that orch could not send

@@ -175,6 +175,9 @@ class Board:
         self.deltas = StateDeltas()
         self._events: Dict[str, Any] = {}  # events.jsonl, parsed (orch/timeline.py)
         self._tl_lock = threading.Lock()
+        self.background_refresh = False
+        self._refresh_lock = threading.Lock()
+        self._refresh_error = ""
         self._tl: Optional[Tuple[float, Any, Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], str]] = None
 
     @property
@@ -186,14 +189,25 @@ class Board:
         """The run's full model (every turn row, route and message). The page polls `state()`, a slim view of it."""
         return {k: v for k, v in self._model().items() if not k.startswith("_")}
 
-    def _model(self, full: bool = True) -> Dict[str, Any]:
+    def _model(self, full: bool = True, history: bool = True) -> Dict[str, Any]:
         rd = self.run_dir
         if rd is None or not (rd / "state.json").is_file():
             return {"monitor": self.name, "status": "starting"}
         st = read_json(rd / "state.json", {}) or {}
         cfg = read_json(rd / "config.json", {}) or {}
         turns, series, seen = [], [], {}
-        for p in sorted((rd / "rounds").glob("r*/t*.json")):
+        paths = ((rd / "rounds").glob("r*/t*.json") if history else
+                 (rd / "rounds" / f"r{int(st.get('round') or 0):03d}").glob("t*.json"))
+        if not history:
+            # A parallel turn may outlive its round. Refresh it until the historical snapshot
+            # also knows it finished, so cached "running" badges never resurrect on the next poll.
+            cached = self._tl
+            running = {t["turn_id"] for t in cached[2].get("turns", []) if t.get("status") == "running"} \
+                if cached is not None and cached[1] == rd else set()
+            paths = set(paths) | {p for p, (_, entry) in list(self._rows.items()) if entry is not None
+                                 and (entry[0].get("status") == "running" or entry[0]["turn_id"] in running)
+                                 and p.is_relative_to(rd)}
+        for p in sorted(paths):
             hit = self._turn_entry(p)
             if hit is not None:
                 turns.append(hit[0])
@@ -212,7 +226,7 @@ class Board:
             if c.get("status") == "running":
                 live[c["id"]] = self._live_text(rd / "live" / f"{c['id']}.jsonl")
         ledger = st.get("messages") or []
-        relays = _relays(rd, chat_all, turns, ledger)
+        relays = _relays(rd, chat_all, turns, ledger) if history else {}
         routes, received = _routes(rd, turns, seen, cfg.get("agents") or [], st.get("worker_messages") or [], ledger)
         held = {}  # blocks of a reply orch keeps from the next agent by design: logged, not lost
         for m in ledger:
@@ -223,8 +237,12 @@ class Board:
         # work on copies or the next poll would take the steps for running totals and the total would fall.
         turns = [dict(t) for t in turns]
         total_cost = _turn_costs(turns, chat_all)
+        if not history:
+            total_cost = st.get("cost_usd")
         cost_estimate = round(sum(t["cost"] for t in turns if t.get("cost_basis") == "estimate"
                                   and isinstance(t.get("cost"), (int, float))), 4)
+        if not history:
+            cost_estimate = st.get("cost_estimate_usd", 0)
         night_pending: Optional[bool] = st.get("night_queued")  # B9: queued while a question for me is open
         discussion_pending: Optional[bool] = None
         discussion_applying = bool((st.get("managed") or {}).get("discussion_apply")) or any(
@@ -270,7 +288,7 @@ class Board:
             "_chat_all": chat_all,
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
-            "audit": self._audit(rd),
+            "audit": self._audit(rd) if history else {},
             "auditing": st.get("auditing") or None,
         }
 
@@ -414,6 +432,9 @@ class Board:
     # ------------------------------------------------------------------ B9b: the slim state and the timeline
     def _timeline(self, fresh: float = 1.0) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], str]:
         """(model, every item in order, groups, open group key), rebuilt at most once per `fresh` seconds."""
+        hit = self._tl
+        if fresh >= 0 and self.background_refresh and hit is not None and hit[1] == self.run_dir and self._refresh_lock.locked():
+            return hit[2], hit[3], hit[4], hit[5]
         with self._tl_lock:
             rd = self.run_dir
             hit = self._tl
@@ -432,17 +453,50 @@ class Board:
             self._tl = (time.time(), rd, d, items, gs, cur)
             return d, items, gs, cur
 
+    def _background_timeline(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], str]:
+        """Poll current status without queueing HTTP requests behind a full history scan on slow storage."""
+        rd, hit = self.run_dir, self._tl
+        if hit is not None and hit[1] != rd:
+            hit = None
+        if (hit is None or time.time() - hit[0] >= 5) and self._refresh_lock.acquire(blocking=False):
+            def refresh() -> None:
+                try:
+                    # This is the only background builder; request handlers reuse the previous snapshot.
+                    self._build_background_timeline()
+                    self._refresh_error = ""
+                except Exception as e:
+                    self._refresh_error = f"History could not be refreshed: {e}"
+                finally:
+                    self._refresh_lock.release()
+            threading.Thread(target=refresh, name="board-history", daemon=True).start()
+        current = self._model(full=False, history=False)
+        if not current.get("run_id"):
+            return current, [], [], ""
+        if hit is None:
+            return {**current, "history_loading": True, "history_error": self._refresh_error}, [], [], ""
+        d = dict(hit[2])
+        d.update({k: v for k, v in current.items() if k not in (
+            "turns", "series", "relays", "routes", "received", "held", "messages", "audit")})
+        recent = {t["turn_id"]: t for t in current.get("turns") or []}
+        d["turns"] = [recent.pop(t["turn_id"], t) for t in d.get("turns") or []] + list(recent.values())
+        d.update(history_loading=False, history_error=self._refresh_error)
+        return d, hit[3], hit[4], hit[5]
+
+    def _build_background_timeline(self) -> None:
+        # Bypass the stale-read path used by HTTP handlers, without changing their behavior mid-request.
+        self._timeline(fresh=-1.0)
+
     def state(self) -> Dict[str, Any]:
         """What the page polls: the run's status, switches, what needs me and who is working, plus the timeline as
         one-line items for the open step only. Full texts come with /api/message, folded steps with /api/items."""
-        d, items, gs, cur = self._timeline(fresh=0.0)
+        d, items, gs, cur = self._background_timeline() if self.background_refresh else self._timeline(fresh=0.0)
         if not d.get("run_id"):
             return {k: v for k, v in d.items() if not k.startswith("_")}
         mine = [it for it in items if TL.key_of(it) == cur]
         shown = mine[-TL.ITEMS_MAX:]
         mg = d.get("managed") or {}
         out = {k: d.get(k) for k in (
-            "monitor", "run_id", "status", "mode", "round", "max_rounds", "cost", "cost_estimate", "turn_counts",
+            "monitor", "run_id", "status", "mode", "round", "max_rounds", "cost", "cost_estimate", "turn_counts", "history_loading", "history_error",
             "updated_at", "started_at", "error", "night", "night_pending", "discussion", "discussion_pending", "discussion_applying", "discussion_supported",
             "review_files", "golden", "status_lines", "reliability", "stop_reason", "reviews", "agents", "series",
             "chat", "chat_more", "terminal", "live", "queued_answers", "min_score", "can_chat", "audit", "auditing")}
@@ -458,7 +512,7 @@ class Board:
                        if len(c.get("text") or "") > CHAT_CLIP else c for c in d.get("chat") or []]
         ids = {c.get("id") for c in d.get("chat") or []}
         out["relays"] = {k: v for k, v in (d.get("relays") or {}).items() if k in ids}
-        out["running"] = [{k: t.get(k) for k in ("turn_id", "agent", "purpose", "started_at", "milestone")}
+        out["running"] = [{k: t.get(k) for k in ("turn_id", "agent", "purpose", "started_at", "milestone", "model")}
                           for t in d.get("turns") or [] if t.get("status") == "running"]
         out["checklists"] = _checklists(d.get("turns") or [])
         out.update(tl_groups=gs, tl_cur=cur, tl_items=shown, tl_more=len(mine) - len(shown))
@@ -632,7 +686,8 @@ class Board:
                         agent=a.name, role=a.role, prompt=prompt, system_prompt=a.current_system_prompt(),
                         session_id=sid, cwd=a.working_dir, timeout=a.timeout, options=a.backend_options,
                         env=_turn_env(a, rd), context={"purpose": "chat", "monitor": self.mon.name},
-                        on_event=lambda ev: live_event(rd, cid, ev)), lambda: False, sess.get("session_key"))
+                        on_event=lambda ev: live_event(rd, cid, ev)), lambda: False, sess.get("session_key"),
+                        on_model=lambda model: _append(rd / "chat.jsonl", {"id": cid, "model": model}))
                 text, status, new_sid = res.output, res.status, res.session_id or sid
                 cost = (res.meta or {}).get("total_cost_usd")
                 if res.status != "ok" and not text:
@@ -725,7 +780,8 @@ class Board:
                         agent=mgr.name, role=mgr.role, prompt=prompt, system_prompt=mgr.current_system_prompt(),
                         session_id=sid, cwd=mgr.working_dir, timeout=mgr.timeout, options=mgr.backend_options,
                         env=_turn_env(mgr, rd), context={"purpose": "chat", "monitor": self.mon.name},
-                        on_event=lambda ev: live_event(rd, cid, ev)), lambda: False, key)
+                        on_event=lambda ev: live_event(rd, cid, ev)), lambda: False, key,
+                        on_model=lambda model: _append(rd / "chat.jsonl", {"id": cid, "model": model}))
                 text, status, new_sid = res.output, res.status, res.session_id or sid
                 cost = (res.meta or {}).get("total_cost_usd")
                 if res.status != "ok" and not text:
@@ -1415,7 +1471,8 @@ def _handler(boards: Dict[str, Board]):
                     rd = b.run_dir
                     if rd is not None:
                         files = [rd / "state.json", rd / "chat.jsonl"]
-                        new_sig = tuple(f.stat().st_mtime_ns if f.exists() else 0 for f in files)
+                        new_sig = tuple(f.stat().st_mtime_ns if f.exists() else 0 for f in files) + (
+                            b._tl[0] if b._tl is not None else 0,)
                         if new_sig != sig and time.time() - last_state >= STATE_GAP:  # a change inside the gap waits for it
                             sig, last_state = new_sig, time.time()
                             self.wfile.write(b"event: state\ndata: {}\n\n")
@@ -1456,6 +1513,8 @@ def _handler(boards: Dict[str, Board]):
 
 def serve(boards: Dict[str, Board], host: str = "127.0.0.1", port: int = 8765) -> Tuple[ThreadingHTTPServer, str]:
     """Start the board in a background thread; returns (server, url). Tries the next ports if busy."""
+    for board in boards.values():
+        board.background_refresh = True
     last: Optional[Exception] = None
     for p in range(port, port + 20):
         try:

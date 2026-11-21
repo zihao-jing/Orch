@@ -2448,9 +2448,12 @@ class TestFallback(unittest.TestCase):
         m = pipeline()
         m["agents"][0].update(backend_options={"fail_turns": [1]}, fallback=[{"backend_options": {"fail_turns": []}}])
         a = load_config(make_cfg(self.tmp, [m])).monitor("m").agent("w1")
-        res = run_variants(a, TurnRequest("w1", "worker", "hi", "", None, str(self.tmp), 10, {}), lambda: False)
+        selected = []
+        res = run_variants(a, TurnRequest("w1", "worker", "hi", "", None, str(self.tmp), 10, {}), lambda: False,
+                           on_model=selected.append)
         self.assertEqual(res.status, "ok")
         self.assertEqual(len(res.meta["models_tried"]), 2)
+        self.assertEqual(selected, res.meta["models_tried"])
 
 
 class TestAgy(unittest.TestCase):
