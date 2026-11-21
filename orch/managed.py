@@ -334,7 +334,8 @@ class ManagedRunner(MonitorRunner):
         """A compacted session lost the golden board it was given: it gets it again with its next message (once)."""
         if (self.st.get("golden_seen") or {}).pop(agent.name, None) is not None:
             self.rec.event("golden_resend", agent=agent.name, why=how)
-        (self.st.get("review_tpl_seen") or {}).pop(agent.name, None)  # the summary may drop the review instructions
+        (self.st.get("review_tpl_seen") or {}).pop(agent.name, None)
+        (self.st.get("rubric_seen") or {}).pop(agent.name, None)  # the summary may drop the review instructions
         self.rec.save()
 
     # ---- B6: the manager's rubric for each milestone (3–8 criteria for that milestone's work)
@@ -4495,9 +4496,10 @@ class ManagedRunner(MonitorRunner):
             r = self.say(self.critic, self.mtpl("critic_report", limit_note=note, human_messages=""), "report")
             report = self.upward(r["output"])
         plan = self.latest_plan()
-        if plan:  # where the work stands, step by step
+        if plan:  # where the work stands, step by step; one line once every step is done
             pd, pt, _cur = plan_status(plan)
-            report += "\n\n" + self.mtpl("report_plan", done=pd, total=pt, plan=plan).strip()
+            report += "\n\n" + self.mtpl("report_plan_done" if pt and pd == pt else "report_plan",
+                                           done=pd, total=pt, plan=plan).strip()
         ck = self.latest_checklist()
         if ck:  # the manager judges the milestone with the critic's own list in view; the worker never gets it
             done, open_ = checklist_state(ck)
@@ -4508,9 +4510,17 @@ class ManagedRunner(MonitorRunner):
 
     def ph_mreview(self, mg: Dict[str, Any]) -> Optional[str]:
         c, ms = self.mon.controller, self.cur()
-        r = self.say(self.manager, self.mtpl("manager_review", n=mg["ms"] + 1, title=ms["title"],
-                                             report=mg.get("report", ""), human_messages="",
-                                             rubric=self.rubric_text(ms)), "review")
+        m = self.manager
+        sid = (self.st["sessions"].get(m.name) or {}).get("session_id")
+        key = [mg["ms"], ms.get("rubric_turn") or ""]  # a re-review in the same session: the rubric is already there
+        seen = (self.st.get("rubric_seen") or {}).get(m.name)
+        rubric = (self.mtpl("rubric_unchanged").strip() if sid and ms.get("rubric") and seen == [sid] + key
+                  else self.rubric_text(ms))
+        r = self.say(m, self.mtpl("manager_review", n=mg["ms"] + 1, title=ms["title"],
+                                  report=mg.get("report", ""), human_messages="", rubric=rubric), "review")
+        sid = (self.st["sessions"].get(m.name) or {}).get("session_id")
+        if sid and r.get("status") == "ok" and ms.get("rubric"):
+            self.st.setdefault("rubric_seen", {})[m.name] = [sid] + key
         out = r.get("output") or ""
         dec = T.value(out, "decision")
         if dec not in ("ACCEPT", "REVISE"):

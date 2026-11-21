@@ -8,7 +8,7 @@ These are review dispositions, not evidence that code changes are deployed.
 - [rejected] Human-answer leakage: the cited Q3/Q10 decisions were deliberately forwarded with role-view wrapping. Provenance alone does not establish a forbidden route.
 - [accepted design] Milestone session resets and their handovers are intentional. No context-loss failure was established in the cited reset.
 - [fix agreed] Repeated critic verification template: reversed 2026-11-21; full instructions once per session, a short line after.
-- [won't fix] Repeated manager review instructions: user chose to leave them unchanged. Dynamic checklist and rubric text is useful review context.
+- [fix agreed] Repeated manager review instructions: reversed 2026-11-21; protocol rules and an unchanged rubric are no longer resent. Dynamic checklist and rubric text is useful review context.
 - [confirmed; fix agreed] Worker acknowledgment loop: untagged completion prose plus FAIL repeatedly dispatched finished workers. The replacement protocol requires explicit worker messages; check the recorded protocol version before evaluating later turns.
 - [merged] Broad critic feedback and supposed identical tiny reviews: covered by explicit message routing and concise progress records. The cited tiny inputs included different worker ids and acknowledgments; equal lengths were not equal content.
 - [fix agreed] Delayed progress notes: timestamp and identify short historical critic progress records, delivered at the manager's next turn. Delays alone do not violate the nonurgent policy; no incorrect manager decision was established.

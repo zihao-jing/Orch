@@ -122,7 +122,7 @@ Exact instrumentation and presentation remain implementation details. This agree
 ## Lower-priority review
 
 - Repeated critic verification template: *reversed 2026-11-21: fix implemented.* The full review instructions go out once per session and after a compaction; later reviews get a short line. With `checklist: true` the checklist file decides the verdict (no tag needed; an explicit FAIL still holds the work back).
-- Manager review prompt repetition: user chose to ignore this item; no change planned. The audit's total “Orch-originated” share includes useful checklist and rubric data and is not a measure of waste.
+- Manager review prompt repetition: *reversed 2026-11-21: fix implemented.* The review, kickoff, question and feedback templates no longer repeat protocol rules; a re-review in the same session says "Rubric unchanged."; a finished plan is one line with the file path. The audit's total “Orch-originated” share includes useful checklist and rubric data and is not a measure of waste.
 - Broad critic feedback during individual worker reviews: user confirmed this is covered by the agreed routing and concise progress-note changes; no separate mechanism planned. In `r060-t02-critic`, the critic wrote a 3,318-character response including a five-case completion overview while reviewing one worker. Worker-directed feedback should focus on that worker's assignment, with a concise overall update routed upward.
 
 All 17 audit items have now been reviewed and their independently supported improvements discussed. Remaining claims concern intentional milestone session resets, supposed restart/report context loss contradicted by session records, permitted human-answer routing, or latency diagnoses unsupported by response length. They do not establish additional fixes. The checklist HTML-comment issue remains separate from this audit list.
@@ -171,6 +171,7 @@ Replay representative historical audit inputs with their matching historical des
 - Selected an explicit auditor-format reminder for priority 2; parser hardening deferred. The user considers this an auditor behavior/performance issue rather than an Orch bug.
 - Agreed to timestamp concise critic progress records, wrap them clearly as historical progress, and deliver them on the manager's next turn. Agreed to improve timing visibility; automatic note consolidation and timeout changes are not included.
 - 2026-11-21 (ICLR2027-rebuttal-mining audit review): reversed the won't-fix on the repeated critic review template; the verdict is read from the checklist file when no tag is given.
+- 2026-11-21: reversed the won't-fix on manager review repetition; the critic's final review is now also its milestone report (no separate report turn).
 
 
 ## Implementation record — 2026-11-21

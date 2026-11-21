@@ -193,11 +193,7 @@ instruction, rubric and number of people for when it starts.
 Milestone {{n}} of {{total}} is next: {{milestone}}
 
 Please write the instruction that gets {{critic}} started on it: what is needed, what matters most and what to
-watch out for. Describe the work itself and keep it high level; {{critic}} does not hear about milestones,
-your rubric or scores. Put the instruction inside `<message to="{{critic}}">…</message>`; anything outside it is
-for me. Set this milestone's rubric in `<rubric>…</rubric>`: 3–8 criteria specific to its work, one per line, each
-scored out of 5 at the review. Then write your `<state>` for this part of the work: the instruction in short and the
-decisions that still hold.
+watch out for. Set this milestone's rubric, and write your `<state>` for this part of the work.
 """,
     "manager_question": """\
 {{human_messages}}
@@ -206,10 +202,7 @@ decisions that still hold.
 
 {{question}}
 
-Please answer if you can, inside `<message to="{{critic}}">…</message>`. If only I can decide it, ask me in a
-`<question>…</question>` (one per decision): the work waits for my answer. If {{critic}} can go on with your best
-guess meanwhile, write `<question blocking="no">` and give {{critic}} that guess. If the answer changes the work,
-update your `<state>`.
+Please answer if you can. If only I can decide it, ask me.
 """,
     # B7: a question that came with a finished milestone: the review comes next; the next milestone starts afresh
     "manager_question_before_report": """\
@@ -219,21 +212,13 @@ keep your scores, decision and the next milestone's instruction for the review.
     "manager_review": """\
 {{human_messages}}
 
-{{critic}}'s report on milestone {{n}} ("{{title}}"):
+From {{critic}}, on milestone {{n}} ("{{title}}"):
 
 {{report}}
 
 {{rubric}}
 
-Please judge it as I would, against that rubric: a small table with one row per criterion and a score out of 5,
-then your overall score as `<score>x</score>` (out of 5). Look at the logs, reports and files it names where you need
-to; read deeper only where something looks wrong. If the milestone is done, write me a `<summary>` for my OK (what
-changed, what was checked, where to look), a short report (tables welcome), and end with
-`<decision>ACCEPT</decision>`. If it is not, put what still has to happen inside
-`<message to="{{critic}}">…</message>`, in terms of the work and at a high level (only that is passed on, so leave
-out milestones and scores), and end with `<decision>REVISE</decision>`. If your working state changes, update your
-`<state>`: on ACCEPT fold in what this milestone settled, on REVISE what still has to happen. Anything settled that
-should hold beyond this milestone goes on the golden board.
+Score it against the rubric and decide. Read the files it names where something looks wrong.
 """,
     "manager_feedback": """\
 I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
@@ -242,8 +227,7 @@ I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
 
 {{unsent}}
 
-Please write what {{critic}} should do next, at a high level and in terms of the work (no milestones or scores),
-inside `<message to="{{critic}}">…</message>`, and update your `<state>` if it changes.
+Please write what {{critic}} should do next.
 """,
     "unsent_message": """Your last message to {{critic}} was held when the milestone came to me, and it has not been sent:
 
@@ -547,6 +531,7 @@ is. Here is what you need from before.
 Read the files and logs you need before you act, and carry on from there.""",
     "report_checklist": "{{critic}}'s working checklist at its last review ({{done}} of {{total}} done):\n\n{{checklist}}",
     "report_plan": "{{critic}}'s plan ({{done}} of {{total}} steps done):\n\n{{plan}}",
+    "report_plan_done": "{{critic}}'s plan: all {{total}} steps done (`{{checklist_path}}`).",
     "plan_nudge": "You said PASS, but your checklist file still has open steps. A finished step is not the finished "
                   "work: give {{worker}} the next step (now: {{step}}) with its items in the file, and say PASS only "
                   "when every step is done. If a step is no longer needed, delete it from the file.",
@@ -617,6 +602,7 @@ the run is quiet, off track, or a job or watcher it relies on has died; otherwis
     "manager_progress_status": "{{line}}",
     # B6: the milestone's rubric, in the review prompt; and the note when it has none or too few / too many criteria
     "rubric_review": "Your rubric for this milestone:\n\n{{items}}",
+    "rubric_unchanged": "Rubric unchanged.",
     "rubric_missing": "You set no rubric for this milestone. Set 3–8 criteria specific to its work in "
                       "`<rubric>…</rubric>` (one per line) first, then score against them.",
     "rubric_note": "Your rubric for milestone {{n}} has {{count}} criteria; set 3–8, specific to its work, in "

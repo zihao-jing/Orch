@@ -472,6 +472,16 @@ class TestManaged(unittest.TestCase):
         for word in ("Milestone", "score", "<decision>", "| depth"):  # the critic's own template says "decision"
             self.assertNotIn(word, g["input"])
 
+    def test_a_re_review_does_not_resend_the_rubric(self):
+        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1, "replies": {"review": [
+            '<message to="Jordan">Add the new baseline.</message>\n<score>2</score>\n<decision>REVISE</decision>',
+            "<score>5</score>\n<decision>ACCEPT</decision>"]}})]))
+        self.assertEqual(status, "completed")
+        first, second = [t for t in turns(rec) if t["agent"] == "boss" and t["purpose"] == "review"][:2]
+        self.assertIn("Your rubric for this milestone", first["input"])
+        self.assertNotIn("Your rubric for this milestone", second["input"])
+        self.assertIn("Rubric unchanged.", second["input"])
+
     def test_checkins_and_notes_up(self):
         status, rec = run(make_cfg(self.tmp, [managed(
             controller={"checkin_every": 1}, mgr={"milestones": 1},
@@ -3053,7 +3063,7 @@ class TestCriticPlan(unittest.TestCase):
         self.assertIn("checklist file still has open steps", nudged)
         self.assertIn("STEP-GAMMA", nudged)
         review = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "review")
-        self.assertIn("3 of 3 steps done", review["input"])
+        self.assertIn("all 3 steps done (`", review["input"])  # one line, not the full list
         self.assertNotIn("<plan>", review["input"])
         self.assertEqual(status, "completed")
 
