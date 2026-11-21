@@ -431,7 +431,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
             flags.append({"kind": "interrupted", "weight": 0, "turn": t["turn_id"],
                           "line": f"{t['turn_id']} ({t.get('purpose')}) was cut off after "
                                   f"{int(t.get('duration_s') or 0)} s", "excerpt": ""})
-        elif t.get("status") != "ok" or len(out.strip()) < TINY_REPLY:
+        # critic reviews can be complete in under TINY_REPLY chars, and compaction replies with nothing by design
+        elif t.get("status") != "ok" or (len(out.strip()) < TINY_REPLY and t.get("purpose") not in ("verify", "compact")):
             flags.append({"kind": "short or failed reply", "weight": 2, "turn": t["turn_id"],
                           "line": f"{t['turn_id']} ({t.get('purpose')}) replied {len(out.strip())} chars, status "
                                   f"{t.get('status')}", "excerpt": f"Asked (end of message): {clip(asked[-EXCERPT:])}\n"
