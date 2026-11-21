@@ -76,11 +76,11 @@ class TestConfig(unittest.TestCase):
 
     def test_defaults(self):
         r = self.rems({"tag_reminder": None})
-        self.assertEqual(set(r), {"concise", "protocol", "report_length", "chat_voice", R.GOLDEN_BOARD})
+        self.assertEqual(set(r), {"concise", "protocol", "report_length", "chat_voice", R.STYLE_RULES, R.GOLDEN_BOARD})
         self.assertEqual(r["protocol"]["random"], [3, 10])
         self.assertEqual(r["report_length"]["to"], ["worker"])
         self.assertEqual(r["report_length"]["every"], 3)
-        for rem in r.values():  # one or two sentences
+        for rem in r.values():  # one or two sentences (the style reminder has no fixed text)
             for t in (rem["text"].values() if isinstance(rem["text"], dict) else [rem["text"]]):
                 self.assertLess(len(t), 220)
 
@@ -144,8 +144,9 @@ class TestManagedRun(unittest.TestCase):
         for t in reviews:
             self.assertNotIn(OLD_ROUTING, t["input"])
             self.assertNotIn("reply_routing", t.get("reminders") or [])
-        # the critic's first two turns (brief, first review) come before any reminder is due (every 3+ turns)
-        self.assertNotIn("<system-reminder>", reviews[0]["input"])
+        # the critic's first two turns (brief, first review) come before the 3+ turn reminders are due; only the
+        # style reminder (every 2-3 turns) can be there by the first review
+        self.assertFalse(set(reviews[0].get("reminders") or []) - {"style_rules", "communication_protocol"})
         self.assertLess(sum(bool(t.get("reminders")) for t in reviews), len(reviews))  # not on every review
         sent = [t.get("reminders") or [] for t in turns(rec)]
         self.assertTrue(any(sent))  # some reminders do go out, at intervals

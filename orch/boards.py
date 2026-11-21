@@ -33,7 +33,10 @@ CHECKLIST_CAP = 25  # items in the current step's list (standing rules included)
 GOLDEN_HEAD = ("# Golden board\n\n"
                "<!-- The rules, preferences and key decisions for this work. Every agent reads it as standing rules. "
                "One short line per entry, written about the work; merge entries that overlap and remove what no "
-               "longer holds. -->\n")
+               "longer holds. -->\n\n"
+               "## Boundaries\n\n"
+               "<!-- Hard limits the worker must keep (read-only sources, no commits or pushes). Only this section "
+               "goes to the worker. -->\n")
 
 CHECKLIST_HEAD = ("# Checklist\n\n"
                   "<!-- One \"## Step N: …\" section per step, in order, each with its items as \"- [ ]\" / \"- [x]\" "
@@ -77,7 +80,24 @@ def golden_body(text: str) -> str:
     lines = body.split("\n")
     if lines and re.match(r"^#\s+\S", lines[0]):
         lines = lines[1:]
+    # a board of only headings (the template's empty Boundaries section) holds nothing yet
+    if not any(l.strip() and not _HEADING.match(l) for l in lines):
+        return ""
     return "\n".join(lines).strip()
+
+
+def boundaries(body: str) -> str:
+    """The "## Boundaries" section of a board body (without its heading): what the worker is sent; '' when none."""
+    out: List[str] = []
+    on = False
+    for line in (body or "").split("\n"):
+        m = _HEADING.match(line)
+        if m and line.lstrip().startswith("##") and not line.lstrip().startswith("###"):
+            on = m.group(1).strip().lower() == "boundaries"
+            continue
+        if on:
+            out.append(line)
+    return "\n".join(out).strip()
 
 
 # --------------------------------------------------------------------------- the step checklist

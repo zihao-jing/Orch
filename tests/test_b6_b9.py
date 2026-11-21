@@ -280,6 +280,97 @@ class TestMilestoneFallback(unittest.TestCase):
         self.assertEqual(r.mg["milestones"][1]["status"], "active")
 
 
+class TestGoldenResend(unittest.TestCase):
+    """A scheduled resend is one line when the board is unchanged, the changed lines when it changed; the worker
+    gets only the Boundaries section."""
+
+    def setUp(self):
+        self.r = unit(Path(tempfile.mkdtemp()))
+        self.r.setup_boards()
+        self.r.golden_path().write_text(
+            B.GOLDEN_HEAD.split("## Boundaries")[0] + "## Rules\n\n- Tables first\n- Short prose\n\n"
+            "## Boundaries\n\n- Sources are read-only\n")
+        self.r.check_golden()
+
+    def sent(self, agent, role, due=True):
+        """One turn of the agent: the board reminder, then the bookkeeping after the turn."""
+        out = self.r.golden_board_reminder(agent, role, "Intro:", due)
+        self.r.rec.update_session(agent.name, session_id="s1")
+        if out:
+            self.r.golden_after_turn(agent, {"reminders": ["golden_board"], "session_id": "s1"}, None)
+        return out
+
+    def test_unchanged_then_diff(self):
+        c = self.r.critic
+        first = self.r.golden_board_reminder(c, "critic", "Intro:", False)
+        self.assertIn("- Tables first", first)
+        self.assertIn("- Sources are read-only", first)
+        self.sent(c, "critic")
+        path = str(self.r.golden_path())
+        self.assertEqual(self.r.golden_board_reminder(c, "critic", "Intro:", True), f"Standing rules unchanged: `{path}`")
+        self.assertEqual(self.r.golden_board_reminder(c, "critic", "Intro:", False), "")
+        self.r.golden_path().write_text(self.r.golden_path().read_text().replace("- Short prose\n", "- Plain prose\n"))
+        self.r.check_golden()
+        out = self.r.golden_board_reminder(c, "critic", "Intro:", False)
+        self.assertIn(path, out)
+        self.assertIn("- - Short prose", out)
+        self.assertIn("+ - Plain prose", out)
+        self.assertNotIn("Tables first", out)
+
+    def test_worker_gets_only_boundaries(self):
+        w = self.r.workers[0]
+        out = self.sent(w, "worker")
+        self.assertIn("Sources are read-only", out)
+        self.assertNotIn("Tables first", out)
+        self.assertEqual(self.r.golden_board_reminder(w, "worker", "", True), f"Standing rules unchanged: `{self.r.golden_path()}`")
+        # a change outside Boundaries is no change for the worker
+        self.r.golden_path().write_text(self.r.golden_path().read_text().replace("Tables first", "Tables last"))
+        self.r.check_golden()
+        self.assertEqual(self.r.golden_board_reminder(w, "worker", "", False), "")
+
+    def test_no_boundaries_section_sends_nothing_to_the_worker(self):
+        self.r.golden_path().write_text("## Rules\n\n- Tables first\n")
+        self.r.check_golden()
+        self.assertEqual(self.r.golden_board_reminder(self.r.workers[0], "worker", "Intro:", True), "")
+
+    def test_night_reminder_schedule(self):
+        self.r.st["night"] = True
+        got = []
+        for _ in range(11):
+            _, sent = self.r.add_reminders(self.r.manager, "Do it.", "round")
+            got.append("night_mode" in sent)
+        self.assertEqual([i for i, x in enumerate(got) if x], [0, 5, 10])
+        self.r.switch_night(False)
+        self.r.switch_night(True)  # turned on again: the next manager turn has it
+        _, sent = self.r.add_reminders(self.r.manager, "Do it.", "round")
+        self.assertIn("night_mode", sent)
+
+
+class TestStyleRules(unittest.TestCase):
+    def test_sampling_and_targeting(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        text = r.style_rules_text()
+        from orch import reminders as R
+        w = set(R.style_pool(text, "worker"))
+        m = set(R.style_pool(text, "manager"))
+        self.assertTrue(w and w < m)  # communication rules only for the manager and the critic
+        self.assertEqual(set(R.style_pool(text, "critic")), m)
+        self.assertIn("Lead with the conclusion.", w)
+        for role, pool in (("worker", w), ("manager", m)):
+            for _ in range(20):
+                lines = R.style_text(text, role).splitlines()
+                self.assertIn(len(lines), (2, 3))
+                self.assertTrue(all(x[2:] in pool for x in lines))
+
+    def test_sent_every_two_or_three_turns_and_can_be_turned_off(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        hits = [i for i in range(12) if "style_rules" in r.add_reminders(r.workers[0], "Go.", "round")[1]]
+        self.assertTrue(hits and all(b - a in (2, 3) for a, b in zip(hits, hits[1:])), hits)
+        self.assertLessEqual(hits[0], 2)
+        r.mon.controller.reminders = [x for x in r.mon.controller.reminders if x["id"] != "style_rules"]
+        self.assertFalse(any("style_rules" in r.add_reminders(r.workers[0], "Go.", "round")[1] for _ in range(12)))
+
+
 class TestGoldenAfterCompact(unittest.TestCase):
     def test_board_is_sent_again_after_a_compact(self):
         r = unit(Path(tempfile.mkdtemp()))
@@ -287,7 +378,7 @@ class TestGoldenAfterCompact(unittest.TestCase):
         r.golden_path().write_text(B.GOLDEN_HEAD + "\n- Tables before prose\n")
         g = r.check_golden()
         r.rec.update_session("critic", session_id="s1")
-        r.st.setdefault("golden_seen", {})["critic"] = {"hash": g["hash"], "session": "s1"}
+        r.st.setdefault("golden_seen", {})["critic"] = {"hash": g["hash"], "session": "s1", "text": r.golden_body()}
         self.assertEqual(r.golden_board_reminder(r.critic, "critic", "", False), "")
         r.after_compact(r.critic, "compact between steps")
         self.assertIn("Tables before prose", r.golden_board_reminder(r.critic, "critic", "", False))

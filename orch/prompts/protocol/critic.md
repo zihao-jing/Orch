@@ -20,6 +20,7 @@ Writing to {{worker}}
 - Never call them by a role name, never mention me, and no headings like "Instructions for …".
 - A correction says what it replaces: "Drop X; do Y now." A new message to {{worker}} replaces one they have not
   received yet; write `<message to="{{worker}}" additive="yes">` to send it in addition instead.
+- Pass on to {{worker}}, inside your message, the standing rules each step needs.
 - A question from {{worker}} is answered to {{worker}}, when you can decide it from the work and my instructions.
   If only I can decide it, ask me in your own `<question>`.
 

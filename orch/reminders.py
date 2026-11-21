@@ -33,18 +33,20 @@ from typing import Any, Dict, List, Optional
 ROLES = ("manager", "critic", "worker")
 ROLE_OF = {"manager": "manager", "verifier": "critic", "critic": "critic", "worker": "worker"}
 
-# the golden board (orch/boards.py): its text is this reminder's intro, followed by the board itself. Besides its
-# schedule, it goes to an agent once whenever the board changed or the agent's session is new; nothing while it is empty
+# the golden board (orch/boards.py): its text is this reminder's intro, followed by the board itself (the worker gets
+# only its Boundaries section). Besides its schedule, it goes to an agent when the board changed (as a diff) or the
+# agent's session is new (in full); nothing while there is nothing to send
 GOLDEN_BOARD = "golden_board"
+STYLE_RULES = "style_rules"  # a few rules sampled from orch/prompts/style-rules.md, written at send time
 GOLDEN_PRUNE = "golden_prune"  # the manager, once each time the board grows past its size limit (not in the registry)
 
 DEFAULTS: Dict[str, Dict[str, Any]] = {
     "concise": {
         "to": ["all"], "random": [3, 6],
         "text": {
-            "manager": "Think at length; write briefly. I read every word.",
-            "critic": "Think at length; write briefly. Every word you write is read, by me and by {{worker}}.",
-            "worker": "Think at length; write briefly. I read every word.",
+            "manager": "Write briefly, in plain, natural language. I read every word.",
+            "critic": "Write briefly, in plain, natural language. Every word you write is read, by me and by {{worker}}.",
+            "worker": "Write briefly, in plain, natural language. I read every word.",
         },
     },
     "protocol": {
@@ -63,12 +65,15 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "text": {"manager": "In a message to {{critic}}, write as \"I\" and give everything as your own; keep me, "
                             "our conversation and your role out of it, and your reply to me outside that tag."},
     },
+    # no fixed text: `style_text` samples 2-3 rules each time (writing rules to all, communication rules to the
+    # manager and the critic)
+    STYLE_RULES: {"to": ["all"], "random": [2, 3]},
     GOLDEN_BOARD: {
         "to": ["all"], "every": 10,
         "text": {
-            "manager": "The golden board (`{{golden_board}}`) as it stands; every agent reads it:",
+            "manager": "The golden board (`{{golden_board}}`) as it stands:",
             "critic": "My standing rules for this work; they hold until I change them:",
-            "worker": "My standing rules for this work; they hold until I change them:",
+            "worker": "My boundaries for this work; they hold until I change them:",  # the board's Boundaries only
         },
     },
 }
@@ -167,7 +172,7 @@ def parse(raw: Any, tag_reminder: Optional[float] = None, where: str = "reminder
             base.pop("every", None)
             base.pop("random", None)
         base.update({k: x for k, x in v.items() if k != "enabled"})
-        if not base.get("text") and rid != GOLDEN_BOARD and rid not in DEFAULTS:
+        if not base.get("text") and rid not in DEFAULTS:
             raise ReminderError(f"{w}: needs a `text`")
         specs[rid] = base
     out = []
@@ -236,3 +241,25 @@ def due(state: Dict[str, Any], rem: Dict[str, Any], rng: Any = random) -> bool:
         s["due"] = s["n"] + _gap(rem, rng)
         return True
     return False
+
+
+def style_pool(text: str, role: str) -> List[str]:
+    """The rules a role may get from the style file: its "## Writing" lines, and for the manager and the critic
+    also the "## Communication" ones."""
+    want = {"writing"} | ({"communication"} if role in ("manager", "critic") else set())
+    out: List[str] = []
+    section = ""
+    for line in re.sub(r"<!--.*?-->", "", text or "", flags=re.S).splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip().lower()
+        elif section in want and line.startswith("- ") and line[2:].strip():
+            out.append(line[2:].strip())
+    return out
+
+
+def style_text(text: str, role: str, rng: Any = random) -> str:
+    """One reminder of 2-3 rules drawn at random for this role ('' when the file has none)."""
+    pool = style_pool(text, role)
+    if not pool:
+        return ""
+    return "\n".join(f"- {x}" for x in rng.sample(pool, min(len(pool), rng.randint(2, 3))))

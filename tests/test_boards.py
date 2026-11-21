@@ -53,7 +53,9 @@ class TestBoardsUnit(unittest.TestCase):
 
     def test_golden_body_drops_the_title_and_comments(self):
         self.assertEqual(B.golden_body(B.GOLDEN_HEAD), "")
-        self.assertEqual(B.golden_body(B.GOLDEN_HEAD + RULE + "\n"), RULE)
+        self.assertEqual(B.golden_body(B.GOLDEN_HEAD + RULE + "\n"), "## Boundaries\n\n\n" + RULE)
+        self.assertEqual(B.boundaries("## Rules\n\n- a\n\n## Boundaries\n\n- b\n\n## More\n\n- c"), "- b")
+        self.assertEqual(B.boundaries("## Rules\n\n- a"), "")
 
 
 class TestBoardsRun(unittest.TestCase):
@@ -86,7 +88,7 @@ class TestBoardsRun(unittest.TestCase):
             self.assertIn(RULE, its[0]["input"], a)  # the first message of a session carries the board
             self.assertIn("golden_board", its[0].get("reminders") or [], a)
         self.assertIn("My standing rules for this work", by["critic"][0]["input"])
-        self.assertIn("My standing rules for this work", by["writer"][0]["input"])
+        self.assertIn("My boundaries for this work", by["writer"][0]["input"])  # the default board puts RULE under Boundaries
         self.assertIn(f"The golden board (`{self.golden}`)", by["boss"][0]["input"])
         self.assertIn(str(self.golden), by["boss"][0]["system_prompt"])  # the manager knows where it is
         # the change reaches the critic and the worker once; the manager wrote it, so it is not sent back to it

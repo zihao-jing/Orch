@@ -658,7 +658,10 @@ class TestManaged(unittest.TestCase):
         self.assertEqual([x["decision"] for x in rec.state["managed"]["gates"]], ["approve"] * 3)
         self.assertTrue(any(d["by"] == "manager (night mode)" for d in rec.state["decisions"]))
         mgr = [t for t in turns(rec) if t["agent"] == "boss" and t["purpose"] != "plan"]
-        self.assertTrue(mgr and all("Night mode is on" in t["input"] for t in mgr))
+        # the first manager turn in night mode has the reminder, then every 5th
+        at = [i for i, t in enumerate(mgr) if "Night mode is on" in t["input"]]
+        self.assertTrue(at and all(b - a == 5 for a, b in zip(at, at[1:])))
+        self.assertTrue(len(at) < len(mgr) or len(mgr) == 1)
 
     def test_board_data_and_server(self):
         status, rec = run(make_cfg(self.tmp, [managed()]))

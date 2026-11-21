@@ -79,7 +79,7 @@ class TestRemindersStripped(unittest.TestCase):
     def test_every_check_reads_messages_without_reminders(self):
         rd = Path(tempfile.mkdtemp()) / "run"
         rd.mkdir()
-        big = "Think at length; write briefly. " * 1000  # a reminder alone past the large-message size
+        big = "Write briefly, in plain language. " * 1000  # a reminder alone past the large-message size
         body = "Please rerun the arm with the corrected span; report the rows and the totals afterwards."
         reply = "Done: rows written to results/x.json, totals match the earlier run exactly as expected. " * 5
         turn(rd, "r001-t01-wk", "wk", "worker", "10:00:00", "10:01:00", R.append(body, big), R.append(reply, big))
@@ -92,7 +92,7 @@ class TestRemindersStripped(unittest.TestCase):
         self.assertNotIn("repeated content", kinds)  # the shared reminder is no repeat
         short = [f["turn"] for f in stats["flags"] if f["kind"] == "short or failed reply"]
         self.assertIn("r001-t03-crit", short)  # "Fine." plus a long reminder is still a short reply
-        self.assertNotIn("Think at length", md)
+        self.assertNotIn("Write briefly, in plain language", md)
         # the relay from the worker's reply is measured on the reply without its reminder
         rc = audit.relay_coverage(audit.trace(audit.load_turns(rd), [])[2],
                                   {t["turn_id"]: t for t in audit.load_turns(rd)})
