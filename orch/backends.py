@@ -419,10 +419,32 @@ def claude_stream_report(text: str) -> Optional[str]:
     if not any("session_id" in e and e.get("type") in ("system", "assistant", "stream_event", "result")
                for e in records):
         return None
-    for e in reversed(records):
-        if e.get("type") == "result" and not e.get("parent_tool_use_id"):
-            return str(e.get("result") or "")
+    results = _turn_results(records)
+    if results:
+        return _join_replies([str(e.get("result") or "") for e in results])
     return _claude_stream_text(text)[0]
+
+
+def _turn_results(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The top-level result records of a turn, oldest first. Background timers (Claude Code's Monitor tool) wake
+    the session after the real report, and each wake writes another result, so the last one is not the report."""
+    return [e for e in records if e.get("type") == "result" and not e.get("parent_tool_use_id")]
+
+
+def _join_replies(texts: List[str]) -> str:
+    """One report from a turn's result texts, oldest first. A single text is returned as it is; several are labelled
+    so the report written before the timer wake-ups is kept. More than 4 keep the first and the last 3."""
+    if len(texts) == 1:
+        return texts[0]
+    omitted = len(texts) - 4 if len(texts) > 4 else 0
+    shown = [texts[0]] + texts[-3:-1] if omitted else texts[:-1]
+    blocks: List[str] = []
+    for i, text in enumerate(shown, 1):
+        blocks.append(f"[Earlier reply {i}]\n{text}" if len(shown) > 1 else f"[Earlier reply]\n{text}")
+        if omitted and i == 1:
+            blocks.append(f"({omitted} short {'reply' if omitted == 1 else 'replies'} omitted)")
+    blocks.append(f"[Latest reply]\n{texts[-1]}")
+    return "\n\n".join(blocks)
 
 
 def _claude_json_records(text: str) -> List[Dict[str, Any]]:
@@ -450,10 +472,29 @@ def _claude_json_records(text: str) -> List[Dict[str, Any]]:
 
 
 def _parse_claude_json(text: str) -> Optional[Dict[str, Any]]:
-    for d in reversed(_claude_json_records(text)):
-        if d.get("type") == "result" or "result" in d:
-            return d
-    return None
+    """The turn's final result record. With several result records, the last one carries the joined reports and the
+    turn's summed statistics; its total_cost_usd is already the session's running total, so it is kept as it is."""
+    records = _claude_json_records(text)
+    results = _turn_results(records)
+    if not results:
+        return next((d for d in reversed(records) if "result" in d and not d.get("parent_tool_use_id")), None)
+    last = dict(results[-1])
+    if len(results) == 1:
+        return last
+    last["result"] = _join_replies([str(d.get("result") or "") for d in results])
+    for k in ("num_turns", "duration_ms"):  # each wake-up is its own run of the turn
+        vals = [d[k] for d in results if isinstance(d.get(k), (int, float)) and not isinstance(d[k], bool)]
+        if vals:
+            last[k] = sum(vals)
+    usages = [d["usage"] for d in results if isinstance(d.get("usage"), dict)]
+    if usages:
+        total: Dict[str, Any] = {}
+        for u in usages:
+            for k, v in u.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    total[k] = total.get(k, 0) + v
+        last["usage"] = total
+    return last
 
 
 class QwenBackend(ClaudeBackend):
