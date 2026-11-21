@@ -1,4 +1,5 @@
-"""The writing rules: orch's own file (or the project's) at the end of the manager's, critic's and workers' prompts."""
+"""The writing rules: a project's own file (its `.orch/writing.md`, or a path) at the end of the manager's, critic's
+and workers' prompts. orch ships none: its general rules are in prompts/style-rules.md."""
 import sys
 import tempfile
 import unittest
@@ -8,24 +9,31 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from orch.config import PROMPTS_DIR, load_config  # noqa: E402
+from orch.config import load_config  # noqa: E402
 from role_view_checks import leaks  # noqa: E402
 from test_orch import make_cfg, managed, run, turns  # noqa: E402
 
-RULES = (PROMPTS_DIR / "writing.md").read_text(encoding="utf-8").strip()
+RULES = "# Writing rules\n\n- Tables before prose."
 
 
 class TestWriting(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.file = self.tmp / "mine.md"
+        self.file.write_text(RULES + "\n")
 
     def mon(self, controller=None):
         m = managed(controller=controller)
         m["agents"].append({"name": "auditor", "role": "auditor"})
         return load_config(make_cfg(self.tmp, [m])).monitor("m")
 
-    def test_orchs_rules_end_the_team_prompts_and_nobody_elses(self):
+    def test_none_unless_the_project_has_its_own(self):
         mon = self.mon()
+        for name in ("boss", "critic", "writer"):
+            self.assertNotIn("# Writing rules", mon.agent(name).current_system_prompt(), name)
+
+    def test_the_project_rules_end_the_team_prompts_and_nobody_elses(self):
+        mon = self.mon({"writing": str(self.file)})
         for name in ("boss", "critic", "writer"):
             sp = mon.agent(name).current_system_prompt()
             self.assertTrue(sp.endswith(RULES), name)
@@ -34,11 +42,8 @@ class TestWriting(unittest.TestCase):
         self.assertNotIn("# Writing rules", mon.agent("auditor").current_system_prompt())
 
     def test_an_edit_reaches_the_next_system_prompt(self):
-        f = self.tmp / "mine.md"
-        f.write_text("# Writing rules\n\n- Short.\n")
-        mon = self.mon({"writing": str(f)})
-        self.assertTrue(mon.agent("writer").current_system_prompt().endswith("- Short."))
-        f.write_text("# Writing rules\n\n- Shorter.\n<!-- a note for me -->\n")
+        mon = self.mon({"writing": str(self.file)})
+        self.file.write_text("# Writing rules\n\n- Shorter.\n<!-- a note for me -->\n")
         sp = mon.agent("writer").current_system_prompt()
         self.assertTrue(sp.endswith("- Shorter."))
         self.assertNotIn("a note for me", sp)
@@ -48,7 +53,7 @@ class TestWriting(unittest.TestCase):
         self.assertNotIn("# Writing rules", mon.agent("boss").current_system_prompt())
 
     def test_a_run_sends_them_once_with_the_system_prompt(self):
-        status, rec = run(make_cfg(self.tmp, [managed()]))
+        status, rec = run(make_cfg(self.tmp, [managed(controller={"writing": str(self.file)})]))
         self.assertEqual(status, "completed")
         ts = [t for t in turns(rec) if t["agent"] in ("boss", "critic", "writer")]
         for name in ("boss", "critic", "writer"):  # each agent's first turn carries them in its system prompt

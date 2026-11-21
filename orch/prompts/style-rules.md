@@ -3,7 +3,26 @@
      of its wordings picked at random: the indented lines under a rule say the same thing in other words. Only
      general rules belong here: rules for one kind of document or project go in the project's own files. What the
      manager does while I am away is in the night-mode reminder, not here. A project can replace this file with
-     `.orch/style-rules.md`. -->
+     `.orch/style-rules.md`. Rules for one kind of document (tables, papers, replies to reviews) go in the project's
+     `.orch/writing.md`. -->
+
+## All
+
+- Give a conclusion or a verdict, not a description of what was done.
+  - Say what the result means; don't just list what happened.
+  - Lead with the verdict, not with the steps that led to it.
+- No defensive sentences or caveats that weaken your own result.
+  - State the result plainly, without hedging it.
+  - Don't defend the work in advance; say what it shows.
+- Use the established terms of the work; don't invent new ones.
+  - Keep to the terms the work already uses.
+  - Don't coin a new name where the work has one.
+- One word per concept; never one word for two things.
+  - Call one thing by one name throughout.
+  - Don't use the same word for two different things.
+- No sentence longer than it needs to be.
+  - Shorten any sentence that keeps its meaning when shorter.
+  - Cut words that add nothing.
 
 ## Manager
 

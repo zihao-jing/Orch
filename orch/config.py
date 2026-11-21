@@ -92,7 +92,7 @@ class AgentConfig:
     memory_heading: str = "Things to keep in mind:"
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
-    writing_path: str = ""  # managed mode: the writing rules (orch/prompts/writing.md or the project's), added after it
+    writing_path: str = ""  # managed mode: the project's writing rules (its `.orch/writing.md` or a path), added after it
     style_path: str = ""  # managed mode: the role's rules from orch/prompts/style-rules.md (or the project's), after that
     # at each milestone start (managed mode): "compact" summarises the session in place (a new session when the
     # backend can't compact), "milestone" starts a new session, "never" keeps it; "" = the role's default (the critic
@@ -401,8 +401,8 @@ class ControllerConfig:
     # managed mode: the golden board (orch/boards.py): rules, preferences and key decisions every agent reads; the
     # manager owns it. "" = `.orch/golden.md` in a project folder, else golden.md beside the monitor's runs
     golden_board: str = ""
-    # managed mode: the writing rules added to the manager's, critic's and workers' system prompts. "" = the project's
-    # `.orch/writing.md` when there is one, else orch's own (orch/prompts/writing.md); a path; "off" = none
+    # managed mode: a project's writing rules (for its own kind of document), added to the manager's, critic's and
+    # workers' system prompts. "" = the project's `.orch/writing.md` when there is one, else none; a path; "off" = none
     writing: str = ""
     golden_limit: int = 8000  # characters; above it the board warns and the manager is asked once to prune
     large_text: int = 50000  # B8: characters; a larger reply, input or raw stream gets a board warning (never cut)
@@ -676,14 +676,15 @@ def _agent_folder(d: Path) -> Dict[str, Any]:
 
 
 def _writing_file(value: Any, base: Path, proj: Optional[Path]) -> str:
-    """The writing rules file: "off" for none, a path as given, else the project's `.orch/writing.md` or orch's own."""
+    """The writing rules file: "off" for none, a path as given, else the project's `.orch/writing.md` ('' without one:
+    orch's general rules are in prompts/style-rules.md, and the writing file is for a project's own kind of document)."""
     v = str(value or "").strip()
     if v.lower() in ("off", "none", "false"):
         return ""
     if v:
         return _expand(v, base)
     own = proj / "writing.md" if proj else None
-    return str(own) if own and own.is_file() else str(PROMPTS_DIR / "writing.md")
+    return str(own) if own and own.is_file() else ""
 
 
 def _project_raw(orch_dir: Path) -> Dict[str, Any]:

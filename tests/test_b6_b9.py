@@ -352,8 +352,11 @@ class TestStyleRules(unittest.TestCase):
         from orch import reminders as R
         text = r.style_rules_text(r.manager)
         pools = {role: set(R.style_pool(text, role)) for role in ("manager", "critic", "worker")}
-        self.assertTrue(all(pools.values()))
-        self.assertFalse(pools["manager"] & pools["critic"] or pools["critic"] & pools["worker"])
+        everyone = set(R.style_pool(text, "all"))
+        self.assertTrue(everyone and all(everyone < p for p in pools.values()))  # the "All" rules reach every role
+        own = {role: pool - everyone for role, pool in pools.items()}
+        self.assertTrue(all(own.values()))
+        self.assertFalse(own["manager"] & own["critic"] or own["critic"] & own["worker"])
         self.assertTrue(any("text for me" in x for x in pools["manager"]))  # what is written for me stays the manager's
         self.assertTrue(any("concise" in x for x in pools["worker"]))
         self.assertEqual(R.style_pool(text, "verifier"), R.style_pool(text, "critic"))
