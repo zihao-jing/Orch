@@ -121,7 +121,7 @@ Exact instrumentation and presentation remain implementation details. This agree
 
 ## Lower-priority review
 
-- Repeated critic verification template: user chose to ignore this item; no change planned.
+- Repeated critic verification template: *reversed 2026-11-21: fix implemented.* The full review instructions go out once per session and after a compaction; later reviews get a short line. With `checklist: true` the checklist file decides the verdict (no tag needed; an explicit FAIL still holds the work back).
 - Manager review prompt repetition: user chose to ignore this item; no change planned. The audit's total “Orch-originated” share includes useful checklist and rubric data and is not a measure of waste.
 - Broad critic feedback during individual worker reviews: user confirmed this is covered by the agreed routing and concise progress-note changes; no separate mechanism planned. In `r060-t02-critic`, the critic wrote a 3,318-character response including a five-case completion overview while reviewing one worker. Worker-directed feedback should focus on that worker's assignment, with a concise overall update routed upward.
 
@@ -170,6 +170,7 @@ Replay representative historical audit inputs with their matching historical des
 - Agreed to combine the protocol/pipeline change with a concise critic reminder.
 - Selected an explicit auditor-format reminder for priority 2; parser hardening deferred. The user considers this an auditor behavior/performance issue rather than an Orch bug.
 - Agreed to timestamp concise critic progress records, wrap them clearly as historical progress, and deliver them on the manager's next turn. Agreed to improve timing visibility; automatic note consolidation and timeout changes are not included.
+- 2026-11-21 (ICLR2027-rebuttal-mining audit review): reversed the won't-fix on the repeated critic review template; the verdict is read from the checklist file when no tag is given.
 
 
 ## Implementation record — 2026-11-21

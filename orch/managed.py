@@ -334,6 +334,7 @@ class ManagedRunner(MonitorRunner):
         """A compacted session lost the golden board it was given: it gets it again with its next message (once)."""
         if (self.st.get("golden_seen") or {}).pop(agent.name, None) is not None:
             self.rec.event("golden_resend", agent=agent.name, why=how)
+        (self.st.get("review_tpl_seen") or {}).pop(agent.name, None)  # the summary may drop the review instructions
         self.rec.save()
 
     # ---- B6: the manager's rubric for each milestone (3–8 criteria for that milestone's work)
@@ -2457,6 +2458,11 @@ class ManagedRunner(MonitorRunner):
         """Preserve explicitly addressed message content; dispatch never interprets its prose."""
         return (text or "").strip()
 
+    def file_verdict(self) -> str:
+        """PASS when the critic's checklist file has items and none is open."""
+        done, open_ = checklist_state(self.latest_checklist())
+        return "PASS" if done and not open_ else "FAIL"
+
     def verdict(self, r: Dict[str, Any]) -> str:
         if r.get("status") != "ok":
             return "ERROR"
@@ -4245,13 +4251,20 @@ class ManagedRunner(MonitorRunner):
                               for k, x in work.items())
         nudge = (self.st.get("nudge") or {}).get(v.name, "")
         prompt = mg.pop("review_prompt", "")  # B11: after a parallel section, the critic takes stock of it
-        prompt = prompt or self.mtpl("critic_review", worker_report=reports, human_messages=nudge)
+        if not prompt:  # the full instructions once per session (and after a compaction); a short line after
+            seen = self.st.setdefault("review_tpl_seen", {})
+            sid = (self.st["sessions"].get(v.name) or {}).get("session_id")
+            tpl = "critic_review_short" if sid and seen.get(v.name) == sid else "critic_review"
+            prompt = self.mtpl(tpl, worker_report=reports, human_messages=nudge)
         running = self.alive_jobs((mg.get("running_jobs") or {}).get("agents") or {})
         if running:  # processes the worker left running: the critic decides whether the step waits for them
             prompt = prompt.rstrip() + "\n\n" + self.mtpl(
                 "critic_jobs_running", who=" and ".join(self.mon.agent(a).called for a in running),
                 jobs="; ".join(l for j in running.values() for l in j["lines"])).strip()
         r = self.say(v, prompt, "verify")
+        sid = (self.st["sessions"].get(v.name) or {}).get("session_id")
+        if sid and r.get("status") == "ok":
+            self.st.setdefault("review_tpl_seen", {})[v.name] = sid
         summary = mg.get("summary") or {"round": self.st.get("round", 0), "turns": []}
         summary["turns"] = (summary.get("turns") or []) + [r["turn_id"]]
         held = mg.pop("running_jobs", None) or {}
@@ -4278,6 +4291,8 @@ class ManagedRunner(MonitorRunner):
             self.rec.progress(f"{v.called} asked to wait for a job, but none of the processes is still running; "
                               "the review counts as it is")
         vd = self.verdict(r)
+        if vd == "UNKNOWN" and c.checklist:  # no tag needed: the checklist file decides (an explicit FAIL still holds)
+            vd = self.file_verdict()
         if vd == "UNKNOWN":  # a review without its verdict tag: asked once for it before the run stops
             self.rec.progress(f"⚠ {v.called}'s review has no verdict; asked for it")
             r2 = self.say(v, self.mtpl("critic_verdict_missing").strip(), "verdict")
@@ -4438,6 +4453,8 @@ class ManagedRunner(MonitorRunner):
         r = self.say(self.critic, prompt, "amend", extra={"after_phase": mg.get("after")})
         after = mg.get("after") or "work"
         vd = self.verdict(r) if T.value(r.get("output") or "", "verdict") else None
+        if vd is None and self.mon.controller.checklist and r.get("status") == "ok":
+            vd = self.file_verdict()  # no tag needed: the checklist file decides
         if after == "report" and (vd == "FAIL" or self.clean_critic(r["output"])):
             after = "work"
         elif after == "work" and vd == "PASS" and not self.clean_critic(r["output"]):

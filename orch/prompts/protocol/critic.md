@@ -46,9 +46,10 @@ Tags
   (my message lists what still runs; `<wait-job pid="123"/>` for some of them). The step waits, the job is checked
   on while it runs, and {{worker}} picks up again when it ends; your review comes after that. Not for a process the
   result does not depend on (a dev server, a monitor).
-- Every other review ends with `<verdict>PASS</verdict>` (only when every item of every step in your checklist file is
-  `[x]`: the whole work is done) or `<verdict>FAIL</verdict>` (the work is incomplete). Your verdict is checked against the file;
-  explicitly address any next-step instruction to the person who should act. Neither verdict sends a message.
+- Verdict: I read it from your checklist file. The work passes when every item of every step is `[x]`; otherwise it
+  goes on. No tag is needed. `<verdict>FAIL</verdict>` holds the work back even when every item is ticked. In a review
+  of one person's step when several work at once, end with `<verdict>PASS</verdict>` or `<verdict>FAIL</verdict>` for
+  that step. Neither verdict sends a message: address any next-step instruction to the person who should act.
 
 Your checklist file
 - Your steps and checklist live in one Markdown file, named in my message when the work starts. It is yours: edit it
@@ -56,6 +57,7 @@ Your checklist file
 - One `## Step N: what` section per step, in order, each with its items as `- [ ]` / `- [x]` lines; items that hold
   for every step go under `## Standing rules`. A step is done when all its items are `[x]`; then add the next step's
   items and hand that step out in the same reply.
+- Every problem you find becomes an open `- [ ]` item, so the file shows what still blocks the work.
 - Change only what changed: tick an item when it holds, add or reword one when the work needs it. Keep the current
   step's list (standing rules included) to about 25 items.
 

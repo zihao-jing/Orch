@@ -280,16 +280,23 @@ to {{worker}} in this reply.""",
     "critic_review": """\
 {{human_messages}}
 
-{{worker}} sent this update:
+From {{worker}}:
 
 {{worker_report}}
 
-Please take a look at the changes and update your checklist file `{{checklist_path}}` in place (tick what holds
-now). If the current step is done, add the next step's items there and give {{worker}} that step in this same
-reply inside `<message to="{{worker}}">…</message>`. Untagged text is for me; without an explicit worker
-message, no new worker turn starts. If everything that can be done here is done and the rest waits on a person, don't tell {{worker}} to hold:
-propose a pause in `<pause>…</pause>` instead. End with `<verdict>PASS</verdict>` (only when every item of every
-step in the file is `[x]`) or `<verdict>FAIL</verdict>`.
+Review the changes and tick what holds in `{{checklist_path}}`. If the step is done, add the next step's items and
+send it in `<message to="{{worker}}">…</message>`. If every item is now ticked, write your untagged text as your
+report for me: what was asked, what was done, what is still open, and the risks.
+""",
+    # later reviews in the same session: the instructions above are already in the conversation
+    "critic_review_short": """\
+{{human_messages}}
+
+From {{worker}}:
+
+{{worker_report}}
+
+Same as before: tick what holds in `{{checklist_path}}`, and send the next step if this one is done.
 """,
     "critic_answer": """\
 About your question:
@@ -297,7 +304,7 @@ About your question:
 {{answer}}
 
 If this changes what {{worker}} should do, send `<message to="{{worker}}">…</message>` (and edit your checklist file if it changes the steps or
-items). If it changes your verdict, end with a new `<verdict>`.
+items). If it changes what is done, update the checklist file.
 """,
     # added to critic_answer while the critic's last review has not reached the worker yet
     "critic_answer_pending": "{{worker}} has not received your last review yet. If this changes what they should do, "
