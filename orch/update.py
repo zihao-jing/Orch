@@ -34,7 +34,8 @@ def safe_point(status: str) -> bool:
 
 
 def check(status: str) -> Dict[str, Any]:
-    """The commit orch runs from, and whether origin/main has commits it does not have. Fetches only at a safe point."""
+    """The commit orch runs from, and how it stands against origin/main: commits it lacks (behind) and local commits
+    not pushed (ahead). An update is offered only when it can fast-forward. Fetches only at a safe point."""
     try:
         current = _git("rev-parse", "--short", "HEAD")
         branch = _git("rev-parse", "--abbrev-ref", "HEAD")
@@ -48,11 +49,13 @@ def check(status: str) -> Dict[str, Any]:
         _git("fetch", "--quiet", "origin", "main")
         latest = _git("rev-parse", "--short", "origin/main")
         behind = int(_git("rev-list", "--count", "HEAD..origin/main") or 0)
+        ahead = int(_git("rev-list", "--count", "origin/main..HEAD") or 0)  # local commits not pushed
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
         return {"ok": False, "checked": False, "current": current, "branch": branch, "dirty": dirty,
                 "error": f"could not reach origin: {e}"}
     return {"ok": True, "checked": True, "current": current, "branch": branch, "dirty": dirty,
-            "latest": latest, "behind": behind, "update": behind > 0}
+            "latest": latest, "behind": behind, "ahead": ahead,
+            "update": behind > 0 and not ahead}  # with local commits it can't fast-forward (apply refuses), so none
 
 
 REQUEST = "UPDATE"  # in the run folder: the board's Update button was clicked

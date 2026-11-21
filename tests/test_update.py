@@ -69,6 +69,25 @@ class TestApply(unittest.TestCase):
     def apply(self, python=None):
         return update.apply("cfg", repo=self.repo, python=python or self.ok)
 
+    def check(self):
+        with patch.object(update, "REPO", self.repo):
+            return update.check("completed")
+
+    def test_check_tells_local_commits_and_offers_only_a_fast_forward(self):
+        """Local commits not pushed showed as "up to date"; with main moved on too, the board offered an update that
+        apply could only refuse."""
+        j = self.check()
+        self.assertEqual((j["behind"], j["ahead"], j["update"]), (0, 0, False))
+        self.commit(self.repo, "b.py", "local", push=False)
+        j = self.check()
+        self.assertEqual((j["behind"], j["ahead"], j["update"]), (0, 1, False))
+        self.commit(self.up, "a.py", "2")
+        j = self.check()
+        self.assertEqual((j["behind"], j["ahead"], j["update"]), (1, 1, False))  # diverged: no Update button
+        git(self.repo, "reset", "-q", "--hard", "HEAD~1")
+        j = self.check()
+        self.assertEqual((j["behind"], j["ahead"], j["update"]), (1, 0, True))
+
     def test_up_to_date_does_nothing(self):
         res = self.apply()
         self.assertEqual((res["ok"], res["updated"]), (True, False))

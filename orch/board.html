@@ -599,8 +599,11 @@ async function checkVersion(){
   try { const j = await (await fetch('api/version?m=' + encodeURIComponent(M), {cache:'no-store'})).json();
     const p = j.progress || {}, busy = p.state === 'requested' || p.state === 'waiting' || p.state === 'restarting';
     verLatest = j.latest || '';
+    const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
     let t = j.error ? j.error : !j.checked ? `running ${j.current} · ${j.reason}`
-      : j.update ? `running ${j.current} · new version ${j.latest} on main (${j.behind} commit${j.behind > 1 ? 's' : ''} ahead)`
+      : j.ahead && j.behind ? `running ${j.current} · ${n(j.ahead, 'local commit')} not on main, and main has ${n(j.behind, 'new commit')}: push or merge by hand to update`
+      : j.ahead ? `running ${j.current} · ${n(j.ahead, 'local commit')} not on main yet`
+      : j.update ? `running ${j.current} · new version ${j.latest} on main (${n(j.behind, 'commit')} newer)`
       : `running ${j.current} · up to date`;
     if (p.state === 'restarting' && p.new && j.current === p.new) t = `updated to ${j.current} · ` + t.replace(/^running \S+ · /, '');
     else if (busy) t += ' · ' + (p.message || 'update requested').replace(/^⬆ /, '');
