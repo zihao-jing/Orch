@@ -321,10 +321,11 @@ class ManagedRunner(MonitorRunner):
             self.golden_after_turn(agent, r, before)
             self.check_addresses(agent, r.get("output") or "")
             self.check_tooling(agent, r)
-            self.route_reply(agent, r)
+            if purpose != "discussion_apply":  # apply is validated as a whole before anything is released
+                self.route_reply(agent, r)
             if agent.role == "manager":
                 self.take_rubric(r)
-            if agent.role in ("manager", "verifier"):
+            if agent.role in ("manager", "verifier") and purpose != "discussion_apply":
                 self.take_workers(agent, r)
             self.rec.save()
         if (r.get("meta") or {}).get("compacted"):  # the CLI compacted the session during the turn
@@ -455,7 +456,7 @@ class ManagedRunner(MonitorRunner):
             self.st["night_turns"] = n + 1
             if n % 5 == 0:
                 add("night_mode", self.mtpl("night_manager"))
-        if role == "manager" and self.discussion_on():
+        if role == "manager" and self.discussion_on() and purpose != "discussion_apply":
             add("discussion", self.mtpl("discussion_manager"))
         if role == "critic" and (self.par or self.carries_from_user(agent)):
             add("reply_routing", self.mtpl("critic_reply_routing"))
@@ -1277,6 +1278,8 @@ class ManagedRunner(MonitorRunner):
     def message_control(self, d: Dict[str, Any]) -> None:
         kind = d.get("kind")
         if kind == "discussion":
+            if d.get("action") in ("end", "apply"):
+                return self.discussion_action(d)
             return self.set_discussion(bool(d.get("on")))
         if kind == "milestone":
             if d.get("action") == "reopen":
@@ -1365,7 +1368,108 @@ class ManagedRunner(MonitorRunner):
 
     def discussion_on(self) -> bool:
         """On as set, or switched on on the board and not applied yet (a message is never sent past the switch)."""
-        return bool(self.st.get("discussion")) or self.pending_switch("discussion") is True
+        return (bool(self.st.get("discussion")) or bool(self.mg.get("discussion_saved"))
+                or self.pending_switch("discussion") is True)
+
+    def discussion_action(self, d: Dict[str, Any]) -> None:
+        """End without releasing directions, or queue one application of the conversation."""
+        mg = self.mg
+        request = str(d.get("request") or "")
+        if (mg.get("discussion_apply") or (request and request == mg.get("discussion_applied"))
+                or any(d.get("discussion_result") for d in self.st.get("gate_queue", []))):
+            return
+        if d["action"] == "apply" and "gate" in d and d["gate"] != (mg.get("gate") or {}).get("key"):
+            mg["discussion_error"] = "The gate changed. Review it and apply the discussion again."
+            self.rec.save()
+            return
+        self.st["discussion"] = False
+        mg.pop("discussion_batch", None)
+        mg["discussion_saved"] = True
+        mg.pop("discussion_error", None)
+        if d["action"] == "apply":
+            gate = mg.get("gate") or {}
+            mg["discussion_apply"] = {"request": request, "gate": gate.get("key"), "status": "queued"}
+        self.rec.event("discussion", on=False, action=d["action"])
+        self.rec.save()
+
+    def apply_discussion(self) -> None:
+        """One manager turn settles all covered questions and the current gate, never one turn per question."""
+        mg = self.mg
+        pending = mg.get("discussion_apply")
+        if not pending or self.terminal_busy(self.manager) or self.rec.agent_busy(self.manager.name):
+            return
+        # Board chats may be queued behind the agent lock; wait for all accepted replies too.
+        from .board import _chat_rows
+        if any(c.get("role") == "manager" and c.get("status") == "running"
+               for c in _chat_rows(self.rec.run_dir)):
+            return
+        gate = mg.get("gate") or {}
+        if pending.get("gate") != gate.get("key"):
+            mg.pop("discussion_apply", None)
+            mg["discussion_error"] = "The gate changed. Review it and apply the discussion again."
+            self.rec.save()
+            return
+        questions = [q for q in self.st.get("questions", []) if q.get("to") == "human" and q.get("status") == "open"]
+        prompt = self.mtpl("manager_discussion_apply", questions=json.dumps(
+            [{"id": q["id"], "text": q["text"]} for q in questions], ensure_ascii=False),
+            gate=json.dumps(gate, ensure_ascii=False), held=self.discussion_held_text())
+        pending["status"] = "running"
+        self.rec.save()
+        self._activating = True
+        try:
+            # Keep a completed reply across restarts; never ask again just to process its decisions.
+            r = pending.get("result") or self.say(self.manager, prompt, "discussion_apply")
+            pending["result"] = r
+            self.rec.save()
+            blocks = T.bodies(r.get("output", ""), "discussion-resolution")
+            result = json.loads(blocks[-1]) if blocks else None
+            if r.get("status") != "ok" or not isinstance(result, dict):
+                raise ValueError("The manager did not return a complete discussion resolution.")
+            answers, decision = result.get("answers"), result.get("gate")
+            if not isinstance(answers, dict) or decision not in ("approve", "revise", "keep"):
+                raise ValueError("The manager's discussion resolution was incomplete.")
+            allowed = {q["id"]: q for q in questions}
+            if any(k not in allowed or not isinstance(v, str) or not v.strip() for k, v in answers.items()):
+                raise ValueError("The manager returned an invalid question answer.")
+            unresolved = set(allowed) - set(answers)
+            if unresolved or T.bodies(r.get("output", ""), "question"):
+                decision = "keep"
+            if gate and decision == "revise" and gate.get("kind") == "plan" and not parse_milestones(r["output"]):
+                raise ValueError("The revised plan is missing. The gate remains open.")
+            if gate.get("kind") == "wait" and decision == "revise" and T.value(r["output"], "decision") != "CONTINUE":
+                raise ValueError("The manager did not confirm how to resume. The gate remains open.")
+            needs_instruction = ((not gate and bool(answers) and decision != "keep") or
+                                 (gate.get("kind") == "wait" and decision != "keep") or
+                                 (gate.get("kind") == "milestone" and decision == "revise"))
+            if needs_instruction and not self.for_critic(r.get("output", "")):
+                raise ValueError("The manager did not include the agreed instruction. Nothing was released.")
+            for qid, answer in answers.items():
+                self.settle(allowed[qid], "human", answer, r["turn_id"])
+                allowed[qid]["via"] = "discussion"
+                self.decide(answer, "you", qid)
+            self.manager_questions(r.get("output", ""), r["turn_id"])
+            mg.pop("discussion_apply", None)
+            mg["discussion_applied"] = pending.get("request")
+            if decision == "keep":
+                mg["discussion_error"] = "Discussion recorded. Unresolved questions or the gate still need your decision."
+            else:
+                mg.pop("discussion_saved", None)
+                self.st.pop("discussion_since", None)
+                if gate:
+                    self.st.setdefault("gate_queue", []).append({"kind": "gate", "gate": gate["key"],
+                        "decision": decision, "message": "Applied the agreed discussion.", "discussion_result": r})
+                else:
+                    self.route_reply(self.manager, {**r, "purpose": "discussion"})
+                    self.after_manager(r, relay=False)
+                self.discussion_done(r)
+            self.rec.save()
+        except (ValueError, _Failed) as e:
+            mg.pop("discussion_apply", None)
+            mg["discussion_error"] = str(e)
+            self.rec.progress(f"⚠ Discussion not applied: {e}")
+            self.rec.save()
+        finally:
+            self._activating = False
 
     def set_discussion(self, on: bool) -> None:
         if on == bool(self.st.get("discussion")):
@@ -1437,6 +1541,7 @@ class ManagedRunner(MonitorRunner):
     def discussion_batch(self) -> None:
         """The manager's one turn after I close the discussion: one message for the critic, which supersedes what
         was held (routing supersede); anything still held after it is dropped as replaced by the batch."""
+        self.apply_discussion()
         a, mg = self.manager, self.mg
         if not mg.get("discussion_batch") or self.discussion_on():
             return
@@ -2612,9 +2717,9 @@ class ManagedRunner(MonitorRunner):
                     d = queue_.pop(0)
                     if not d.get("gate") or d["gate"] == gate["key"]:  # stale clicks for an older gate are dropped
                         decision = d
-                if decision is None and self.st.get("night") and gate["kind"] == "workers":
+                if decision is None and self.st.get("night") and not self.discussion_on() and gate["kind"] == "workers":
                     decision = {"decision": "approve", "message": "", "night": True}  # clipped to the hard cap
-                if decision is None and self.st.get("night") and gate["kind"] in ("plan", "milestone"):
+                if decision is None and self.st.get("night") and not self.discussion_on() and gate["kind"] in ("plan", "milestone"):
                     ok = gate["kind"] == "plan" or self.cur() is None or self.cur().get("accepted", True)
                     decision = {"decision": "approve" if ok else "revise", "message": "", "night": True}
                     self.decide(f"{gate['title']}: {'approved' if ok else 'kept going with the manager’s guidance'}"
@@ -2654,6 +2759,8 @@ class ManagedRunner(MonitorRunner):
 
     def main_loop(self) -> str:
         mg = self.mg
+        self.st["discussion_controls"] = 2
+        self.rec.save()
         self._main_ident = threading.get_ident()
         if self.st.pop("status_lines", None):  # lines left by a run that stopped mid-turn: nothing is watched yet
             self.rec.save()
@@ -2787,7 +2894,7 @@ class ManagedRunner(MonitorRunner):
             prompt = self.mtpl("manager_plan", human_messages="")
         if mg.get("discussion_carry"):  # a discussion I closed at the plan gate before sending the plan back
             prompt = prompt.rstrip() + "\n\n" + mg["discussion_carry"] + "\n"
-        r = self.say(self.manager, prompt, "plan")
+        r = mg.pop("discussion_plan_result", None) or self.say(self.manager, prompt, "plan")
         self.discussion_carried(r)
         ms = parse_milestones(r["output"])
         if not ms:
@@ -2816,6 +2923,8 @@ class ManagedRunner(MonitorRunner):
                 self.forward(self.manager, d["message"])
             mg.update(phase="kickoff", ms=0)
         else:
+            if d.get("discussion_result"):
+                mg["discussion_plan_result"] = d["discussion_result"]
             mg.update(phase="plan", comment=d.get("message") or "Please rework the plan.")
         return None
 
@@ -3564,6 +3673,8 @@ class ManagedRunner(MonitorRunner):
                 "Approve to start them; send it back to keep one worker.")
         d = self.wait_gate({"kind": "workers", "title": f"{n} workers at once", "text": text,
                             "milestone": mg.get("ms", 0)})
+        if d.get("discussion_result"):
+            self.after_manager(d["discussion_result"])
         if d["decision"] == "approve":
             k = min(n, c.workers_hard_cap) if d.get("night") else n
             req.update(status="approved", n=k, decided_by="night mode" if d.get("night") else "me")
@@ -4428,13 +4539,15 @@ class ManagedRunner(MonitorRunner):
         if d["decision"] == "revise":  # B9: sent back with my notes: the manager decides again
             msg = msg or "Not done; please decide again."
             self.decide(f"Pause sent back: {msg}", "you", "wait")
-            r = self.say(self.manager, self.mtpl("manager_wait_revise", message=msg,
+            r = d.get("discussion_result") or self.say(self.manager, self.mtpl("manager_wait_revise", message=msg,
                                                  waited=truncate(w.get("proposal") or w.get("text", ""), 600)), "pause")
             return self.pause_decision(r, {**w, "proposal": w.get("proposal") or w.get("text", "")})
         if msg:
             self.decide(msg, "you", "wait")
             self.forward(self.manager, self.mtpl("manager_resumed", message=msg,
                                                  waited=truncate(w.get("proposal") or w.get("text", ""), 600)).strip())
+        if d.get("discussion_result"):
+            self.after_manager(d["discussion_result"])
         r = self.say(self.critic, self.mtpl("critic_resume", message=msg or "(no message)",
                                             waited=w.get("proposal") or "a task outside this work",
                                             human_messages=""), "guidance")
@@ -4627,7 +4740,7 @@ class ManagedRunner(MonitorRunner):
         prompt = self.mtpl("manager_feedback", n=mg["ms"] + 1, title=ms["title"], comment=comment, unsent=unsent)
         if disc:
             prompt = prompt.rstrip() + "\n\n" + disc + "\n"
-        r = self.say(self.manager, prompt, "feedback")
+        r = d.get("discussion_result") or self.say(self.manager, prompt, "feedback")
         if held:
             why = ("replaced by the manager's message after the gate"
                    + ("" if unsent or comment == held else "; not shown to the manager"))

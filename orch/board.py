@@ -227,6 +227,8 @@ class Board:
                                   and isinstance(t.get("cost"), (int, float))), 4)
         night_pending: Optional[bool] = st.get("night_queued")  # B9: queued while a question for me is open
         discussion_pending: Optional[bool] = None
+        discussion_applying = bool((st.get("managed") or {}).get("discussion_apply")) or any(
+            d.get("discussion_result") for d in st.get("gate_queue", []))
         queued: Dict[str, List[str]] = {}  # answers sent but not yet picked up (the run reads them between turns)
         for p in sorted((rd / "inbox").glob("*.json")):
             d = read_json(p) or {}
@@ -234,6 +236,7 @@ class Board:
                 night_pending = bool(d.get("on"))  # the run reads it between turns; the newest one wins
             if isinstance(d, dict) and d.get("kind") == "discussion":
                 discussion_pending = bool(d.get("on"))
+                discussion_applying = discussion_applying or d.get("action") == "apply"
             if isinstance(d, dict) and d.get("kind") == "answer" and d.get("qid"):
                 queued.setdefault(str(d["qid"]).upper(), []).append(str(d.get("message", "")))
         agents = [{"name": a["name"], "role": a["role"], "called": a.get("display_name") or a["name"],
@@ -250,6 +253,8 @@ class Board:
             "started_at": st.get("started_at"), "error": st.get("error"),
             "managed": st.get("managed") or {}, "night": bool(st.get("night")), "night_pending": night_pending, "questions": st.get("questions") or [],
             "discussion": bool(st.get("discussion")), "discussion_pending": discussion_pending,
+            "discussion_applying": discussion_applying,
+            "discussion_supported": st.get("discussion_controls") == 2,
             "review_files": _review_files(rd, st),
             "decisions": st.get("decisions") or [],
             "golden": _golden(st),
@@ -438,7 +443,7 @@ class Board:
         mg = d.get("managed") or {}
         out = {k: d.get(k) for k in (
             "monitor", "run_id", "status", "mode", "round", "max_rounds", "cost", "cost_estimate", "turn_counts",
-            "updated_at", "started_at", "error", "night", "night_pending", "discussion", "discussion_pending",
+            "updated_at", "started_at", "error", "night", "night_pending", "discussion", "discussion_pending", "discussion_applying", "discussion_supported",
             "review_files", "golden", "status_lines", "reliability", "stop_reason", "reviews", "agents", "series",
             "chat", "chat_more", "terminal", "live", "queued_answers", "min_score", "can_chat", "audit", "auditing")}
         out["managed"] = _slim_managed(mg)
@@ -787,11 +792,12 @@ class Board:
     @staticmethod
     def discussion_on(rd: Path) -> bool:
         """The discussion switch as last set: a switch not yet read by the run counts."""
-        on = bool((read_json(rd / "state.json", {}) or {}).get("discussion"))
+        st = read_json(rd / "state.json", {}) or {}
+        on = bool(st.get("discussion") or (st.get("managed") or {}).get("discussion_saved"))
         for p in sorted((rd / "inbox").glob("*.json")):
             d = read_json(p) or {}
             if isinstance(d, dict) and d.get("kind") == "discussion":
-                on = bool(d.get("on"))
+                on = bool(d.get("on")) or d.get("action") in ("end", "apply")
         return on
 
     def _chat_reminders(self, a: Any, n: int) -> List[str]:
@@ -831,7 +837,7 @@ def _clip(x: Any, n: int = 300) -> Any:
 
 _MS_KEYS = ("title", "done_when", "status", "score", "rounds", "summary", "gate_summary", "rubric", "reopened_at",
             "accepted", "name")
-_MG_KEYS = ("ms", "phase", "gate", "job", "held", "review_req", "discussion_batch")
+_MG_KEYS = ("ms", "phase", "gate", "job", "held", "review_req", "discussion_batch", "discussion_saved", "discussion_error")
 
 
 def _slim_managed(mg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1355,7 +1361,14 @@ def _handler(boards: Dict[str, Board]):
                                    409)
                 b.control({"kind": "night", "on": bool(body.get("on"))})
             elif u.path == "/api/discussion":
-                b.control({"kind": "discussion", "on": bool(body.get("on"))})
+                action = body.get("action") or ("start" if body.get("on") else "end")
+                if action not in ("start", "end", "apply"):
+                    return self.js({"error": "unknown discussion action"}, 400)
+                if (read_json(b.run_dir / "state.json", {}) or {}).get("discussion_controls") != 2:
+                    return self.js({"error": "Restart the run to enable the updated discussion controls."}, 409)
+                b.control({"kind": "discussion", "on": action == "start", "action": action,
+                           "request": str(body.get("request") or ""),
+                           **({"gate": body["gate"]} if "gate" in body else {})})
             elif u.path == "/api/milestone":
                 b.control({"kind": "milestone", "action": "reopen", "ms": int(body.get("ms", -1))})
             elif u.path == "/api/review":

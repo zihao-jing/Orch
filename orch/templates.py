@@ -608,8 +608,32 @@ the run is quiet, off track, or a job or watcher it relies on has died; otherwis
     "rubric_note": "Your rubric for milestone {{n}} has {{count}} criteria; set 3–8, specific to its work, in "
                    "`<rubric>…</rubric>` (one per line), in your next reply.",
     # B6 discussion mode: a reminder while it is on, and the one turn after I close it
-    "discussion_manager": "We are in a discussion: nothing you write reaches {{critic}} until I close it. Keep what "
+    "discussion_manager": "Our discussion has not been applied: nothing you write reaches {{critic}} until I apply it. Keep what "
                           "{{critic}} should get for the one message you send then.",
+    "manager_discussion_apply": """\
+I clicked Apply discussion. End our discussion and apply the decisions we already agreed in this conversation.
+Do not ask me to repeat answers. Resolve every listed question covered by my answers; leave genuinely unanswered
+questions open. Do not treat discussion alone as approval of something I did not agree to.
+
+Open questions (IDs and text): {{questions}}
+Current gate (empty if none): {{gate}}
+
+Return one <discussion-resolution> JSON object </discussion-resolution> with exactly:
+{"answers": {"Q1": "the complete agreed answer"}, "gate": "approve"}
+Only include listed question IDs actually answered. The gate value is approve, revise, or keep.
+Use keep if anything essential is unresolved, and explain only what remains to me.
+For no gate, use approve to apply the agreed directions, or keep if clarification is needed.
+For a wait gate, approve means the human task is done; revise means replace the pause with the agreed work.
+For a milestone, approve means accept it; revise means continue work with our agreed changes.
+For a workers gate, approve authorizes the proposed worker count; revise keeps one worker.
+For a plan gate, revise must also include the complete revised numbered milestone list in this reply.
+
+If applying changes to ongoing work, include ONE complete <message to="{{critic}}"> with all agreed answers
+and directions needed by the critic. For a wait gate revised into work also include <decision>CONTINUE</decision>.
+If questions remain, do not send directions yet. No separate acknowledgements per question.
+Save standing decisions on the golden board. These held messages have not been sent; carry over what still applies:
+{{held}}
+""",
     "manager_discussion_end": """\
 I closed our discussion. Send {{critic}} the new directions now, in one `<message to="{{critic}}">…</message>`:
 everything we settled that changes the work, complete on its own. It replaces the messages held during the

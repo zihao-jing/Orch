@@ -32,7 +32,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 NAMES = ("message", "question", "pause", "plan", "checklist", "verdict", "score", "decision", "wait-job", "no-wait", "state", "preference",
-         "instruction", "rubric", "summary", "workers", "to")
+         "instruction", "rubric", "summary", "workers", "to", "discussion-resolution")
 _ALT = "|".join(re.escape(n) for n in NAMES)
 _OPEN = re.compile(rf"<({_ALT})((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)
 _ATTR = re.compile(r"([\w-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>/]+))")

@@ -125,11 +125,14 @@ Goal: the manager reviews as the user would, from a limited view.
 - Per milestone, the manager sets 3–8 task-specific rubrics (e.g. "each reviewer concern is strongly supported"),
   replacing the fixed 5 generic ones.
 - Add the research guidance from `collaboration-preferences.md` to the manager prompt.
-- Discussion mode: an explicit board switch. While on, the manager sends nothing to the critic. When the user turns
-  it off, the manager sends one batch with the new directions; the critic decides whether to interrupt the worker.
-  Ended while a plan or milestone gate is open, nothing is sent yet: the board asks for approve or send back, and the
-  manager's one turn after that decision (feedback, kickoff, or the reworked plan) carries both the discussion and the
-  decision, so the critic and the worker get one message instead of two.
+- Discussion mode: the manager's directions stay held until the user clicks **Apply discussion**. That action ends
+  discussion and makes one manager turn use the existing conversation to settle covered questions and the current
+  gate (including a human-task wait), then sends consolidated directions. Unanswered questions and ambiguous gate
+  decisions stay open. Gate handlers reuse this reply rather than requesting another summary.
+  **End discussion** offers **Apply discussion**, **End only**, and **Cancel**. End only makes no manager turn,
+  leaves gates open, and holds directions until a later apply. Applying shows a processing state, suppresses gate
+  inputs, and waits for accepted manager chats to finish. Invalid resolutions release nothing; failures are shown
+  for an explicit retry. Request IDs prevent duplicate applications.
 - Milestone fallback: the board can move a milestone back to open (display and checklist state). No extra prompt to
   the manager.
 
