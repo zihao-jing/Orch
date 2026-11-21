@@ -26,7 +26,8 @@ class TestApply(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.origin = self.tmp / "origin.git"
-        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
+        git(self.origin, "symbolic-ref", "HEAD", "refs/heads/main")
         self.up = self.tmp / "upstream"  # where new commits are made and pushed
         subprocess.run(["git", "clone", "-q", str(self.origin), str(self.up)], check=True, capture_output=True)
         for r in (self.up,):

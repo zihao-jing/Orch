@@ -10,6 +10,8 @@
    next and to keep the next instruction for it.
 """
 
+from protocol_fixtures import worker_instruction
+
 import json
 import sys
 import tempfile
@@ -93,8 +95,8 @@ class TestQuestionWithAFinishedMilestone(unittest.TestCase):
         status, rec = run(make_cfg(Path(tempfile.mkdtemp()), [managed(
             mgr={"milestones": 1, "replies": {"answer": ['<message to="Jordan">Cite the new run.</message>']}},
             critic={"replies": {"verify": [
-                "<question>Do we cite the new run?\nA) yes\nB) no</question>\n\n"
-                "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                worker_instruction("<question>Do we cite the new run?\nA) yes\nB) no</question>\n\n"
+                "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>"),
                 "Good.\n\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})]))
         self.assertEqual(status, "completed")
         answer = next(t for t in turns(rec) if t["agent"] == "boss" and t["purpose"] == "answer")

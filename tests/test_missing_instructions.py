@@ -1,5 +1,7 @@
 """A failed review with no worker instruction must not spend empty worker rounds."""
 
+from protocol_fixtures import worker_instruction
+
 import dataclasses
 import tempfile
 import unittest
@@ -34,7 +36,7 @@ class TestMissingInstructions(unittest.TestCase):
         return rec
 
     def test_failed_review_without_instructions_asks_manager_before_another_worker_turn(self):
-        cfg = make_cfg(self.root, [managed(critic={'replies': {'verify': [NO_STEP]}})])
+        cfg = make_cfg(self.root, [managed(critic={'replies': {'verify': [worker_instruction(NO_STEP)]}})])
         rec = self.run_until_wait(cfg)
         ts = turns(rec)
         self.assertEqual(len([t for t in ts if t['purpose'] == 'work']), 1)
@@ -42,7 +44,7 @@ class TestMissingInstructions(unittest.TestCase):
         self.assertEqual(rec.state['round'], 1)
 
     def test_empty_brief_never_starts_a_worker(self):
-        cfg = make_cfg(self.root, [managed(critic={'replies': {'brief': [NO_STEP]}})])
+        cfg = make_cfg(self.root, [managed(critic={'replies': {'brief': [worker_instruction(NO_STEP)]}})])
         rec = self.run_until_wait(cfg)
         self.assertFalse(any(t['purpose'] == 'work' for t in turns(rec)))
         self.assertEqual(rec.state['round'], 0)
@@ -51,7 +53,7 @@ class TestMissingInstructions(unittest.TestCase):
         cfg = make_cfg(self.root, [managed(
             mgr={'replies': {'pause': ['<message to="Jordan">Resume if there is work.</message>'
                                      '<decision>CONTINUE</decision>']}},
-            critic={'replies': {'brief': [NO_STEP], 'guidance': [NO_STEP]}})])
+            critic={'replies': {'brief': [worker_instruction(NO_STEP)], 'guidance': [worker_instruction(NO_STEP)]}})])
         rec = self.run_until_wait(cfg)
         ts = turns(rec)
         self.assertEqual(len([t for t in ts if t['purpose'] == 'pause']), 1)
@@ -67,7 +69,7 @@ class TestMissingInstructions(unittest.TestCase):
         cfg = make_cfg(self.root, [managed(
             mgr={'milestones': 1, 'replies': {'pause': [
                 '<message to="Jordan">Finish the remaining edit.</message><decision>CONTINUE</decision>']}},
-            critic={'replies': {'brief': [NO_STEP], 'guidance': ['Make the remaining edit and test it.'],
+            critic={'replies': {'brief': [worker_instruction(NO_STEP)], 'guidance': [worker_instruction('Make the remaining edit and test it.')],
                                 'verify': ['The edit is correct.\n<plan>- [x] Finish the edit.</plan>\n'
                                            '<checklist>- [x] The edit is tested.</checklist><verdict>PASS</verdict>']}})])
         status, rec = run(cfg)
@@ -79,13 +81,13 @@ class TestMissingInstructions(unittest.TestCase):
     def test_missing_manager_pause_decision_does_not_implicitly_continue(self):
         cfg = make_cfg(self.root, [managed(
             mgr={'replies': {'pause': ['The work is closed. Preserve the files.']}},
-            critic={'replies': {'verify': [PAUSE]}})])
+            critic={'replies': {'verify': [worker_instruction(PAUSE)]}})])
         rec = self.run_until_wait(cfg)
         self.assertEqual(len([t for t in turns(rec) if t['purpose'] == 'work']), 1)
         self.assertEqual(rec.state['managed']['wait']['who'], 'manager decision unclear')
 
     def test_approval_without_message_cannot_restart_with_an_empty_critic_instruction(self):
-        cfg = make_cfg(self.root, [managed(critic={'replies': {'verify': [PAUSE], 'guidance': [NO_STEP]}})])
+        cfg = make_cfg(self.root, [managed(critic={'replies': {'verify': [worker_instruction(PAUSE)], 'guidance': [worker_instruction(NO_STEP)]}})])
         gates = []
 
         def answer_once(_runner, gate):
@@ -110,26 +112,28 @@ class TestParallelMissingInstructions(ParallelBase):
         return rec
 
     def replies(self, review=NO_STEP, assign=ASSIGN, guidance=NO_STEP):
-        return {'brief': [PROPOSE], 'par_assign': [assign],
-                'par_review': [review, 'Done. <verdict>PASS</verdict>'],
-                'guidance': [guidance], 'verify': ['Done. <verdict>PASS</verdict>']}
+        return {'brief': [worker_instruction(PROPOSE)], 'par_assign': [assign],
+                'par_review': [worker_instruction(review), 'Done. <verdict>PASS</verdict>'],
+                'guidance': [worker_instruction(guidance)], 'verify': ['Done. <verdict>PASS</verdict>']}
 
     def test_empty_parallel_review_blocks_that_worker_and_finishes_other_assigned_work(self):
         rec = self.run_until_wait(self.cfg(critic={'replies': self.replies()}))
         work = [t for t in turns(rec) if t['purpose'] == 'work']
         self.assertEqual(sorted(t['agent'] for t in work), ['writer', 'writer-2', 'writer-3'])
-        par = rec.state['managed']['par_last']
-        self.assertFalse(par['active'])
+        par = rec.state['managed']['par']
+        self.assertTrue(par['active'])
         self.assertEqual(sorted(s['status'] for s in par['slots'].values()), ['blocked', 'done', 'done'])
         self.assertEqual(len([t for t in turns(rec) if t['purpose'] == 'pause']), 1)
         self.assertIn('waiting for a next-step instruction', (self.sdir / 'critic' / 'work-m1.md').read_text())
 
-    def test_checklist_only_parallel_assignment_spends_no_turn_on_that_worker(self):
+    def test_explicit_assignment_is_delivered_without_judging_its_prose(self):
         assign = ASSIGN.replace('Make table A in out/a.', '- [ ] Table A remains unfinished')
-        rec = self.run_until_wait(self.cfg(critic={'replies': self.replies(
+        status, rec = run(self.cfg(critic={'replies': self.replies(
             review='Done. <verdict>PASS</verdict>', assign=assign)}))
-        self.assertEqual(sorted(t['agent'] for t in turns(rec) if t['purpose'] == 'work'), ['writer-2', 'writer-3'])
-        self.assertEqual(rec.state['managed']['par_last']['slots']['writer']['turns'], 0)
+        self.assertEqual(status, 'completed')
+        work = [t for t in turns(rec) if t['purpose'] == 'work']
+        self.assertEqual(sorted(t['agent'] for t in work), ['writer', 'writer-2', 'writer-3'])
+        self.assertIn('- [ ] Table A remains unfinished', next(t for t in work if t['agent'] == 'writer')['input'])
 
     def test_parallel_then_empty_continuation_waits_after_one_manager_attempt(self):
         rec = self.run_until_wait(self.cfg(critic={'replies': self.replies()}, mgr={'replies': {
@@ -140,14 +144,14 @@ class TestParallelMissingInstructions(ParallelBase):
         self.assertIn('another empty instruction', rec.state['managed']['wait']['text'])
 
     def test_parallel_can_continue_after_concrete_manager_and_critic_instructions(self):
-        cfg = self.cfg(critic={'replies': self.replies(guidance='Finish the remaining caption.')}, mgr={
+        cfg = self.cfg(critic={'replies': self.replies(guidance='<message to="writer">Finish the remaining caption.</message>')}, mgr={
             'replies': {'incoming': ['<workers n="3">Approved.</workers>', 'Noted.'],
                         'pause': ['<message to="Jordan">Finish the caption.</message><decision>CONTINUE</decision>']}})
         status, rec = run(cfg)
         self.assertEqual(status, 'completed')
         work = [t for t in turns(rec) if t['purpose'] == 'work']
         self.assertEqual(len(work), 4)
-        resumed = next(t for t in work if not t.get('par_worker'))
+        resumed = next(t for t in work if 'Finish the remaining caption.' in t['input'])
         self.assertIn('Finish the remaining caption.', resumed['input'])
         self.assertNotIn('instruction_retry', rec.state['managed'])
 

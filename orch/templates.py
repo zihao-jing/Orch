@@ -264,7 +264,8 @@ Your new message replaces it, so carry over whatever in it still applies.
 
 Please break this into a few steps in your checklist file `{{checklist_path}}` (one `## Step N: …` section each,
 the first step's items under it, standing rules under `## Standing rules`), then give {{worker}} the first step
-only: what to do, how you will check it, and whatever settled matters the work must keep to. The repository is at
+only, inside `<message to="{{worker}}">…</message>`: what to do, how you will check it, and whatever settled matters
+the work must keep to. Untagged text is for me. The repository is at
 `{{cwd}}`.
 """,
     # B11: the manager approved several people before the brief: the critic plans for them and hands out nothing yet
@@ -285,7 +286,8 @@ to {{worker}} in this reply.""",
 
 Please take a look at the changes and update your checklist file `{{checklist_path}}` in place (tick what holds
 now). If the current step is done, add the next step's items there and give {{worker}} that step in this same
-reply. If everything that can be done here is done and the rest waits on a person, don't tell {{worker}} to hold:
+reply inside `<message to="{{worker}}">…</message>`. Untagged text is for me; without an explicit worker
+message, no new worker turn starts. If everything that can be done here is done and the rest waits on a person, don't tell {{worker}} to hold:
 propose a pause in `<pause>…</pause>` instead. End with `<verdict>PASS</verdict>` (only when every item of every
 step in the file is `[x]`) or `<verdict>FAIL</verdict>`.
 """,
@@ -294,13 +296,13 @@ About your question:
 
 {{answer}}
 
-If this changes what {{worker}} should do, say what (and edit your checklist file if it changes the steps or
+If this changes what {{worker}} should do, send `<message to="{{worker}}">…</message>` (and edit your checklist file if it changes the steps or
 items). If it changes your verdict, end with a new `<verdict>`.
 """,
     # added to critic_answer while the critic's last review has not reached the worker yet
     "critic_answer_pending": "{{worker}} has not received your last review yet. If this changes what they should do, "
                              "write the whole instruction as it should now read: it replaces that review, so they get "
-                             "one instruction. If nothing changes for them, write nothing outside the tags and the "
+                             'one instruction inside `<message to="{{worker}}">…</message>`. If nothing changes for them, omit that message and the '
                              "review goes out as it was.",
     "critic_report": """\
 {{human_messages}}
@@ -338,7 +340,7 @@ right, write for me, in a few plain lines, what I need to do and what to send ba
 
 About your proposal to pause: not yet. {{guidance}}
 
-Please tell {{worker}} what to do next: the current step of your plan, or a new one if this changes the plan.
+Please tell {{worker}} what to do next inside `<message to="{{worker}}">…</message>`: the current step of your plan, or a new one if this changes the plan.
 Don't write back to me to confirm. Write to me only if you disagree or need a decision from me, and put that in a
 `<question>`.
 """,
@@ -351,7 +353,7 @@ The work was paused while waiting for this:
 
 That is done now. My message: {{message}}
 
-Please check where things stand, update your checklist file if needed, and give {{worker}} the next step.
+Please check where things stand, update your checklist file if needed, and give {{worker}} the next step inside `<message to="{{worker}}">…</message>`.
 Don't write back to me to confirm. Write to me only if you disagree or need a decision from me, and put that in a
 `<question>`.
 """,
@@ -363,7 +365,7 @@ I read your report, and more is needed:
 {{guidance}}
 
 Please add what is needed to your checklist file `{{checklist_path}}` (new steps, or a step reopened, with their
-items) and give {{worker}} the next step. Don't write back to me to confirm. Write to me only if you disagree or
+items) and give {{worker}} the next step inside `<message to="{{worker}}">…</message>`. Don't write back to me to confirm. Write to me only if you disagree or
 need a decision from me, and put that in a `<question>`.
 """,
     "critic_checkin": """\
@@ -513,8 +515,9 @@ whatever settled matters the current step must keep to. The repository is at `{{
                        "What the pause was waiting for: {{waited}}",
     "relay_note": "{{note}}",
     # added to a critic review or instruction that carries a message from me (not on every turn)
-    "critic_reply_routing": "If I asked you something, answer it inside `<message to=\"you\">…</message>`; text outside "
-                            "tags goes to {{worker}}.",
+    "critic_reply_routing": 'Untagged text is for me. Send a worker-addressed message only when that worker needs '
+                            'to act; otherwise leave them idle. Report shared progress or questions upward. '
+                            'A verdict alone starts no worker turn.',
     "urgent_resume": "I stopped you mid-turn for this, because it can't wait until you finish:\n\n{{note}}\n\n"
                      "Take it into account from here. Anything you were running in the foreground was ended; check "
                      "where it got to before you rely on it. Then finish the request you were working on, and reply "
@@ -675,7 +678,8 @@ Please answer each comment here. If they change the work, tell {{critic}} what c
 You can approve up to {{max}} on your own: `<workers n="N">why</workers>` (N counts the person working now). More
 than that comes to me to decide. To keep one person, write `<workers n="1">why</workers>`.""",
     # the critic hears that its proposal was declined (neutral: no one above is named)
-    "workers_declined": "Let's keep to one person on these steps for now; carry on one step at a time.",
+    "workers_declined": "Let's keep to one person on these steps for now. Send their next step inside "
+                        "`<message to=\"{{worker}}\">…</message>`; keep any progress update outside the tag.",
     # the critic hands out the steps: one <to> section per worker
     "critic_par_assign": """\
 {{human_messages}}
@@ -699,11 +703,12 @@ go; I keep it up to date. Add shared limits (GPU, API rate) under its "Shared li
 
 {{report}}
 
-Please check this step and tick what holds in your checklist file `{{checklist_path}}`. Text outside the tags goes
-to {{who}} only. End with `<verdict>PASS</verdict>` when every item of {{step}} is `[x]`, otherwise
+Please check this step and tick what holds in your checklist file `{{checklist_path}}`. Untagged text goes
+to me. Use `<message to="{{id}}">…</message>` only if {{who}} needs another action; otherwise they stay idle.
+A verdict alone starts no worker turn. End with `<verdict>PASS</verdict>` when every item of {{step}} is `[x]`, otherwise
 `<verdict>FAIL</verdict>` with what to fix.{{next}} The work board is `{{board}}`.""",
-    "critic_par_next": " If it passes, {{next_step}} is next for {{who}}: give that step in this same reply.",
-    "critic_par_last": " If it passes, no step is left for {{who}}; they stop there.",
+    "critic_par_next": " If it passes, {{next_step}} is next for {{who}}: give that step in an explicit worker message or `<to>` assignment in this reply.",
+    "critic_par_last": " No next step is queued for {{who}}. If they need no further action, send no message to them.",
     # the parallel steps are finished: the critic takes stock (a review, as for one worker)
     "critic_par_done": """\
 {{human_messages}}

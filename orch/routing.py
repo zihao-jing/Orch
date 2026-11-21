@@ -65,15 +65,22 @@ def additive(attrs: Dict[str, str]) -> bool:
     return T._norm(attrs.get("additive", "")) in ("yes", "true", "1")
 
 
-def split_reply(text: str, sender: Any, agents: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+def split_reply(text: str, sender: Any, agents: List[Any], include_upward: bool = False) -> Tuple[List[Dict[str, Any]], List[str]]:
     """The <message> blocks of a reply that leave the conversation it was written in, by the sender's role view:
     ([{target, body, urgent, additive, i}], [the bad address of each block that can't go]). `to="you"` (the
-    sender's own user) stays where it was written and is in neither list. A worker addresses no one."""
+    sender's own user) stays where it was written unless include_upward is requested by an external-chat carrier.
+    With include_upward, untagged text and to="you" resolve to the same upper-level recipient."""
     allowed = MAY_ADDRESS.get(getattr(sender, "role", ""), ())
     out, bad = [], []
+    upper_role = {"worker": "verifier", "verifier": "manager"}.get(getattr(sender, "role", ""))
+    upper = next((a for a in agents if a.role == upper_role), None)
+    if include_upward and upper is not None and T.outside(text).strip():
+        out.append({"target": upper, "body": T.outside(text), "urgent": False, "additive": True, "i": None})
     for i, (attrs, body) in enumerate(T.blocks(text or "", "message")):
         to = (attrs.get("to") or "").strip()
         if T.addressed(attrs, "you"):
+            if include_upward and upper is not None and body.strip():
+                out.append({"target": upper, "body": body, "urgent": T.urgent(attrs), "additive": True, "i": i})
             continue
         target = T.recipient(to, agents)
         if target is None or target.name == sender.name or target.role not in allowed or not (body or "").strip():

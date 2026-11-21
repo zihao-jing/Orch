@@ -275,7 +275,9 @@ class TestRouting(unittest.TestCase):
         _b, cid = self._chat(rec, mon, "writer", 'Done.\n<message to="Jordan">ping</message>')
         r = _runner(mon, rec)
         r.activate("wait")
-        self.assertFalse(any(m["source"] == cid and m["status"] != "held" for m in r.ledger.rows))
+        routed = [m for m in r.ledger.rows if m["source"] == cid and m["status"] != "held"]
+        self.assertTrue(any(m["to"] == "critic" and m["body"] == "Done." for m in routed))
+        self.assertFalse(any("ping" in m["body"] for m in routed))
         self.assertTrue(r.st["fwd"].get("writer"))  # its one-line correction
 
     # ---- the terminal relay hook

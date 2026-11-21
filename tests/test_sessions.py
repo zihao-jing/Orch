@@ -10,6 +10,8 @@
    turn is charged only its own increase.
 """
 
+from protocol_fixtures import worker_instruction
+
 import json
 import sys
 import tempfile
@@ -56,9 +58,9 @@ class TestSessions(unittest.TestCase):
         ck2 = str(self.sdir / "critic" / "checklist-m2.md")
         two = "## Step 1: tables\n- [{a}] totals added\n\n## Step 2: prose\n- [{b}] intro rewritten\n"
         return {
-            "replies": {"brief": ["Start with the tables: add the totals."],
-                        "verify": [M1_REVIEW + " Step 1 is done; now rewrite the intro.\n<verdict>FAIL</verdict>",
-                                   "All done.\n<verdict>PASS</verdict>"]},
+            "replies": {"brief": [worker_instruction("Start with the tables: add the totals.")],
+                        "verify": [worker_instruction(M1_REVIEW + " Step 1 is done; now rewrite the intro.\n<verdict>FAIL</verdict>"),
+                                   "All done.\n<verdict>PASS</verdict>"] * 2},
             "files": {"brief": [{ck: two.format(a=" ", b=" ")}, {ck2: two.format(a=" ", b=" ")}],
                       "verify": [{ck: two.format(a="x", b=" ")}, {ck: two.format(a="x", b="x")},
                                  {ck2: two.format(a="x", b=" ")}, {ck2: two.format(a="x", b="x")}]}}
@@ -66,9 +68,9 @@ class TestSessions(unittest.TestCase):
     # 1 + 5
     def test_milestone_start_is_short_and_carries_no_past_rounds(self):
         cfg = self.cfg(worker={"replies": {"work": [M1_WORK, "Done."]}},
-                       critic={"replies": {"verify": [M1_REVIEW + "\n<verdict>FAIL</verdict>",
+                       critic={"replies": {"verify": [worker_instruction(M1_REVIEW + "\n<verdict>FAIL</verdict>"),
                                                       "Fine now.\n<checklist>\n- [x] ok\n</checklist>\n<verdict>PASS</verdict>"],
-                                           "brief": ["Start with the tables."]}},
+                                           "brief": [worker_instruction("Start with the tables.")]}},
                        writer={"fresh_session": "milestone"}, checker={"fresh_session": "milestone"})
         status, rec = run(cfg)
         self.assertEqual(status, "completed")
@@ -154,7 +156,7 @@ class TestSessions(unittest.TestCase):
         self.assertIn("compacting on request is not available for `mock`", (rec.run_dir / "progress.md").read_text())
 
     def test_milestone_start_compacts_the_sessions_by_default(self):
-        status, rec = run(self.cfg(critic={"replies": {"brief": ["Start with the tables."]}}))
+        status, rec = run(self.cfg(critic={"replies": {"brief": [worker_instruction("Start with the tables.")]}}))
         self.assertEqual(status, "completed")
         ts = sorted(turns(rec), key=lambda t: (t["started_at"], t["round"], t["seq"]))
         for name in ("writer", "critic"):

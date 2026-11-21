@@ -3,6 +3,8 @@ budget (more goes to me at a gate); copies of the worker run at the same time, e
 tag and monitor; the critic hands out steps by id and reviews each step on its own, one review at a time; orch keeps
 the work board. All with the mock backend: no live agents."""
 
+from protocol_fixtures import worker_instruction
+
 import copy
 import json
 import subprocess
@@ -57,7 +59,7 @@ class Base(unittest.TestCase):
 
     def cfg(self, controller=None, mgr=None, critic=None, worker=None, monitor=None, worker_cfg=None):
         ck = str(self.ck)
-        crit = {"replies": {"brief": [PROPOSE], "par_assign": [ASSIGN],
+        crit = {"replies": {"brief": [worker_instruction(PROPOSE)], "par_assign": [ASSIGN],
                             "par_review": ["Checked it against the file. <verdict>PASS</verdict>"],
                             "verify": ["All steps hold. <verdict>PASS</verdict>"]},
                 "files": {"brief": [{ck: CK_OPEN}], "par_review": [{ck: CK_DONE}]}}
@@ -161,7 +163,11 @@ class TestParallelRun(Base):
     def test_a_pass_on_a_step_with_open_items_is_overruled(self):
         ck = str(self.ck)
         status, rec = run(self.cfg(critic={"files": {"brief": [{ck: CK_OPEN}],
-                                                     "par_review": [{}, {ck: CK_DONE}]}}))
+                                                     "par_review": [{}, {ck: CK_DONE}]},
+            "replies": {"brief": [PROPOSE], "par_assign": [ASSIGN],
+                        "par_review": ['<message to="{worker}">Recheck the open item.</message><verdict>PASS</verdict>',
+                                       'Checked. <verdict>PASS</verdict>'],
+                        "verify": ['All steps hold. <verdict>PASS</verdict>']}}))
         self.assertEqual(status, "completed")
         work = [t for t in turns(rec) if t["purpose"] == "work"]
         self.assertEqual(len(work), 4)  # the first step reviewed went back once
@@ -339,7 +345,7 @@ class TestParallelGateAndStress(Base):
     def test_over_budget_proposal_becomes_my_gate(self):
         ck = str(self.ck)
         cfg = self.cfg(controller={"max_workers": 2},
-                       critic={"replies": {"brief": [PROPOSE.replace('n="3" steps="1,2,3"', 'n="4" steps="1,2,3,4"')],
+                       critic={"replies": {"brief": [worker_instruction(PROPOSE.replace('n="3" steps="1,2,3"', 'n="4" steps="1,2,3,4"'))],
                                            "par_assign": [ASSIGN4],
                                            "par_review": ["Checked. <verdict>PASS</verdict>"],
                                            "verify": ["All steps hold. <verdict>PASS</verdict>"]},
@@ -361,7 +367,7 @@ class TestParallelGateAndStress(Base):
     def test_declined_at_the_gate_one_worker_goes_on(self):
         ck = str(self.ck)
         cfg = self.cfg(controller={"max_workers": 2},
-                       critic={"replies": {"brief": [PROPOSE], "verify": ["All steps hold. <verdict>PASS</verdict>"]},
+                       critic={"replies": {"brief": [worker_instruction(PROPOSE)], "verify": ["All steps hold. <verdict>PASS</verdict>"]},
                                "files": {"brief": [{ck: CK_OPEN}], "verify": [{ck: CK_DONE}]}})
         live = Live(self, cfg)
         st, _rd = live.gate("workers")
@@ -382,9 +388,11 @@ class TestParallelGateAndStress(Base):
                 ck = str(self.ck)
                 fail = "Not yet: add the caption. <verdict>FAIL</verdict>"
                 cfg = self.cfg(
-                    critic={"replies": {"brief": [PROPOSE], "par_assign": [ASSIGN],
-                                        "par_review": [fail + '\n<message to="writer-3">Also keep the file short.</message>',
-                                                       fail, fail, "Good. <verdict>PASS</verdict>"],
+                    critic={"replies": {"brief": [worker_instruction(PROPOSE)], "par_assign": [ASSIGN],
+                                        "par_review": [worker_instruction(fail + '\n<message to="writer-3">Also keep the file short.</message>'),
+                                                       worker_instruction(fail).replace('to="{worker}"', 'to="{worker}" additive="yes"'),
+                                                       worker_instruction(fail).replace('to="{worker}"', 'to="{worker}" additive="yes"'),
+                                                       "Good. <verdict>PASS</verdict>"],
                                         "verify": ["All steps hold. <verdict>PASS</verdict>"]},
                             "files": {"brief": [{ck: CK_OPEN}], "par_review": [{}, {}, {ck: CK_DONE}]}},
                     worker={"delays": {"work": 0.05 * (k + 1)}})
@@ -470,7 +478,7 @@ class TestWorktrees(Base):
         cfg = self.cfg(controller={"max_workers": 1, "workers_hard_cap": 2},
                        worker={"delay_for": {"writer-2": {"work": 1.2}}},  # writer finishes first
                        critic={"delays": {"brief": 1.0}, "replies": {
-                           "brief": [PROPOSE], "par_assign": [ASSIGN, '<to worker="writer" step="3">Make appendix C.</to>'],
+                           "brief": [worker_instruction(PROPOSE)], "par_assign": [ASSIGN, '<to worker="writer" step="3">Make appendix C.</to>'],
                            "par_review": ["Checked. <verdict>PASS</verdict>"],
                            "verify": ["All steps hold. <verdict>PASS</verdict>"]}},
                        mgr={"replies": {"incoming": ['<workers n="3">All three.</workers>', "Noted."]}})

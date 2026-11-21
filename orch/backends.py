@@ -954,8 +954,7 @@ class _OpenCodeLive:
             if kind == "step_start":
                 self.emit({"k": "break", "s": ""})
             elif kind == "tool_use":
-                state = part.get("state") if isinstance(part.get("state"), dict) else {}
-                self.emit({"k": "tool", "s": f"{part.get('tool')}: {_short_input(state.get('input'))}".rstrip(": ")})
+                _opencode_tool_event(part, self.emit)
             elif kind == "text" and part.get("text"):
                 t = str(part["text"])
                 self.run_text[mid] = self.run_text.get(mid, "") + t
@@ -1230,6 +1229,18 @@ OPENCODE_TOKEN_KEYS = {"input": "input_tokens", "output": "output_tokens", "reas
                        "cache_read": "cache_read_input_tokens", "cache_write": "cache_creation_input_tokens"}
 
 
+def _opencode_tool_event(part: Dict[str, Any], emit: Callable) -> None:
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    stamp = state.get("time") or part.get("time") or {}
+    stamp = stamp if isinstance(stamp, dict) else {}
+    start, end = stamp.get("start", stamp.get("ran")), stamp.get("end", stamp.get("completed"))
+    timed = isinstance(start, (int, float)) and isinstance(end, (int, float)) and end >= start
+    emit({"k": "tool", "timed": timed,
+          "s": f"{part.get('tool', part.get('name'))}: {_short_input(state.get('input'))}".rstrip(": ")})
+    if timed:
+        emit({"k": "tool_timing", "id": part.get("id"), "duration_s": (end - start) / 1000, "s": ""})
+
+
 def _opencode_stream_cb(emit: Callable[[Dict[str, Any]], None]) -> Callable[[str], None]:
     seen = [False]
 
@@ -1249,8 +1260,7 @@ def _opencode_stream_cb(emit: Callable[[Dict[str, Any]], None]) -> Callable[[str
         elif ev.get("type") == "text" and part.get("text"):
             emit({"k": "text", "s": str(part["text"])})
         elif ev.get("type") == "tool_use":
-            state = part.get("state") if isinstance(part.get("state"), dict) else {}
-            emit({"k": "tool", "s": f"{part.get('tool')}: {_short_input(state.get('input'))}".rstrip(": ")})
+            _opencode_tool_event(part, emit)
     return cb
 
 
@@ -1617,7 +1627,8 @@ class MockBackend(Backend):
             return TurnResult("error", str(o.get("error_text", "")), sid, 1, "mock: simulated failure", ["mock"], {"turn": n})
         script = o.get("script")
         if o.get("spawn") and purpose == "work" and n == 1:  # tests: leave a detached job running in the workspace
-            subprocess.run(["sh", "-c", f"nohup {o['spawn']} >/dev/null 2>&1 &"], cwd=req.cwd or None)
+            subprocess.run(["sh", "-c", f"nohup {o['spawn']} >/dev/null 2>&1 &"], cwd=req.cwd or None,
+                           env={**os.environ, **(req.env or {})})
         edits = (o.get("files") or {}).get(purpose)  # managed dry runs: files the agent edits in this turn
         if edits:
             k = self._counts.setdefault(f"{sid}:files:{purpose}", 0) + 1
@@ -1639,18 +1650,21 @@ class MockBackend(Backend):
             k = self._counts.setdefault(f"{sid}:{purpose}", 0) + 1
             self._counts[f"{sid}:{purpose}"] = k
             text = str(by_purpose[min(k, len(by_purpose)) - 1]).replace("{round}", str(rnd)).replace("{agent}", req.agent)
+            text = text.replace("{worker}", str(req.context.get("par_worker") or "worker"))
             return TurnResult("ok", text, sid, 0, "", ["mock"], {"turn": n})
         if script:
             text = str(script[min(n, len(script)) - 1]).replace("{round}", str(rnd)).replace("{agent}", req.agent)
+            text = text.replace("{worker}", str(req.context.get("par_worker") or "worker"))
             return TurnResult("ok", text, sid, 0, "", ["mock"], {"turn": n})
         if req.role == "manager":
             text = self._manager(purpose, req, o)
         elif req.role == "verifier" and purpose and purpose not in ("verify",):
-            text = {"brief": "Here is what I need for this milestone: make the change and check it.\n\n"
+            text = {"brief": '<message to="worker">Here is what I need for this milestone: make the change and check it.</message>\n\n'
                              "<checklist>\n- [ ] the change is made\n- [ ] it has been checked\n</checklist>",
                     "report": "| item | state |\n|---|---|\n| change made | done |\n| checked | done |\n\n"
                               "Everything on my list holds now.",
-                    }.get(purpose, "Noted. Please also keep the summary short.")
+                    }.get(purpose, '<message to="worker">Please also keep the summary short.</message>'
+                          if purpose == "guidance" or (purpose == "amend" and req.context.get("after_phase") != "report") else "Noted.")
         elif req.role == "verifier":
             ms_round = int(req.context.get("milestone_round", rnd))
             tags = "milestone_round" in req.context  # managed mode speaks the tag protocol
@@ -1661,6 +1675,8 @@ class MockBackend(Backend):
                     f"Round {rnd} review: the work is incomplete.\n- add input validation\n"
                     f"- add a unit test for the edge case")
             v = "PASS" if ok else "FAIL"
+            if tags and not ok and req.context.get("communication_protocol"):
+                body = f'<message to="worker">{body}</message>'
             text = (f"{body}\n\n<checklist>\n{items}\n</checklist>\n<verdict>{v}</verdict>" if tags
                     else f"{body}\n\n{items}\nVERDICT: {v}")
         elif req.role == "controller":

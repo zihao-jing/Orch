@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .timing import describe as describe_timing
 from .recorder import read_json
 
 # a Markdown checkbox line: "- [x] item", "* [ ] item", "1. [X] item"
@@ -300,6 +301,7 @@ def _turn_html(t: Dict[str, Any], cut: bool = False) -> str:
           ("session turn", f'{t.get("session_turn")} ({"resumed" if t.get("resumed_session") else "new session"})'),
           ("cwd", t.get("cwd")), ("started", t.get("started_at")), ("ended", t.get("ended_at")),
           ("exit code", t.get("exit_code")), ("attempts", len(t.get("attempts") or []) or None)]
+    kv.append(("timing", describe_timing(t.get("timing"))))
     for k in ("num_turns", "subtype"):
         if k in meta:
             kv.append((k, meta[k]))

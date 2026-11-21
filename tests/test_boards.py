@@ -1,6 +1,8 @@
 """B3: boards. The golden board reaches every agent (once per change, neutrally), its size is watched; the critic's
 step checklist lives in a file that PASS reads; agents edit files instead of re-writing them in every reply."""
 
+from protocol_fixtures import worker_instruction
+
 import json
 import sys
 import tempfile
@@ -137,9 +139,9 @@ class TestBoardsRun(unittest.TestCase):
         ck = str(self.ck)
         critic = {
             "replies": {
-                "brief": ["Check the labels first: all 40, against the source."],
-                "verify": ["Two labels are still wrong; fix them.\n<verdict>FAIL</verdict>",
-                           "All good.\n<checklist>\n- [x] labels checked\n</checklist>\n<verdict>PASS</verdict>",
+                "brief": [worker_instruction("Check the labels first: all 40, against the source.")],
+                "verify": [worker_instruction("Two labels are still wrong; fix them.\n<verdict>FAIL</verdict>"),
+                           '<message to="Sam">Check the totals next.</message>All good.\n<checklist>\n- [x] labels checked\n</checklist>\n<verdict>PASS</verdict>',
                            "Done now.\n<verdict>PASS</verdict>"]},
             "files": {
                 "brief": [{ck: "## Standing rules\n- [x] nothing committed\n\n## Step 1: labels\n- [ ] labels checked\n"}],
@@ -184,8 +186,8 @@ class TestBoardsRun(unittest.TestCase):
 
     def test_a_long_checklist_gets_one_note_to_merge(self):
         items = "\n".join(f"- [ ] item {i}" for i in range(27))
-        critic = {"replies": {"brief": ["Start with the tables."],
-                              "verify": ["More to do.\n<verdict>FAIL</verdict>", "Done.\n<verdict>PASS</verdict>"]},
+        critic = {"replies": {"brief": [worker_instruction("Start with the tables.")],
+                              "verify": [worker_instruction("More to do.\n<verdict>FAIL</verdict>"), "Done.\n<verdict>PASS</verdict>"]},
                   "files": {"brief": [{str(self.ck): "## Step 1: tables\n" + items + "\n"}],
                             "verify": [{}, {str(self.ck): "## Step 1: tables\n" + items.replace("[ ]", "[x]") + "\n"}]}}
         status, rec = run(self.cfg(mgr={"milestones": 1}, critic=critic))
@@ -196,8 +198,8 @@ class TestBoardsRun(unittest.TestCase):
         self.assertTrue(any(e["event"] == "board_warning" and e.get("what") == "checklist_size" for e in _events(rec)))
 
     def test_decisions_register_is_a_record_not_a_briefing(self):
-        critic = {"replies": {"brief": ["<question>Should the tables use percentages?\nA) yes\nB) no</question>\n\n"
-                                        "Start with the tables; assume percentages for now."]}}
+        critic = {"replies": {"brief": [worker_instruction("<question>Should the tables use percentages?\nA) yes\nB) no</question>\n\n"
+                                        "Start with the tables; assume percentages for now.")]}}
         status, rec = run(self.cfg(critic=critic))
         self.assertEqual(status, "completed")
         self.assertTrue(rec.state["decisions"])

@@ -1,5 +1,7 @@
 """End-to-end tests using the mock and command backends. Run: python -m unittest discover tests"""
 
+from protocol_fixtures import worker_instruction
+
 import dataclasses
 import json
 import re
@@ -474,9 +476,9 @@ class TestManaged(unittest.TestCase):
         status, rec = run(make_cfg(self.tmp, [managed(
             controller={"checkin_every": 1}, mgr={"milestones": 1},
             critic={"pass_after": 3, "replies": {"verify": [
-                "Add the units.\n\n<message to=\"Alex\">The reviewers' tables use different seeds.</message>\n\n"
-                "<checklist>\n- [ ] units\n</checklist>\n<verdict>FAIL</verdict>",
-                "Nearly there.\n\n<checklist>- [ ] units</checklist>\n<verdict>FAIL</verdict>",
+                worker_instruction("Add the units.\n\n<message to=\"Alex\">The reviewers' tables use different seeds.</message>\n\n"
+                "<checklist>\n- [ ] units\n</checklist>\n<verdict>FAIL</verdict>"),
+                worker_instruction("Nearly there.\n\n<checklist>- [ ] units</checklist>\n<verdict>FAIL</verdict>"),
                 "Done.\n\n<checklist>- [x] units</checklist>\n<verdict>PASS</verdict>"]}})]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
@@ -487,7 +489,8 @@ class TestManaged(unittest.TestCase):
         self.assertEqual(seq[i + 1], ("boss", "ack"))
         self.assertEqual(seq[i + 2], ("writer", "work"))
         ack = next(t for t in ts if t["purpose"] == "ack")
-        self.assertIn("Jordan mentioned: The reviewers' tables use different seeds.", ack["input"])
+        self.assertIn("Progress records from the critic", ack["input"])
+        self.assertIn("The reviewers' tables use different seeds.", ack["input"])
         w2 = [t for t in ts if t["agent"] == "writer"][1]
         self.assertIn("Add the units.", w2["input"])
         self.assertNotIn("seeds", w2["input"])  # the note was for the manager only
@@ -501,16 +504,17 @@ class TestManaged(unittest.TestCase):
             mgr={"milestones": 1, "replies": {"ack": [
                 f'<message to="Jordan">{request}</message>', "Thanks."]}},
             critic={"replies": {"verify": [
-                "Fix the labels.\n<checklist>- [ ] labels</checklist><verdict>FAIL</verdict>",
-                f'<message to="you">{answer}</message>\nFinish checking the labels.\n'
-                '<checklist>- [ ] labels</checklist><verdict>FAIL</verdict>',
+                worker_instruction("Fix the labels.\n<checklist>- [ ] labels</checklist><verdict>FAIL</verdict>"),
+                worker_instruction(f'<message to="you">{answer}</message>\nFinish checking the labels.\n'
+                '<checklist>- [ ] labels</checklist><verdict>FAIL</verdict>'),
                 "Done.\n<checklist>- [x] labels</checklist><verdict>PASS</verdict>"]}})]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
         reviews = [t for t in ts if t["purpose"] == "verify"]
         self.assertIn(request, reviews[1]["input"])
         self.assertTrue(reviews[1]["resumed_session"])
-        self.assertIn('If I asked you something, answer it inside `<message to="you">', reviews[1]["input"])
+        self.assertIn('Untagged text is for me.', reviews[1]["input"])
+        self.assertIn('Send a worker-addressed message only when that worker needs to act', reviews[1]["input"])
         self.assertTrue(reviews[1]["input"].rstrip().endswith("</system-reminder>"))
         self.assertNotRegex(reviews[1]["input"], r"(?i)\b(manager|user|human|Alex)\b")
         self.assertIn("reply_routing", reviews[1].get("reminders") or [])  # sent because the message carries mine
@@ -550,8 +554,8 @@ class TestManaged(unittest.TestCase):
         cfg = make_cfg(self.tmp, [managed(
             mgr={"milestones": 1, "replies": {"answer": ["<question blocking=\"no\">Do we cite the new run?\nA) yes\nB) no</question>\n\n"
                                                          "<message to=\"Jordan\">Assume yes for now.</message>"]}},
-            critic={"replies": {"verify": ["<question>Do we cite the new run in the main text?</question>\n\n"
-                                           "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+            critic={"replies": {"verify": [worker_instruction("<question>Do we cite the new run in the main text?</question>\n\n"
+                                           "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>"),
                                            "Good.\n\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})])
         status, rec = run(cfg)
         self.assertEqual(status, "completed")  # finished although my answer never came
@@ -567,8 +571,8 @@ class TestManaged(unittest.TestCase):
         status, rec = run(make_cfg(self.tmp, [managed(
             mgr={"milestones": 1, "replies": {"answer": ['<message to="Jordan">Cite the new run.</message>']}},
             critic={"replies": {"verify": [
-                '<message to="you"><question>Do we cite the new run?\nA) yes\nB) no</question></message>\n\n'
-                "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                worker_instruction('<message to="you"><question>Do we cite the new run?\nA) yes\nB) no</question></message>\n\n'
+                "<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>"),
                 "Good.\n\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
@@ -954,7 +958,7 @@ class TestManaged(unittest.TestCase):
         md, st = audit.build(rec.run_dir, 1, last)
         work = [t for t in turns(rec) if t["agent"] == "writer" and int(t["round"]) >= 1]
         for t in work:
-            self.assertRegex(md, rf"\| {t['turn_id']} \| [0-9:]+–[0-9:]+ \| work \|")
+            self.assertRegex(md, rf"\| {t['turn_id']} \| [0-9:]+–[0-9:]+ \| work(?: \([^|]*\))? \|")
         crit = [t for t in turns(rec) if t["agent"] == "critic" and t.get("output")]
         self.assertIn("worker", st["origin"].get("critic", {}))  # the worker's report reached the critic
         self.assertIn("## System prompts", md)
@@ -1529,8 +1533,8 @@ class TestManaged(unittest.TestCase):
 
     def test_decisions_register_and_fresh_worker_session_per_milestone(self):
         m = managed(critic={"replies": {"brief": [
-            "<question>Should the tables use percentages?\nA) yes\nB) no</question>\n\n"
-            "Start with the tables; assume percentages for now."]}})
+            worker_instruction("<question>Should the tables use percentages?\nA) yes\nB) no</question>\n\n"
+            "Start with the tables; assume percentages for now.")]}})
         m["agents"][2]["fresh_session"] = "milestone"
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "completed")
@@ -1577,8 +1581,8 @@ class TestManaged(unittest.TestCase):
 
     def test_critic_pauses_the_work_while_waiting_for_a_human_task(self):
         crit = {"replies": {"verify": [
-            "<pause>The authors label the 20 items in `labels/`; I need the four CSV files back.</pause>\n\n"
-            "Nothing more to do until the labels are in.\n\n<checklist>- [ ] labels are in</checklist>\n<verdict>FAIL</verdict>",
+            worker_instruction("<pause>The authors label the 20 items in `labels/`; I need the four CSV files back.</pause>\n\n"
+            "Nothing more to do until the labels are in.\n\n<checklist>- [ ] labels are in</checklist>\n<verdict>FAIL</verdict>"),
             "All good.\n\n<checklist>- [x] labels are in</checklist>\n<verdict>PASS</verdict>"]}}
         cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1}, critic=crit)])
         out = self.tmp / "out" / "m"
@@ -1625,7 +1629,7 @@ class TestManaged(unittest.TestCase):
 
     def test_untagged_checklist_is_gated_hidden_from_the_worker_and_shown_to_the_manager(self):
         crit = {"replies": {"verify": [
-            "Fix the table header.\n\n## Checklist\n- [x] tests pass\n- [ ] table header fixed — still old\n\n<verdict>PASS</verdict>",
+            '<message to="Sam">Fix the table header.</message>\n\n## Checklist\n- [x] tests pass\n- [ ] table header fixed — still old\n\n<verdict>PASS</verdict>',
             "Looks right now.\n\n<checklist>\n- [x] tests pass\n- [x] table header fixed\n</checklist>\n<verdict>PASS</verdict>"]}}
         status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, critic=crit)]))
         self.assertEqual(status, "completed")
@@ -1641,10 +1645,10 @@ class TestManaged(unittest.TestCase):
 
     def test_manager_can_turn_down_a_proposed_pause(self):
         crit = {"replies": {"verify": [
-            "<pause>The authors label the 20 items.</pause>\n\nNothing more to do.\n\n"
-            "<checklist>- [ ] labels are in</checklist>\n<verdict>FAIL</verdict>",
+            worker_instruction("<pause>The authors label the 20 items.</pause>\n\nNothing more to do.\n\n"
+            "<checklist>- [ ] labels are in</checklist>\n<verdict>FAIL</verdict>"),
             "All good.\n\n<checklist>- [x] labels are in</checklist>\n<verdict>PASS</verdict>"],
-            "guidance": ["Write the analysis script against the dummy labels."]}}
+            "guidance": [worker_instruction("Write the analysis script against the dummy labels.")]}}
         mgr = {"milestones": 1, "replies": {"pause": [
             "Not yet.\n\n<message to=\"the critic\">Have the worker write the analysis script on dummy labels.</message>\n\n"
             "<decision>CONTINUE</decision>"]}}
@@ -1849,7 +1853,7 @@ class TestManaged(unittest.TestCase):
     def test_reset_mid_milestone_restarts_top_down(self):
         mgr = {"milestones": 2, "replies": {"restart": [
             "Picking up part 2.\n\n<message to=\"Jordan\">Part 2: finish the tables, percentages as decided.</message>"]}}
-        crit = {"replies": {"brief": ["Start with table 1 in plan.md, then table 2. Use percentages."]}}
+        crit = {"replies": {"brief": [worker_instruction("Start with table 1 in plan.md, then table 2. Use percentages.")]}}
         cfg_path = make_cfg(self.tmp, [managed(mgr=mgr, critic=crit)])
         status, rec = run(cfg_path)
         from orch.managed import ManagedRunner
@@ -1890,7 +1894,7 @@ class TestManaged(unittest.TestCase):
             "Starting.\n\n<message to=\"Jordan\">Write the tables.</message>\n\n"
             "<state>Standing: write the tables.\nHolds: percentages in every table.</state>"]}}
         crit = {"replies": {"verify": [
-            "Not yet.\n\n<checklist>\n- [x] tables written\n- [ ] totals checked — missing\n</checklist>\n<verdict>FAIL</verdict>",
+            worker_instruction("Not yet.\n\n<checklist>\n- [x] tables written\n- [ ] totals checked — missing\n</checklist>\n<verdict>FAIL</verdict>"),
             "Good.\n\n<checklist>\n- [x] tables written\n- [x] totals checked\n</checklist>\n<verdict>PASS</verdict>"]}}
         cfg = managed(mgr=mgr, critic=crit)
         sdir = self.tmp / "agents"
@@ -1990,7 +1994,9 @@ class TestProjectFolder(unittest.TestCase):
         self.assertNotRegex(dsp.lower().replace("`.orch/`", ""), r"critic|manager|orch\b|agents")
         (d / "agents/worker/system_prompt.md").write_text("You are {{worker}}; {{critic}} reviews you.")
         wsp = load_config(str(d)).monitors[0].agent("worker").current_system_prompt()
-        self.assertTrue(wsp.startswith("You are the worker; the critic reviews you.\n\n- Start anything"), wsp[:120])
+        self.assertTrue(wsp.startswith("You are the worker; the critic reviews you."), wsp[:120])
+        self.assertIn("Text outside tags is always your reply to me", wsp)
+        self.assertIn("- Start anything", wsp)
 
     def test_conflicting_workflow_setting_and_run(self):
         cli.main(["init", str(self.tmp), "--project"])
@@ -3003,6 +3009,8 @@ def _plan(*done):
 
 
 def _review(prose, plan, ck_done, verdict):
+    if verdict == "FAIL" or "- [ ]" in plan:
+        prose = f'<message to="worker">{prose}</message>'
     return (f"{prose}\n\n{plan}\n<checklist>\n- [{'x' if ck_done else ' '}] the step's result is checked\n"
             f"- [x] protected files unchanged\n</checklist>\n<verdict>{verdict}</verdict>")
 
@@ -3015,13 +3023,13 @@ class TestCriticPlan(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
 
     def critic_replies(self):
-        return {"brief": ["Start with the first label: validate it on held-out cases.\n\n" + _plan(0, 0, 0)
-                          + "\n<checklist>\n- [ ] the step's result is checked\n</checklist>"],
-                "verify": [_review("The first label holds. Next: validate the second label.", _plan(1, 0, 0), False, "FAIL"),
-                           _review("Not there yet: the held-out cases are missing.", _plan(1, 0, 0), False, "FAIL"),
-                           _review("The second label holds. Next: redo the table.", _plan(1, 1, 0), False, "FAIL"),
-                           _review("Looks done to me.", _plan(1, 1, 0), True, "PASS"),
-                           _review("The table is redone and checked.", _plan(1, 1, 1), True, "PASS")]}
+        return {"brief": [worker_instruction("Start with the first label: validate it on held-out cases.\n\n" + _plan(0, 0, 0)
+                          + "\n<checklist>\n- [ ] the step's result is checked\n</checklist>")],
+                "verify": [worker_instruction(_review("The first label holds. Next: validate the second label.", _plan(1, 0, 0), False, "FAIL")),
+                           worker_instruction(_review("Not there yet: the held-out cases are missing.", _plan(1, 0, 0), False, "FAIL")),
+                           worker_instruction(_review("The second label holds. Next: redo the table.", _plan(1, 1, 0), False, "FAIL")),
+                           worker_instruction(_review("Looks done to me.", _plan(1, 1, 0), True, "PASS")),
+                           worker_instruction(_review("The table is redone and checked.", _plan(1, 1, 1), True, "PASS"))]}
 
     def test_steps_reset_the_stall_limit_and_pass_needs_every_step(self):
         m = managed(controller={"milestone_rounds": 2}, critic={"replies": self.critic_replies()})
@@ -3052,7 +3060,7 @@ class TestCriticPlan(unittest.TestCase):
     def test_without_progress_the_stall_limit_still_stops_the_milestone(self):
         stuck = _review("Still missing the held-out cases.", _plan(0, 0, 0), False, "FAIL")
         m = managed(controller={"milestone_rounds": 2},
-                    critic={"replies": {"brief": [self.critic_replies()["brief"][0]], "verify": [stuck]}})
+                    critic={"replies": {"brief": [worker_instruction(self.critic_replies()["brief"][0])], "verify": [worker_instruction(stuck)]}})
         status, rec = run(make_cfg(self.tmp, [m]))
         ts = turns(rec)
         report = next(t for t in ts if t["agent"] == "critic" and t["purpose"] == "report")

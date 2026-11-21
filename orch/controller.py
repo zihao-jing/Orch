@@ -36,6 +36,7 @@ from . import jobs as _jobs
 from . import tags as T
 from .report import CHECKBOX, cost_basis, endpoint_host
 from .templates import render
+from .timing import TurnTiming
 
 TERMINAL = ("completed", "failed", "max_rounds_reached", "needs_human")
 
@@ -823,9 +824,11 @@ class MonitorRunner:
         def message_status(ident: str, status: str, details: Dict[str, Any]) -> None:
             rec.worker_message_status(ident, status, delivery_turn=record["turn_id"], **details)
 
+        timing = TurnTiming()
         reached: List[bool] = []  # the backend reported something in this attempt: the message is in the session
 
         def live_event(ev: Dict[str, Any]) -> None:
+            timing.event(ev)
             reached.append(True)
             if ev.get("k") == "input_accepted":
                 for m in updates:
@@ -1049,7 +1052,7 @@ class MonitorRunner:
         record.update(
             status=res.status, output=res.output, session_id=res.session_id or sid,
             exit_code=res.exit_code, stderr=res.stderr[-6000:], command=res.command, meta=res.meta,
-            attempts=attempts, ended_at=now_iso(), duration_s=dur,
+            attempts=attempts, ended_at=now_iso(), duration_s=dur, timing=timing.finish(),
         )
         if last_pe:
             record["provider_error"] = last_pe

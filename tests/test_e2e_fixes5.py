@@ -38,7 +38,8 @@ def ts(t, key):
 def two_workers(base, critic=None, worker=None, monitor=None, worker_cfg=None, mgr=None):
     """A parallel section of two people (steps 1 and 2)."""
     crit = {"replies": {"brief": ['Plan.\n<workers n="2" steps="1,2">independent</workers>'], "par_assign": [TWO],
-                        "par_review": ["Checked. <verdict>PASS</verdict>"],
+                        "par_review": ['<message to="{worker}">Recheck the open item.</message><verdict>PASS</verdict>',
+                                       "Checked. <verdict>PASS</verdict>"],
                         "verify": ["All hold. <verdict>PASS</verdict>"]},
             "files": {"brief": [{str(base.ck): TWO_OPEN}], "par_review": [{}, {str(base.ck): TWO_DONE}]}}
     for k, v in (critic or {}).items():
@@ -113,24 +114,16 @@ class TestDroppedMessages(Base):
         wm = next(x for x in r.st["worker_messages"] if x["id"] == m["carrier"]["wm"])
         self.assertEqual(wm["status"], "dropped")
 
-    def test_the_final_reviews_message_is_dropped_and_not_counted_as_a_wait(self):
+    def test_explicit_final_review_message_is_delivered_even_after_pass(self):
         cfg = two_workers(self, critic={"replies": {
-            "verify": ['<message to="Sam">Tidy the captions when you can.</message>\nAll hold. <verdict>PASS</verdict>']}})
+            "verify": ['<message to="Sam">Tidy the captions when you can.</message>\nAll hold. <verdict>PASS</verdict>',
+                       'All hold. <verdict>PASS</verdict>']}})
         status, rec = run(cfg)
         self.assertEqual(status, "completed")
-        st = rec.state
-        m = next(x for x in st["messages"] if x["body"] == "Tidy the captions when you can.")
-        self.assertEqual(m["status"], "dropped")
-        self.assertIn("review passed", m["reason"])
-        self.assertFalse([x for x in st["messages"] if x["status"] == "sent"])
-        led, counts, flags = audit.ledger(rec.run_dir, 0, time.time() + 3600)
-        line = next(x for x in led if x.startswith(f"- {m['id']} "))
-        self.assertIn("dropped", line)
-        self.assertNotIn("still waiting", line)
-        self.assertFalse([f for f in flags if f["line"].startswith(m["id"] + " ")])
-        self.assertEqual(counts.get("dropped"), 1)
-        meant = counts["messages"] - counts.get("held by design", 0) - counts.get("superseded", 0) - 1
-        self.assertEqual(counts["delivered_share"], counts.get("delivered", 0) / meant)
+        m = next(x for x in rec.state["messages"] if x["body"] == "Tidy the captions when you can.")
+        self.assertEqual(m["status"], "delivered")
+        received = [t for t in turns(rec) if t["purpose"] == "work" and 'Tidy the captions when you can.' in t['input']]
+        self.assertEqual(len(received), 1)
         assert_no_role_leaks(self, rec)
 
     def test_board_shows_dropped(self):
@@ -162,7 +155,7 @@ class TestNoWorkerIdsAcrossLanes(Base):
 
     def test_the_protocol_keeps_each_section_to_its_person(self):
         text = (ROOT / "orch" / "prompts" / "protocol" / "critic.md").read_text()
-        self.assertIn("Each person reads only their own section", text)
+        self.assertIn("Each person reads only messages and assignment sections explicitly addressed to them", text)
         self.assertIn('never mention anyone else, another person\'s id or step', text)
 
     def test_ids_of_the_others_are_replaced_and_flagged(self):

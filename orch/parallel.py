@@ -9,7 +9,7 @@ Tags
     <to worker="writer-2" step="3" out="results/step3/">instruction</to>
         The critic's reply format for several workers: one section per worker; it assigns that step (and an output
         folder, shown on the work board) and its text is the worker's instruction. In a review of one worker's step,
-        text outside the tags goes to that worker, as in a single-worker review.
+        text outside the tags goes upward; only explicitly addressed messages reach a worker.
 
 Budget rule (`decide`): the manager approves alone up to `max_workers` (counting the first worker), as long as the
 run has a round left for each of them (every worker turn counts as a round against `max_rounds`) and, when

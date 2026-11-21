@@ -1,6 +1,8 @@
 """E2E fixes 4: from a live run of B6/B9/B9b/B10/B11 (opus manager, haiku critic/workers/monitors, three parallel
 workers with 2–3 minute background jobs). Mock backend only."""
 
+from protocol_fixtures import worker_instruction
+
 import json
 import subprocess
 import sys
@@ -109,7 +111,7 @@ class TestMissingVerdict(unittest.TestCase):
         self.assertIn("ended without a verdict", asked[0]["input"])
         (tmp / "b").mkdir()
         cfg = make_cfg(tmp / "b", [managed(controller={"checklist": False}, mgr={"milestones": 1}, critic={
-            "replies": {"verify": ["No tag."], "verdict": ["Still no tag."]}})])
+            "replies": {"verify": [worker_instruction("No tag.")], "verdict": ["Still no tag."]}})])
         status, rec = run(cfg)
         self.assertEqual(status, "failed")
         self.assertIn("no verdict", rec.state.get("error") or "")
@@ -121,7 +123,7 @@ class TestWorkersBeforeTheBrief(Base):
         asked whether it could have more. That step message stayed "sent" for good (the section handed steps out
         afresh), and the job wait took it for a message: the worker got a turn every 3 s while its job ran."""
         status, rec = run(self.cfg(mgr={"replies": {"kickoff": [KICKOFF]}},
-                                   critic={"replies": {"brief": [BRIEF], "par_assign": [ASSIGN],
+                                   critic={"replies": {"brief": [worker_instruction(BRIEF)], "par_assign": [ASSIGN],
                                                        "par_review": ["Checked. <verdict>PASS</verdict>"],
                                                        "verify": ["All hold. <verdict>PASS</verdict>"]},
                                            "files": {"brief": [{str(self.ck): CK_OPEN}],

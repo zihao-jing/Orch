@@ -29,6 +29,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import reminders as R
 from . import tags as T
+from . import protocol as CP
+from .timing import describe as describe_timing
 from .routing import DISCUSSION as RT_DISCUSSION, NEXT_TURN as RT_NEXT_TURN
 from .recorder import read_json
 from .report import turn_cost_basis, turn_model
@@ -294,17 +296,26 @@ def passable(src: Dict[str, Any], to: Dict[str, Any]) -> Tuple[str, Dict[str, in
     names, and when the manager writes a <message> to someone, the rest of its reply is for the human."""
     text = R.strip(src.get("output") or "")
     names = [to.get("agent") or "", ROLE.get(to.get("role"), "")]
+    uniform = src.get("communication_protocol") == CP.VERSION
+    upper = {"worker": "verifier", "verifier": "manager", "manager": "human"}.get(src.get("role"))
+    to_upper = uniform and to.get("role") == upper
+    if to_upper:
+        names.append("you")
     keep, withheld = [], {}
     mine = False
     for n, attrs, body, _s, _e in T.parse(text):
-        if n == "message" and T.addressed(attrs, *names):
+        if (n == "message" and T.addressed(attrs, *names)) or (
+                uniform and n == "to" and attrs.get("worker") == to.get("agent")):
             keep.append(body)
             mine = True
         elif body:
             what = f"message to {attrs.get('to', '?')}" if n == "message" else n
             withheld[what] = withheld.get(what, 0) + len(body)
     rest = T.outside(text)
-    if mine and src.get("role") == "manager":
+    if uniform and not to_upper:
+        if rest:
+            withheld["reply to upper level"] = len(rest)
+    elif mine and src.get("role") == "manager":
         if rest:
             withheld["reply to the human"] = len(rest)
     else:
@@ -527,10 +538,31 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           "", "## Turns", "",
           "| turn | start–end | purpose | status | session | model | in | repeat | out | s | $ | origin of the message |",
           "|---|---|---|---|---|---|---|---|---|---|---|---|", *rows,
-          "", "## Who received text from whom (chars)", "",
-          "| recipient | " + " | ".join(sorted({o for v in origin.values() for o in v})) + " |",
-          "|---|" + "---|" * len({o for v in origin.values() for o in v})]
+          ]
+    md += ["", "## Communication protocol for these turns", ""]
+    segments = []
+    for x in win:
+        t = x["turn"]
+        version = t.get("communication_protocol") or CP.LEGACY
+        if segments and segments[-1][0] == version:
+            segments[-1][2] = t["turn_id"]
+        else:
+            segments.append([version, t["turn_id"], t["turn_id"]])
+    for version, first, last in segments:
+        md.append(f"- {first} through {last}: {version}. " + CP.DESCRIPTIONS.get(
+            version, "Unknown protocol: do not infer routing rules; request its specification."))
+    md.append("Records without a protocol marker predate version tracking and use the historical rules above. "
+              "Do not apply a newer design retroactively. Session turn numbers are not session ids.")
+    md += ["", "## Observed timing", ""]
+    for x in win:
+        t = x["turn"]
+        if t.get("timing"):
+            md.append(f"- {t['turn_id']}: {describe_timing(t['timing'])}")
+    if not any(x["turn"].get("timing") for x in win):
+        md.append("No timing breakdown recorded. Total duration cannot distinguish tool work, model activity or waiting.")
     cols = sorted({o for v in origin.values() for o in v})
+    md += ["", "## Who received text from whom (chars)", "",
+           "| recipient | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
     for who, v in sorted(origin.items()):
         md.append(f"| {who} | " + " | ".join(str(v.get(c, 0)) for c in cols) + " |")
     md += ["", "## Questions (opened and closed)", "", *(f"- {q}" for q in qs or ["none"])]
@@ -656,6 +688,15 @@ def run_audit(mon: Any, agent: Any, run_dir: Path, lo: int, hi: int, prompts_see
     run_dir = Path(run_dir)
     path = findings_path(agent, run_dir)
     digest, stats = build(run_dir, lo, hi, findings_lines(path), prompts_seen)
+    decisions_path = path.with_name("audit-decisions.md")
+    try:
+        decisions = decisions_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        decisions = ""
+    if decisions:
+        digest += ("\n\n## Human-reviewed audit decisions\n\n"
+                   "Respect these dispositions. Revisit only with new contradictory evidence or a material change.\n\n"
+                   + decisions)
     c = mon.controller
     n = max(1, int(getattr(c, "audit_points", 5) or 5))
     sp = render(agent.current_system_prompt(), points=n).strip()
@@ -665,7 +706,8 @@ def run_audit(mon: Any, agent: Any, run_dir: Path, lo: int, hi: int, prompts_see
     rec_dir = run_dir / "audits"
     rec_dir.mkdir(parents=True, exist_ok=True)
     out: Dict[str, Any] = {"rounds": [lo, hi], "prompts": stats.get("prompts") or {}, "flags": len(stats["flags"]),
-                           "digest_chars": len(digest), "file": str(path), "at": stamp}
+                           "digest_chars": len(digest), "file": str(path), "at": stamp,
+                           "decisions_file": str(decisions_path) if decisions else None}
     if not stats.get("turns"):
         out.update(status="empty", points="")
         return out

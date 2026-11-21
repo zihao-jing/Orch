@@ -10,6 +10,8 @@
 5. board chat with the manager carries the voice reminder on the first chat message and then at intervals.
 """
 
+from protocol_fixtures import worker_instruction
+
 import json
 import sys
 import tempfile
@@ -82,7 +84,7 @@ class TestHideOrch(unittest.TestCase):
                 "revise the plan.")
         clean = "Done. My notes are in `.orch/agents/critic/state.md`."
         m = managed(mgr={"milestones": 1}, worker={"replies": {"work": ["Done, tests pass."]}},
-                    critic={"replies": {"brief": [clean]}})
+                    critic={"replies": {"brief": [worker_instruction(clean)]}})
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(_events(rec, "tooling_mention"), [])  # its own state file is not a mention
         mon = load_config(str(self.tmp / "cfg.json")).monitor("m")
@@ -109,12 +111,13 @@ class TestNotesUp(unittest.TestCase):
                 '<message to="you">Passed on: the units column, as you asked.</message>\n\n'
                 "<checklist>\n- [ ] units column\n</checklist>\n<verdict>FAIL</verdict>")
         ok = "All done.\n\n<checklist>\n- [x] units column\n</checklist>\n<verdict>PASS</verdict>"
-        m = managed(mgr={"milestones": 1}, critic={"replies": {"verify": [fail, fail, ok]}})
+        m = managed(mgr={"milestones": 1}, critic={"replies": {"verify": [worker_instruction(fail), worker_instruction(fail), worker_instruction(ok)]}})
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
         self.assertFalse([t for t in ts if t["agent"] == "boss" and t["purpose"] == "incoming"])
-        notes = [x for x in rec.state["messages"] if x["from"] == "critic" and x["to"] == "boss"]
+        notes = [x for x in rec.state["messages"] if x["from"] == "critic" and x["to"] == "boss"
+                 and x["body"].startswith("Passed on:")]
         self.assertEqual(len(notes), 2)
         mgr_next = [t for t in ts if t["agent"] == "boss" and t["purpose"] == "review"][0]
         for n in notes:  # held while waiting, then delivered in the manager's regular turn
@@ -142,7 +145,7 @@ class TestOneInstructionPerStep(unittest.TestCase):
         amend = ("Drop the fix of table 2; recompute every total from the raw data now.\n\n"
                  "<checklist>\n- [ ] totals recomputed\n</checklist>\n<verdict>FAIL</verdict>")
         ok = "Good.\n\n<checklist>\n- [x] totals recomputed\n</checklist>\n<verdict>PASS</verdict>"
-        m = managed(mgr={"milestones": 1}, critic={"replies": {"verify": [review, ok], "amend": [amend]}})
+        m = managed(mgr={"milestones": 1}, critic={"replies": {"verify": [worker_instruction(review), worker_instruction(ok)], "amend": [worker_instruction(amend)]}})
         status, rec = run(make_cfg(self.tmp, [m]))
         self.assertEqual(status, "completed")
         ts = turns(rec)
@@ -164,7 +167,7 @@ class TestOneInstructionPerStep(unittest.TestCase):
                   "<checklist>\n- [ ] totals fixed\n</checklist>\n<verdict>FAIL</verdict>")
         amend = "<checklist>\n- [ ] totals fixed\n</checklist>\n<verdict>FAIL</verdict>"
         ok = "Good.\n\n<checklist>\n- [x] totals fixed\n</checklist>\n<verdict>PASS</verdict>"
-        m = managed(mgr={"milestones": 1}, critic={"replies": {"verify": [review, ok], "amend": [amend]}})
+        m = managed(mgr={"milestones": 1}, critic={"replies": {"verify": [worker_instruction(review), worker_instruction(ok)], "amend": [worker_instruction(amend)]}})
         status, rec = run(make_cfg(self.tmp, [m]))
         w2 = [t for t in turns(rec) if t["agent"] == "writer"][1]
         self.assertIn("Fix the old totals in table 2", w2["input"])

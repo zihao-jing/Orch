@@ -105,7 +105,7 @@ class TestRemindersStripped(unittest.TestCase):
 class TestAuditorPrompt(unittest.TestCase):
     def test_the_prompt_states_the_design(self):
         p = " ".join((ROOT / "orch" / "prompts" / "auditor.md").read_text().lower().split())
-        for s in ("role views", "layers above are hidden", "held by design", "checklist", "manager–user chat",
+        for s in ("role views", "layers above are hidden", "held by design", "checklist", "manager–user conversation",
                   "check-ins", "monitor", "next regular turn", "discussion mode", "golden board", "reset at milestones",
                   "compacted", "retried", "backup", "delivered share"):
             self.assertIn(s, p)

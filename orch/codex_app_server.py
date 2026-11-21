@@ -117,8 +117,11 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool], compact: bool = 
         elif method in ("item/started", "item/completed"):
             item = p.get("item") or {}
             key, kind = item.get("id"), item.get("type")
+            timed_tool = kind in ("commandExecution", "fileChange", "mcpToolCall", "webSearch")
+            if timed_tool:
+                emit({"k": "tool_start" if method == "item/started" else "tool_end", "id": key, "s": ""})
             if method == "item/started" and kind == "commandExecution":
-                emit({"k": "tool", "s": "run: " + str(item.get("command", ""))[:160]})
+                emit({"k": "tool", "timed": True, "s": "run: " + str(item.get("command", ""))[:160]})
             elif method == "item/completed" and kind == "agentMessage" and key not in finished:
                 text = item.get("text", "")
                 prior = streamed.get(key, "")
@@ -134,7 +137,7 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool], compact: bool = 
             elif method == "item/completed" and kind == "contextCompaction":
                 compacted = True
             elif method == "item/completed" and kind == "fileChange":
-                emit({"k": "tool", "s": "edit: " + ", ".join(c.get("path", "") for c in item.get("changes", []))[:160]})
+                emit({"k": "tool", "timed": True, "s": "edit: " + ", ".join(c.get("path", "") for c in item.get("changes", []))[:160]})
         elif method == "turn/completed":
             turn = p["turn"]
             if active_turn is None or turn["id"] == active_turn:

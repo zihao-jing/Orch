@@ -5,7 +5,7 @@ reports to you. orch reads a few tags in your reply; everything else is plain te
 an end; write them exactly as shown.
 
 Whom you write to
-- Text outside the tags is for me.
+- Text outside the tags is always for me, in every turn; `<message to="you">…</message>` also addresses me.
 - `<message to="{{critic}}">…</message>` is the only way anything reaches {{critic}}; text outside it never does.
   Put everything for {{critic}} in one message, complete on its own, and say what it replaces. A new message
   replaces one {{critic}} has not received yet; add `additive="yes"` to send it in addition instead.

@@ -794,9 +794,8 @@ class Board:
     def _pass_on(self, a: Any, text: str, cid: str) -> List[str]:
         """The <message> blocks of a chat reply, by the sender's role view (orch/routing.py), as notes in inbox/:
         the run records each one, delivers it (a note for an idle agent starts its turn; urgent ones cut in) and
-        shows its status here. A worker addresses no one, and a critic's `to="you"` is for whoever it is talking
-        to, so both stay in the chat. Bad addresses are listed and corrected at the sender's next turn."""
-        sent, bad = RT.split_reply(text, a, self.mon.agents)
+        shows its status here. Untagged text and `to="you"` go to the sender's upper level. Bad addresses are listed and corrected at the sender's next turn."""
+        sent, bad = RT.split_reply(text, a, self.mon.agents, include_upward=True)
         for x in sent:
             t, msg = x["target"], x["body"]
             if a.role == "verifier" and t.role == "manager":

@@ -1,5 +1,7 @@
 """B1: each agent sees only its own user; no layer above leaks into the critic's or the worker's prompts."""
 
+from protocol_fixtures import worker_instruction
+
 import json
 import sys
 import tempfile
@@ -30,8 +32,8 @@ def _leaky_run(tmp: Path):
                    '<message to="Jordan">Add the missing table.</message>\n<score>2</score>\n<decision>REVISE</decision>',
                    "<score>5</score>\n<decision>ACCEPT</decision>"]}}
     critic = {"replies": {"verify": [
-        '<message to="Taylor">hello</message>\n<question>Short or long tables?\nA) short\nB) long</question>\n'
-        "Fix the headings.\n<checklist>- [ ] headings</checklist><verdict>FAIL</verdict>",
+        worker_instruction('<message to="Taylor">hello</message>\n<question>Short or long tables?\nA) short\nB) long</question>\n'
+        "Fix the headings.\n<checklist>- [ ] headings</checklist><verdict>FAIL</verdict>"),
         "Done.\n<checklist>- [x] headings</checklist><verdict>PASS</verdict>"]}}
     worker = {"replies": {"work": ['Edited the intro.\n\n<message to="Jordan">ping</message>', "Done."]}}
     cfg = make_cfg(tmp, [managed(mgr=mgr, critic=critic, worker=worker)])
@@ -136,14 +138,17 @@ class TestRoleViews(unittest.TestCase):
         self.assertIn('<message to="Sam">', req.prompt)
         self.assertNotRegex(req.prompt, r"(?i)\b(board|user|manager|orch|Alex)\b")
         sent = [json.loads(p.read_text()) for p in set(inbox.glob("*.json")) - before]
-        self.assertEqual([(x["to"], x["message"]) for x in sent], [(["writer"], "Use short tables.")])
+        self.assertCountEqual([(x["to"], x["message"]) for x in sent],
+                              [(["writer"], "Use short tables."), (["boss"], "Jordan mentioned: Fine.")])
         before = set(inbox.glob("*.json"))
         req, row = self._chat(rec, mon, "writer", "What did you do?", 'Edited.\n<message to="Jordan">ping</message>')
         self.assertRegex(req.prompt, r"Answer my message")
         self.assertNotRegex(req.prompt, r"(?i)\b(board|user|manager|critic|orch|Alex|Jordan)\b|<message")
         notes = [json.loads(p.read_text()) for p in set(inbox.glob("*.json")) - before]
-        self.assertEqual([x for x in notes if not x.get("kind")], [])  # a worker addresses no one
-        self.assertEqual([x.get("kind") for x in notes], ["correction"])  # corrected at its next turn
+        # Plain text goes upward; the forbidden named address is still corrected.
+        self.assertEqual([(x["to"], x["message"]) for x in notes if not x.get("kind")],
+                         [(["critic"], "Edited.")])
+        self.assertEqual([x["kind"] for x in notes if x.get("kind")], ["correction"])
         self.assertTrue(row.get("problems"))
 
     def test_the_managers_chat_with_me_passes_only_its_message_to_the_critic(self):
@@ -162,7 +167,8 @@ class TestRoleViews(unittest.TestCase):
         mon = load_config(make_cfg(self.tmp, [managed(mgr={"milestones": 1})])).monitor("m")
         self.assertEqual(role_leaks(rec, mon), [])
         sp = {t["agent"]: t["system_prompt"] for t in turns(rec)}
-        self.assertIn('to="Sam"` is the address of the person you instruct', sp["critic"])
+        self.assertIn('<message to="Sam">', sp["critic"])
+        self.assertIn('Text outside tags is always for me', sp["critic"])
         self.assertIn("Possible, but not suggested", sp["boss"])
         self.assertIn("does not know that I exist", sp["boss"])
         self.assertIn("`.orch/` folder", sp["writer"])

@@ -163,17 +163,15 @@ Questions go up one level at a time and never stop the run: a worker's `<questio
 describe the job and the working style; the protocol is what the framework itself depends on, so it stays the same
 however a project edits its prompts (`protocol: false` turns it off). Signals are XML-style tags with a start and an
 end, so orch never guesses where a block stops (`orch/tags.py`); tags quoted in `code` are ignored, and a tag left
-open runs to the next tag or the end of the reply. Text outside the tags is for whoever the agent is replying to:
-the critic's review goes to the worker, the manager's text to me.
+open runs to the next tag or the end of the reply. Text outside the tags always goes to the sender's upper level:
+worker → critic, critic → manager, manager → human. `<message to="you">…</message>` has that same destination.
+Every message for a worker must be explicitly addressed, including feedback during a review. A verdict alone
+never supplies another worker instruction. See the uniform communication section below for idle-worker behavior.
 
-When the manager asks a side question during a critic review, the critic puts its answer inside
-`<message to="you">…</message>` and keeps worker feedback outside it. For a critic reply, `you` routes to the
-manager without exposing that role in the prompt; explicit agent names remain supported. The manager speaks
-as "I" to the critic, and the critic addresses it as "you". Downstream messages present decisions as the
-sender's own, without naming an upstream user. Use neutral display names to keep role names out of prompts.
-With the protocol enabled, a
-critic review/instruction turn that carries a message from the manager ends with a one-line routing reminder. Tagged answers are queued for the manager's next run turn, without creating an immediate
-board-chat response. Dedicated critic reports and check-ins still address the manager directly.
+The manager speaks as "I" to the critic, and the critic addresses it as "you". Downstream messages present
+decisions as the sender's own, without naming an upstream user. Use neutral display names to keep role names out
+of prompts. Ordinary critic progress is queued for the manager's next turn with its original timestamp; questions
+and urgent notes retain their escalation rules.
 
 | tag | written by | what orch does |
 |---|---|---|
@@ -337,9 +335,9 @@ workers: `<workers n="3" steps="2,3,4">why</workers>` (n counts the worker alrea
   file and monitor (`monitor-2` …; without a monitor, a side session of the critic). Each sees only the critic, never
   each other; a prompt that names another worker is flagged on the board.
 * **The critic's format.** It hands out steps with one `<to worker="writer-2" step="3" out="results/s3/">instruction</to>`
-  per worker. Each finished step is reviewed in its own critic turn, one at a time: text outside the tags goes to
-  that worker, `<verdict>PASS</verdict>` is checked against that step's items in the checklist file, and `<to>`
-  sections hand the next step to whoever is free. A worker whose step passed with no step left stops.
+  per worker. Each finished step is reviewed in its own critic turn, one at a time: untagged text goes upward,
+  `<verdict>PASS</verdict>` is checked against that step's items in the checklist file, and explicit messages or
+  `<to>` sections assign further work. Without an explicit message, the worker stays idle regardless of verdict.
 * **The work board.** `work-m<N>.md` beside the critic's checklist file: who does which step, status, output folder,
   workspace, turns and the monitor's last line. orch keeps it up to date; the critic edits only its "Shared limits".
 * **Workspaces.** By default every worker uses the same folder and the critic gives each its own output folder.
@@ -723,3 +721,30 @@ orch/routing.py     message routing: who may address whom, the message ledger, t
 orch/hooks/         terminal_relay.py: Claude Code hook for an agent's session open in a terminal
 orch/cli.py         orch init | validate | run | status | show | stop | inject | audit | terminal | report
 ```
+
+### Uniform managed-mode communication
+
+Managed turns record `communication_protocol: upper-default-v1`. Untagged text always goes upward
+(worker → critic → manager → human); `<message to="you">` has the same destination. Messages to other
+permitted role-view recipients require explicit tags. Parallel `<to worker="ID" step="N" out="…">`
+sections remain explicit assignments with metadata. The recipient no longer depends on the turn type.
+
+A worker receives another turn only when explicitly sent a message or assignment. PASS/FAIL records review
+status and does not itself dispatch a worker. A finished or unassigned worker stays idle with its session
+available while others work. If all workers are idle with unfinished work, the manager is asked for direction;
+repeated missing instructions reach the existing human wait gate. Explicit job-wait/resume controls remain valid.
+Custom critic prompts and scripted backends must use explicit worker tags; untagged instructions from the old
+protocol are no longer sent downward. The first turn after an upgrade gets a protocol reminder.
+
+Nonurgent critic updates are presented as timestamped progress records on the manager's next turn. They should
+state only what changed and any blocker. Questions and urgent messages retain their escalation behavior.
+
+Audits include the protocol used by each recorded turn range, including historical turn-dependent routing for
+records predating version tracking. Optional `audit-decisions.md` beside the auditor's `audit.md` contains
+human-reviewed dispositions; Orch includes it in the audit input but the auditor cannot rewrite it. See
+[an example](docs/audit-decisions-example.md). The auditor's own findings format still requires `- ` prefixes.
+
+Turn records, the HTML report, and audit digests expose observed timing: first activity, first text, text response
+window, measured tool intervals and unattributed time. Available tool timing is collected from Codex app-server
+and OpenCode events; missing instrumentation is labeled partial/unknown. These measurements do not identify
+pure model compute time or prove the cause of a silent interval. Timeouts are unchanged.

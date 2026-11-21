@@ -7,6 +7,8 @@ B9: send back on the wait gate; night mode can't switch while a question for me 
 new work until answered (unless blocking="no"); gate summary; review file -> comments back to the manager.
 """
 
+from protocol_fixtures import worker_instruction
+
 import json
 import sys
 import tempfile
@@ -310,7 +312,7 @@ class TestWaitGateSendBack(unittest.TestCase):
                 "Please run the cluster job.\n\n<decision>PAUSE</decision>",
                 '<message to="Jordan">Meanwhile, draft the tables from the pilot.</message>\n<decision>CONTINUE</decision>']}},
             critic={"replies": {"verify": [
-                "<pause>Someone has to run the cluster job.</pause>\n<checklist>- [ ] job run</checklist>\n<verdict>FAIL</verdict>",
+                worker_instruction("<pause>Someone has to run the cluster job.</pause>\n<checklist>- [ ] job run</checklist>\n<verdict>FAIL</verdict>"),
                 "Good.\n<checklist>- [x] job run</checklist>\n<verdict>PASS</verdict>"]}})])
         L = Live(self, cfg)
         st, _ = L.gate("wait")
@@ -370,7 +372,7 @@ class TestBlockingQuestions(unittest.TestCase):
             mgr={"milestones": 1, "replies": {"answer": [
                 "<question>Do we cite the new run?\nA) yes\nB) no\nI recommend A.</question>"]}},
             critic={"replies": {"verify": [
-                "<question>Do we cite the new run?</question>\n<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                worker_instruction("<question>Do we cite the new run?</question>\n<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>"),
                 "Good.\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})])
         L = Live(self, cfg)
         st, rd = L.until(lambda st: (st["managed"].get("held") or {}).get("why", "").startswith("question"), "the hold")
@@ -392,7 +394,7 @@ class TestBlockingQuestions(unittest.TestCase):
                 '<question blocking="no">Do we cite the new run?\nA) yes\nB) no</question>\n'
                 '<message to="Jordan">Assume yes for now.</message>']}},
             critic={"replies": {"verify": [
-                "<question>Do we cite it?</question>\n<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>",
+                worker_instruction("<question>Do we cite it?</question>\n<checklist>- [ ] cited</checklist>\n<verdict>FAIL</verdict>"),
                 "Good.\n<checklist>- [x] cited</checklist>\n<verdict>PASS</verdict>"]}})]))
         self.assertEqual(status, "completed")
         q = next(x for x in rec.state["questions"] if x["to"] == "human")
