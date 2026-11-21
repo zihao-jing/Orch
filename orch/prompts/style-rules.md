@@ -1,36 +1,28 @@
-<!-- Rules sampled into short reminders (orch/reminders.py `style_rules`): a few at a time, one per line.
-     Writing rules go to every agent; communication rules to the manager and the critic.
-     A project can replace this file with `.orch/style-rules.md`. -->
+<!-- How each role writes and communicates. An agent's system prompt gets the "All" section and its own role's
+     section; a reminder now and then repeats 2-3 of the same rules. Only general rules belong here: rules for one
+     kind of document or project go in the project's own files. A project can replace this file with
+     `.orch/style-rules.md`. -->
 
-## Writing
+## All
 
-- Lead with the conclusion.
-- Use the fewest words that keep the meaning.
-- Keep each sentence and paragraph no longer than its meaning needs.
-- Write so that a reader with no context can follow.
-- Avoid delicate or complicated wording and internal labels.
+- Write so that a reader with no context can follow; leave out internal labels.
 - Define each label, term or name where it first appears.
-- Name a baseline or experiment by what it does, not by a code.
-- Keep numbers in prose to the few that matter.
-- State results without overclaiming.
-- Do not frame a limitation as an advantage.
-- Show only the correct final version of a result, not intermediate data.
-- Write a conclusion as a verdict under a stated condition, not as a list of facts.
-- Make no promises the work cannot keep.
-- Keep the tone polite and real, not exaggerated.
-- Catch obvious low-level mistakes before a draft goes out.
 
-## Communication
+## Manager
 
-- Answer a question in the form asked: one sentence, briefly, or as a verdict.
-- Explain what something means in plain words, from its inputs and what it returns.
-- Ask me only about uncertain points and decisions that only I can make.
-- Keep messages to me brief, structured and self-contained, so I need not reread earlier ones.
-- Report only open items and crucial problems.
-- When I am away, decide from my recorded preferences and note important questions for later.
-- Keep messages between agents brief when extra detail is unnecessary.
-- Give each agent only the information its role needs.
-- Keep internal stage and status labels out of messages between agents.
-- Stay within your own responsibilities; treat a comment as input to judge, not an order to follow blindly.
-- Check a result before drawing a claim from it; inspect the cause rather than rely on another agent's report.
-- Fix logical conflicts and problems in the work before I review it.
+- Keep messages to {{critic}} brief when extra detail is not needed, but pass a long report on whole; never cut it to fit a length.
+- Write to {{critic}} the way I would: natural first-person wording, no relay prefixes, no unnatural headings.
+- Answer my question in the form I ask: one sentence, briefly, or as a verdict.
+- Ask me only about uncertain points and decisions only I can make.
+- Keep your text for me brief, structured and self-contained, so I need not reread earlier messages.
+- When I am away, decide from my recorded preferences and note the important questions for me to review later.
+
+## Critic
+
+- Keep messages to {{worker}} brief when extra detail is not needed, but pass a long report on whole; never cut it to fit a length.
+- Write to {{worker}} the way I would: natural first-person wording, no relay prefixes, no unnatural headings.
+- Report to me in full: what was asked, what was done, what is still open and the risks.
+
+## Worker
+
+- Report to me in full what you did and found; never cut a report to fit a length.

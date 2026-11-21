@@ -475,7 +475,7 @@ class ManagedRunner(MonitorRunner):
                 continue
             if rem["id"] == R.STYLE_RULES:
                 if R.applies(rem, purpose) and R.targets(rem, agent.name, role) and R.due(counters, rem):
-                    add(R.STYLE_RULES, R.style_text(self.style_rules_text(), role))
+                    add(R.STYLE_RULES, render(R.style_text(self.style_rules_text(agent), role), **self.names()))
                 continue
             if not text or not R.applies(rem, purpose) or not R.targets(rem, agent.name, role):
                 continue
@@ -504,10 +504,9 @@ class ManagedRunner(MonitorRunner):
     # schedule. The critic and the worker read it as their own user's standing rules; a board that names a layer above
     # one of them is held from it (and the manager is told) until it is rewritten.
 
-    def style_rules_text(self) -> str:
-        """The rules the style reminder samples: the project's `.orch/style-rules.md` when there is one, else orch's."""
-        own = self.rec.run_dir.parent / "style-rules.md"
-        return B.read(own if own.is_file() else PROMPTS_DIR / "style-rules.md")
+    def style_rules_text(self, agent: AgentConfig) -> str:
+        """The rules the style reminder samples: the file the agent's system prompt took its rules from."""
+        return B.read(Path(agent.style_path)) if agent.style_path else ""
 
     def golden_path(self) -> Path:
         c = self.mon.controller.golden_board

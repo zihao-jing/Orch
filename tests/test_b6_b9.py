@@ -347,26 +347,38 @@ class TestGoldenResend(unittest.TestCase):
 
 
 class TestStyleRules(unittest.TestCase):
-    def test_sampling_and_targeting(self):
+    def test_each_role_gets_the_all_rules_and_its_own(self):
         r = unit(Path(tempfile.mkdtemp()))
-        text = r.style_rules_text()
         from orch import reminders as R
-        w = set(R.style_pool(text, "worker"))
-        m = set(R.style_pool(text, "manager"))
-        self.assertTrue(w and w < m)  # communication rules only for the manager and the critic
-        self.assertEqual(set(R.style_pool(text, "critic")), m)
-        self.assertIn("Lead with the conclusion.", w)
-        for role, pool in (("worker", w), ("manager", m)):
+        text = r.style_rules_text(r.manager)
+        everyone = set(R.style_pool(text, "all"))
+        pools = {role: set(R.style_pool(text, role)) for role in ("manager", "critic", "worker")}
+        for role, pool in pools.items():
+            self.assertTrue(everyone < pool, role)
+        self.assertFalse((pools["manager"] & pools["worker"]) - everyone)  # what is written for me stays the manager's
+        self.assertTrue(any("form I ask" in x for x in pools["manager"]))
+        self.assertFalse(any("form I ask" in x for x in pools["critic"] | pools["worker"]))
+        self.assertEqual(R.style_pool(text, "verifier"), R.style_pool(text, "critic"))
+        for role, pool in pools.items():
             for _ in range(20):
                 lines = R.style_text(text, role).splitlines()
                 self.assertIn(len(lines), (2, 3))
                 self.assertTrue(all(x[2:] in pool for x in lines))
 
-    def test_sent_every_two_or_three_turns_and_can_be_turned_off(self):
+    def test_the_system_prompt_has_the_role_rules_with_names(self):
         r = unit(Path(tempfile.mkdtemp()))
-        hits = [i for i in range(12) if "style_rules" in r.add_reminders(r.workers[0], "Go.", "round")[1]]
-        self.assertTrue(hits and all(b - a in (2, 3) for a, b in zip(hits, hits[1:])), hits)
-        self.assertLessEqual(hits[0], 2)
+        c, w = r.critic.current_system_prompt(), r.workers[0].current_system_prompt()
+        self.assertIn("How I want you to write and communicate:", c)
+        self.assertIn(f"Keep messages to {r.workers[0].called} brief", c)
+        self.assertNotIn("{{worker}}", c)
+        self.assertIn("Report to me in full what you did", w)
+        self.assertNotIn("Keep messages to", w)
+
+    def test_sent_every_two_to_five_turns_and_can_be_turned_off(self):
+        r = unit(Path(tempfile.mkdtemp()))
+        hits = [i for i in range(30) if "style_rules" in r.add_reminders(r.workers[0], "Go.", "round")[1]]
+        self.assertTrue(hits and all(2 <= b - a <= 5 for a, b in zip(hits, hits[1:])), hits)
+        self.assertLessEqual(hits[0], 5)
         r.mon.controller.reminders = [x for x in r.mon.controller.reminders if x["id"] != "style_rules"]
         self.assertFalse(any("style_rules" in r.add_reminders(r.workers[0], "Go.", "round")[1] for _ in range(12)))
 

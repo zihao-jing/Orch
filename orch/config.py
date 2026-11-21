@@ -93,6 +93,7 @@ class AgentConfig:
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
     writing_path: str = ""  # managed mode: the writing rules (orch/prompts/writing.md or the project's), added after it
+    style_path: str = ""  # managed mode: the role's rules from orch/prompts/style-rules.md (or the project's), after that
     # at each milestone start (managed mode): "compact" summarises the session in place (a new session when the
     # backend can't compact), "milestone" starts a new session, "never" keeps it; "" = the role's default (the critic
     # and workers compact, the manager keeps its session)
@@ -179,6 +180,15 @@ class AgentConfig:
             if proto:
                 from .templates import render
                 sp = (sp + "\n\n" if sp else "") + render(proto, **(self.prompt_vars or {})).strip()
+        if self.style_path:  # the "All" rules and this role's, the same ones the style reminder repeats
+            from .reminders import style_section
+            from .templates import render
+            try:
+                style = style_section(Path(self.style_path).read_text(encoding="utf-8"), self.role)
+            except OSError:
+                style = ""
+            if style:
+                sp = (sp + "\n\n" if sp else "") + render(style, **(self.prompt_vars or {})).strip()
         if self.writing_path:  # read each time, so an edit reaches the agent with its next system prompt
             try:
                 rules = re.sub(r"<!--.*?-->", "", Path(self.writing_path).read_text(encoding="utf-8"), flags=re.S).strip()
@@ -852,6 +862,9 @@ def load_config(path: str) -> Config:
                 a.protocol_path = str(PROMPTS_DIR / "protocol" / f"{proto}.md")
             if controller.mode == "managed" and controller.writing and a.role in ("manager", "verifier", "worker"):
                 a.writing_path = controller.writing
+            if controller.mode == "managed" and a.role in ("manager", "verifier", "worker"):
+                own = proj / "style-rules.md" if proj else None
+                a.style_path = str(own if own and own.is_file() else PROMPTS_DIR / "style-rules.md")
         m_known = {"name", "workspace", "working_dir", "goal", "max_rounds", "controller", "agents",
                    "defaults", "output_dir", "enabled"}
         unknown = set(mraw) - m_known

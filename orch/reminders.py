@@ -65,9 +65,8 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "text": {"manager": "In a message to {{critic}}, write as \"I\" and give everything as your own; keep me, "
                             "our conversation and your role out of it, and your reply to me outside that tag."},
     },
-    # no fixed text: `style_text` samples 2-3 rules each time (writing rules to all, communication rules to the
-    # manager and the critic)
-    STYLE_RULES: {"to": ["all"], "random": [2, 3]},
+    # no fixed text: `style_text` samples 2-3 of the role's rules from the style file, every 2-5 turns
+    STYLE_RULES: {"to": ["all"], "random": [2, 5]},
     GOLDEN_BOARD: {
         "to": ["all"], "every": 10,
         "text": {
@@ -243,10 +242,13 @@ def due(state: Dict[str, Any], rem: Dict[str, Any], rng: Any = random) -> bool:
     return False
 
 
+STYLE_HEADING = "How I want you to write and communicate:"
+
+
 def style_pool(text: str, role: str) -> List[str]:
-    """The rules a role may get from the style file: its "## Writing" lines, and for the manager and the critic
-    also the "## Communication" ones."""
-    want = {"writing"} | ({"communication"} if role in ("manager", "critic") else set())
+    """A role's rules in the style file: the "## All" lines and those under its own role's heading (manager, critic,
+    worker). The same rules open the system prompt and feed the reminder."""
+    want = {"all", ROLE_OF.get(role, role)}
     out: List[str] = []
     section = ""
     for line in re.sub(r"<!--.*?-->", "", text or "", flags=re.S).splitlines():
@@ -257,8 +259,14 @@ def style_pool(text: str, role: str) -> List[str]:
     return out
 
 
+def style_section(text: str, role: str) -> str:
+    """The system prompt's part of the style file for this role ('' when it has none)."""
+    pool = style_pool(text, role)
+    return STYLE_HEADING + "\n\n" + "\n".join(f"- {x}" for x in pool) if pool else ""
+
+
 def style_text(text: str, role: str, rng: Any = random) -> str:
-    """One reminder of 2-3 rules drawn at random for this role ('' when the file has none)."""
+    """One reminder of 2-3 of this role's rules, drawn at random ('' when the file has none)."""
     pool = style_pool(text, role)
     if not pool:
         return ""
