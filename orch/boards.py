@@ -36,10 +36,10 @@ GOLDEN_HEAD = ("# Golden board\n\n"
                "longer holds. -->\n")
 
 CHECKLIST_HEAD = ("# Checklist\n\n"
-                  "<!-- One \"## Step N: …\" section per step, in order, each with its items as \"- [ ]\" / \"- [x]\" "
-                  "lines. A step is done when all its items are [x] (a step with no items yet only as "
-                  "\"## [x] Step N: …\"). Items under \"## Standing rules\" hold for every step. Edit this file in "
-                  "place; don't paste it into replies. -->\n")
+                  "Reminder: Use one level-two heading named Step N: … per step, in order, with items written "
+                  "as - [ ] or - [x] lines. A step is done when all its items are [x]. For a step with no items, "
+                  "put [x] before Step in its heading to mark it done. Items in the Standing rules section "
+                  "apply to every step. Edit this file in place; don't paste it into replies.\n")
 
 _COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
 _HEADING = re.compile(r"^\s{0,3}#{2,4}\s+(.*?)\s*#*\s*$")
