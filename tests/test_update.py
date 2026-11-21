@@ -22,6 +22,16 @@ def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
+
+class TestSafePoint(unittest.TestCase):
+    def test_an_ended_run_is_a_safe_point(self):
+        """A completed run's board said "The run is busy" and never checked for an update."""
+        from orch import update
+        for st in ("completed", "failed", "max_rounds_reached", "needs_human", "stopped", "awaiting_approval"):
+            self.assertTrue(update.safe_point(st), st)
+        for st in ("running", "starting"):
+            self.assertFalse(update.safe_point(st), st)
+
 class TestApply(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

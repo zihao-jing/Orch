@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 REPO = Path(__file__).resolve().parent.parent  # the checkout orch runs from
-SAFE_STATUSES = ("awaiting_approval", "waiting_job", "done", "stopped", "error", "interrupted", "paused", "")
+# waiting for me, or ended (an ended run's board can still check for and take in an update)
+SAFE_STATUSES = ("awaiting_approval", "waiting_job", "done", "stopped", "error", "interrupted", "paused", "",
+                 "completed", "failed", "max_rounds_reached", "needs_human")
 
 
 def _git(*args: str, timeout: int = 20, repo: Optional[Path] = None) -> str:
