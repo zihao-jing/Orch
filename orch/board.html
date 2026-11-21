@@ -68,6 +68,10 @@ a.btn{display:inline-block;font:inherit;border-radius:8px;border:1px solid var(-
 button.ok{background:var(--good);border-color:var(--good);color:#fff}button.sm{padding:2px 9px;font-size:12px}
 select.sm{font:inherit;font-size:12px;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:2px 9px;max-width:45%;cursor:pointer}select.sm:hover{border-color:var(--axis)}
 button:disabled{opacity:.5;cursor:default}
+/* a button whose request is on its way: a spinner until the server answers and the board has refreshed */
+button.loading{opacity:.8;cursor:progress}
+button.loading::before{content:"";display:inline-block;width:.75em;height:.75em;margin-right:6px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 textarea,input[type=text]{font:inherit;width:100%;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:8px 10px;resize:vertical}
 textarea:focus,input:focus{outline:2px solid var(--s1);outline-offset:-1px}
 .needs{border:1.5px solid var(--you);background:linear-gradient(0deg,var(--panel),var(--panel))}
@@ -385,7 +389,7 @@ async function load(){
     D = structuredClone(SNAP);
   } finally { loading = false; if (again){ again = false; soon(); } }
   for (const k in (D.live||{})){ const L = D.live[k]; if (!live[k] || (live[k].text||'').length < (L.text||'').length) live[k] = {text:L.text||'', tools:L.tools||[]}; }
-  render();
+  render(); paintBusy();
   document.querySelectorAll('[data-live]').forEach(x => paintLive(x.dataset.live));
 }
 let tmr = null; const soon = () => { clearTimeout(tmr); tmr = setTimeout(load, 200); };
@@ -539,7 +543,7 @@ function renderNeeds(mg){
 }
 // what follows a question that is meant for me, up to a divider or the part addressed to the critic
 function forMe(t){ return String(t||'').replace(TAGBLOCK, '').replace(/\n{3,}/g, '\n\n').trim(); }  // outside the tags
-async function qSend(qid, text){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('api/chat', {qid, message: text, settle: true}); }  // my answer: the manager writes it up for the critic
+async function qSend(qid, text, b){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('api/chat', {qid, message: text, settle: true}, b); }  // my answer: the manager writes it up for the critic
 document.addEventListener('keydown', e => { const t = e.target;
   if (t.id && t.id.startsWith('qa-') && e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); qSend(t.id.slice(3), t.value.trim()); } });
 // ask({title, body, ok, tone}): the board's confirm dialog; resolves true when confirmed. Esc, Cancel or a click
@@ -557,21 +561,35 @@ function ask({title, body = '', ok = 'OK', tone = 'pri'}){
 $('askdlg').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close('no'); });  // the backdrop
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
-  if (b.dataset.job){ b.disabled = true; await post('api/job', {}); }
+  if (b.dataset.job){ await post('api/job', {}, b); }
   if (b.dataset.gate){ const msg = ($('gate-msg')||{}).value || '';
     if (b.dataset.gate === 'revise' && !msg.trim() && !(await ask({title: 'Send it back without a note?', body: 'The manager decides what still needs work.', ok: 'Send back'}))) return;
     if (b.dataset.gate === 'revise' && (D.managed.gate||{}).kind === 'wait' && !(await ask({title: 'Send the pause back?', body: 'The manager decides again, with your note.', ok: 'Send back'}))) return;
-    b.disabled = true; await post('api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}); }
-  else if (b.dataset.qo){ b.disabled = true; await post('api/chat', {qid: b.dataset.qo, message: b.dataset.a, settle: true}); }  // a pick: the manager writes it up for the critic
-  else if (b.dataset.qs){ const v = (($('qa-'+b.dataset.qs)||{}).value || '').trim(); if (!v) return; b.disabled = true; await qSend(b.dataset.qs, v); }
+    await post('api/gate', {gate: (D.managed.gate||{}).key, decision: b.dataset.gate, message: msg}, b); }
+  else if (b.dataset.qo){ await post('api/chat', {qid: b.dataset.qo, message: b.dataset.a, settle: true}, b); }  // a pick: the manager writes it up for the critic
+  else if (b.dataset.qs){ const v = (($('qa-'+b.dataset.qs)||{}).value || '').trim(); if (!v) return; await qSend(b.dataset.qs, v, b); }
   else if (b.dataset.reopen != null && b.dataset.reopen !== undefined){
     if (!(await ask({title: 'Reopen milestone ' + (+b.dataset.reopen + 1) + '?', body: 'Its checklist gets an open item. The manager is not prompted.', ok: 'Reopen'}))) return;
-    b.disabled = true; await post('api/milestone', {ms: +b.dataset.reopen}); }
+    await post('api/milestone', {ms: +b.dataset.reopen}, b); }
   else if (b.dataset.chatfull){ b.disabled = true; try { await getMsg('c:' + b.dataset.chatfull); } catch(err){} $('needs')._sig = null; render(); }
   else if (b.dataset.rc){ if (!(await ask({title: 'Send your comments?', body: 'The manager gets what you wrote in the review file.', ok: 'Send'}))) return;
-    b.disabled = true; await post('api/review_comments', {path: b.dataset.rc}); }
+    await post('api/review_comments', {path: b.dataset.rc}, b); }
 });
-async function post(url, body){ try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json(); if (j.error) alert(j.error); soon(); return j; } catch(e){ alert('Could not reach the board server.'); } }
+// the buttons whose request is on its way, by key: a re-render rebuilds a button, so the key carries its state over
+const busyKeys = new Set();
+const btnKey = b => b.id || JSON.stringify(Object.assign({}, b.dataset));
+function paintBusy(){ if (!busyKeys.size) return;
+  document.querySelectorAll('button').forEach(b => { if (busyKeys.has(btnKey(b))){ b.classList.add('loading'); b.disabled = true; } }); }
+// b: the button that sent it; it shows a spinner and takes no second click until the server answers
+async function post(url, body, b){
+  const key = b ? btnKey(b) : '', was = b ? b.disabled : false;
+  if (key){ busyKeys.add(key); paintBusy(); }
+  const done = () => { if (!key) return; busyKeys.delete(key);
+    document.querySelectorAll('button.loading').forEach(x => { if (btnKey(x) === key){ x.classList.remove('loading'); if (x === b) x.disabled = was; } }); };
+  try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json();
+    done(); if (j.error) alert(j.error);
+    if (key) await load(); else soon(); return j; }  // the refresh then sets each button as the new state has it
+  catch(e){ done(); alert('Could not reach the board server.'); } }
 
 // the update check: the commit this orch runs from, and whether main has a newer one (orch/update.py)
 // checked by hand, and by itself each time the run stops to wait for me; updating needs the Update button
@@ -957,9 +975,8 @@ $('gold-edit').addEventListener('click', e => {
 $('golden').addEventListener('click', async e => {
   if (e.target.id === 'gold-cancel'){ goldEdit = null; $('golden')._h = null; renderGolden(); return; }
   if (e.target.id !== 'gold-save') return;
-  e.target.disabled = true;
-  const j = await post('api/golden', {text: $('gold-ta').value, base: goldEdit.base});
-  if (j && j.ok){ goldEdit = null; $('golden')._h = null; renderGolden(); } else e.target.disabled = false;
+  const j = await post('api/golden', {text: $('gold-ta').value, base: goldEdit.base}, e.target);
+  if (j && j.ok){ goldEdit = null; $('golden')._h = null; renderGolden(); }
 });
 function renderDecisions(){  // the register: everything settled, newest first; a record (the agents read the golden board)
   renderGolden();
@@ -1141,7 +1158,7 @@ function relayLine(id){  // what became of the messages this reply passed on
     return `<div class="w">${s}</div>`; }).join('');
 }
 async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true;
-  const body = {message: m}; if (chatWith && chatWith !== mgrName()) body.agent = chatWith; await post('api/chat', body); }
+  const body = {message: m}; if (chatWith && chatWith !== mgrName()) body.agent = chatWith; await post('api/chat', body, $('chatsend')); }
 $('chatwho').addEventListener('change', e => { chatWith = e.target.value; const cl = $('chatlog'); cl._first = undefined; render(); });
 // keep the stick-to-bottom flag in step with where the reader actually is, so streamed replies
 // don't pull the list down while the reader is scrolled up (e.g. selecting text above)
@@ -1175,15 +1192,15 @@ $('discuss').addEventListener('click', async () => { const on = !discussWanted()
   if (!(await ask(on ? {title: 'Start a discussion?', body: 'The manager sends nothing to the critic until you end it.', ok: 'Start'}
       : atGate ? {title: 'End the discussion?', body: 'Nothing is sent yet. Approve or send back at the gate next; the manager then sends one message with both.', ok: 'End discussion', tone: 'ok'}
       : {title: 'End the discussion?', body: 'The manager sends the critic one message with the new directions.', ok: 'End discussion', tone: 'ok'}))) return;
-  D.discussion_pending = on; render(); await post('api/discussion', {on});
+  D.discussion_pending = on; render(); await post('api/discussion', {on}, $('discuss'));
   if (!on && atGate){ setChat(false); const n = $('needs'); if (n) n.scrollIntoView({behavior: 'smooth', block: 'start'});
     setTimeout(() => { const t = $('gate-msg'); if (t) t.focus(); }, 300); } });
 $('reviewbtn').addEventListener('click', async () => { if (!(await ask({title: 'Ask for a review file?', body: 'The manager writes a file you can comment in.', ok: 'Ask'}))) return;
-  $('reviewbtn').disabled = true; await post('api/review', {}); });
+  await post('api/review', {}, $('reviewbtn')); });
 $('night').addEventListener('click', async () => { const on = !nightWanted();
   if (await ask(on ? {title: 'Turn on night mode?', body: 'The manager answers your questions and passes gates by itself. Its choices are recorded in Questions and Decisions.', ok: 'Turn on'}
-      : {title: 'Turn off night mode?', body: 'Questions and gates come back to you.', ok: 'Turn off'})) post('api/night', {on}); });
-$('stop').addEventListener('click', async () => { if (await ask({title: 'Stop the run?', body: 'It stops after the current turn. You can resume it later.', ok: 'Stop', tone: 'danger'})) post('api/stop', {}); });
+      : {title: 'Turn off night mode?', body: 'Questions and gates come back to you.', ok: 'Turn off'})) post('api/night', {on}, $('night')); });
+$('stop').addEventListener('click', async () => { if (await ask({title: 'Stop the run?', body: 'It stops after the current turn. You can resume it later.', ok: 'Stop', tone: 'danger'})) post('api/stop', {}, $('stop')); });
 $('theme').addEventListener('click', () => { const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   r.dataset.theme = dark ? 'light' : 'dark'; try { localStorage.setItem('orch-theme', r.dataset.theme); } catch(e){} });
 try { const t = localStorage.getItem('orch-theme'); if (t) document.documentElement.dataset.theme = t; } catch(e){}
