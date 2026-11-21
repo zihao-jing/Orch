@@ -443,7 +443,7 @@ class TestManaged(unittest.TestCase):
         ts = turns(rec)
         purposes = [(t["agent"], t["purpose"]) for t in ts]
         self.assertEqual(purposes[:4], [("boss", "plan"), ("boss", "kickoff"), ("critic", "brief"), ("writer", "work")])
-        self.assertIn(("critic", "report"), purposes)
+        self.assertNotIn(("critic", "report"), purposes)  # the final review doubles as the report
         self.assertIn(("boss", "review"), purposes)
         q = st["questions"][0]
         self.assertEqual((q["from"], q["to"], q["status"], q["answered_by"]), ("writer", "critic", "answered", "critic"))
@@ -1500,7 +1500,7 @@ class TestManaged(unittest.TestCase):
         ts = turns(rec3)  # the redo is the first turn, before the limit hands the milestone to the manager
         self.assertEqual((ts[0]["agent"], ts[0]["purpose"], ts[0]["round"], ts[0]["status"]), ("writer", "work", lim, "ok"))
         self.assertIn("Make the tables.", ts[0]["input"])
-        self.assertLess([t["purpose"] for t in ts].index("verify"), [t["purpose"] for t in ts].index("report"))
+        self.assertLess([t["purpose"] for t in ts].index("verify"), [t["purpose"] for t in ts].index("review"))
 
     def test_resume_after_backend_change_starts_a_new_session(self):
         from orch.managed import ManagedRunner
@@ -1920,7 +1920,7 @@ class TestManaged(unittest.TestCase):
         h = r.handover(r.manager)
         self.assertIn("Your working state", h)
         self.assertIn("Holds: percentages in every table.", h)
-        self.assertIn("latest message (report", h)  # the newest message, also when turns start in the same second
+        self.assertIn("latest message (verify", h)  # the newest message, also when turns start in the same second
         self.assertNotIn("Not yet.", h)
         r.decide("Round to one decimal.", "you", "note")
         h = r.handover(r.manager)  # the register is a record, not handed over (the golden board is, B3)
@@ -3040,7 +3040,7 @@ class TestCriticPlan(unittest.TestCase):
         self.assertEqual([(e["done"], e["total"]) for e in steps][:3], [(1, 3), (2, 3), (3, 3)])
         verifies = [t for t in ts if t["agent"] == "critic" and t["purpose"] == "verify" and t.get("milestone") == 0]
         self.assertEqual(len(verifies), 5)  # 5 rounds with milestone_rounds 2: progress kept resetting the limit
-        self.assertTrue(any(t["purpose"] == "report" for t in ts if t["agent"] == "critic"))
+        self.assertTrue(any(t["purpose"] == "review" for t in ts if t["agent"] == "boss"))
         rounds = [read_json(p) for p in sorted((rec.run_dir / "rounds").glob("r*/round.json"))]
         self.assertTrue(any(r.get("plan_open") == 1 for r in rounds))  # the PASS with a step open was overruled
         self.assertFalse(any("limit" in str(r.get("decision")) for r in rounds))

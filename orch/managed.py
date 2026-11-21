@@ -4246,6 +4246,7 @@ class ManagedRunner(MonitorRunner):
 
     def ph_review(self, mg: Dict[str, Any]) -> Optional[str]:
         c, v = self.mon.controller, self.critic
+        mg.pop("review_report", None)
         work = mg.get("work") or {}
         reports = "\n\n".join((f"From {self.mon.agent(k).called}:\n" if len(work) > 1 else "") + self.report_text(x)
                               for k, x in work.items())
@@ -4329,6 +4330,10 @@ class ManagedRunner(MonitorRunner):
         nxt = "pause" if wait else ("work" if has_work or not passed else "report")
         if wait:
             mg["wait"] = {"who": self.critic.called, "text": "\n\n".join(wait), "turn": r["turn_id"]}
+        if nxt == "report":  # the final review was asked to double as the report: no second turn for the same news
+            text = self.upward(r.get("output") or "").strip()
+            if text:
+                mg["review_report"] = {"turn_id": r["turn_id"], "text": text}
         mg["phase"] = nxt
         n = c.checkin_every
         if nxt == "work" and n and mg.get("ms_round", 0) % n == 0:
@@ -4473,8 +4478,22 @@ class ManagedRunner(MonitorRunner):
     def ph_report(self, mg: Dict[str, Any]) -> Optional[str]:
         ms = self.cur()
         note = self.limit_note() if mg.get("limit") else ""
-        r = self.say(self.critic, self.mtpl("critic_report", limit_note=note, human_messages=""), "report")
-        report = self.upward(r["output"])
+        rr = mg.pop("review_report", None)
+        if rr and not note:  # the final review is the report; its progress note would only repeat it
+            for m in self.ledger.rows:
+                if m.get("source") == rr["turn_id"] and m.get("to") == self.manager.name and m.get("status") == "held":
+                    self.ledger.mark(m, "superseded", reason="carried by the milestone report", by=rr["turn_id"])
+                    fwd = (self.st.get("fwd") or {}).get(self.manager.name) or []
+                    if m.get("text") in fwd:
+                        fwd.remove(m["text"])
+                        if not fwd:
+                            self.st["fwd"].pop(self.manager.name, None)
+            r = {"turn_id": rr["turn_id"]}
+            report = rr["text"]
+            self.rec.progress(f"📝 {self.critic.called}'s final review is its report")
+        else:
+            r = self.say(self.critic, self.mtpl("critic_report", limit_note=note, human_messages=""), "report")
+            report = self.upward(r["output"])
         plan = self.latest_plan()
         if plan:  # where the work stands, step by step
             pd, pt, _cur = plan_status(plan)

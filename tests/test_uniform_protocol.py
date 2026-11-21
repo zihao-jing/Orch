@@ -56,16 +56,15 @@ class TestUniformDispatch(unittest.TestCase):
         message = next(m for m in rec.state['messages'] if m['body'] == 'Check the caption once.')
         self.assertEqual(message['status'], 'delivered')
 
-    def test_report_explicit_worker_action_is_not_swallowed_by_milestone_completion(self):
-        cfg = make_cfg(self.root, [managed(mgr={'milestones': 1}, critic={'pass_after': 1, 'replies': {
-            'report': ['Progress for you. <message to="Sam">One final check.</message>', 'Finished.']}})])
+    def test_final_review_is_the_report_without_a_duplicate_progress_record(self):
+        cfg = make_cfg(self.root, [managed(mgr={'milestones': 1}, critic={'replies': {
+            'verify': ['All labels hold; nothing is open. ' + PASS]}})])
         status, rec = run(cfg)
         self.assertEqual(status, 'completed')
-        work = [t for t in turns(rec) if t['purpose'] == 'work']
-        self.assertEqual(len(work), 2)
-        self.assertEqual(work[1]['input'].count('One final check.'), 1)
+        self.assertFalse([t for t in turns(rec) if t['purpose'] == 'report'])  # no second turn for the same news
         review = next(t for t in turns(rec) if t['purpose'] == 'review')
-        self.assertNotIn('One final check.', review['input'])
+        self.assertEqual(review['input'].count('All labels hold; nothing is open.'), 1)
+        self.assertNotIn('Progress records from the critic', review['input'])
 
     def test_external_role_views_have_the_same_upper_default(self):
         agents = [SimpleNamespace(name=n, role=r, called=n) for n, r in
