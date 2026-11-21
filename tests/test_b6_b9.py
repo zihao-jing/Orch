@@ -347,23 +347,22 @@ class TestGoldenResend(unittest.TestCase):
 
 
 class TestStyleRules(unittest.TestCase):
-    def test_each_role_gets_the_all_rules_and_its_own(self):
+    def test_each_role_gets_its_own_rules(self):
         r = unit(Path(tempfile.mkdtemp()))
         from orch import reminders as R
         text = r.style_rules_text(r.manager)
-        everyone = set(R.style_pool(text, "all"))
         pools = {role: set(R.style_pool(text, role)) for role in ("manager", "critic", "worker")}
-        for role, pool in pools.items():
-            self.assertTrue(everyone < pool, role)
-        self.assertFalse((pools["manager"] & pools["worker"]) - everyone)  # what is written for me stays the manager's
-        self.assertTrue(any("form I ask" in x for x in pools["manager"]))
-        self.assertFalse(any("form I ask" in x for x in pools["critic"] | pools["worker"]))
+        self.assertTrue(all(pools.values()))
+        self.assertFalse(pools["manager"] & pools["critic"] or pools["critic"] & pools["worker"])
+        self.assertTrue(any("text for me" in x for x in pools["manager"]))  # what is written for me stays the manager's
+        self.assertTrue(any("concise" in x for x in pools["worker"]))
         self.assertEqual(R.style_pool(text, "verifier"), R.style_pool(text, "critic"))
         for role, pool in pools.items():
             for _ in range(20):
                 lines = R.style_text(text, role).splitlines()
-                self.assertIn(len(lines), (2, 3))
+                self.assertIn(len(lines), {min(len(pool), 2), min(len(pool), 3)})
                 self.assertTrue(all(x[2:] in pool for x in lines))
+        self.assertEqual(R.style_pool("## All\n- Shared.\n\n## Worker\n- Own.\n", "worker"), ["Shared.", "Own."])
 
     def test_the_system_prompt_has_the_role_rules_with_names(self):
         r = unit(Path(tempfile.mkdtemp()))
@@ -371,7 +370,7 @@ class TestStyleRules(unittest.TestCase):
         self.assertIn("How I want you to write and communicate:", c)
         self.assertIn(f"Keep messages to {r.workers[0].called} brief", c)
         self.assertNotIn("{{worker}}", c)
-        self.assertIn("Report to me in full what you did", w)
+        self.assertIn("Keep your replies to me concise.", w)
         self.assertNotIn("Keep messages to", w)
 
     def test_sent_every_two_to_five_turns_and_can_be_turned_off(self):
