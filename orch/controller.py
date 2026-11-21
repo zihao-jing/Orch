@@ -892,8 +892,10 @@ class MonitorRunner:
                     record.update(session_id=None, resumed_session=False, input=prompt)
                     rec.event("session_note", agent=agent.name, **why)
                     rec.progress(f"↺ {agent.name}: new session ({why['reason']})")
-                    rec.write_turn(record)
                 sess_key = v.session_key
+                # Resumed sessions may never emit a new session id. Persist the selected model
+                # before starting every variant so live readers also see same-session switches.
+                rec.write_turn(record)
             send = prompt
             if urgent_send:  # an urgent message cut in: the same session carries on with it
                 send, urgent_send = urgent_send, ""

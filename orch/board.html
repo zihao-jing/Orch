@@ -411,15 +411,23 @@ async function load(){
   document.querySelectorAll('[data-live]').forEach(x => paintLive(x.dataset.live));
 }
 let tmr = null; const soon = () => { clearTimeout(tmr); tmr = setTimeout(load, 200); };
+let eventSource = null, reconnectTimer = null;
+function disconnect(){
+  clearTimeout(reconnectTimer); reconnectTimer = null;
+  if (eventSource){ eventSource.onerror = null; eventSource.close(); eventSource = null; }
+}
 function connect(){
-  const es = new EventSource('api/events?m=' + encodeURIComponent(M));
+  disconnect();
+  const es = eventSource = new EventSource('api/events?m=' + encodeURIComponent(M));
   es.addEventListener('state', soon);
   es.addEventListener('live', e => { const ev = JSON.parse(e.data); const L = live[ev.turn] || (live[ev.turn] = {text:'', tools:[]});
     if (ev.k === 'text') L.text += ev.s; else if (ev.k === 'tool') { L.tools.push(ev.s); L.tools = L.tools.slice(-12); }
     else if (ev.k === 'break' && L.text && !L.text.endsWith('\n')) L.text += '\n\n';
     paintLive(ev.turn); });
-  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+  es.onerror = () => { disconnect(); reconnectTimer = setTimeout(connect, 2000); };
 }
+window.addEventListener('pagehide', disconnect);
+window.addEventListener('pageshow', () => { if (!eventSource) connect(); });
 let raf = {};
 function paintLive(t){ if (raf[t]) return; raf[t] = requestAnimationFrame(() => { raf[t] = 0;
   document.querySelectorAll('[data-live="'+t+'"]').forEach(el => { const L = live[t] || {};

@@ -72,6 +72,30 @@ class TestApplyDiscussion(unittest.TestCase):
         say.assert_not_called()
         self.assertEqual(len(self.r.st['gate_queue']), 1)
 
+    def test_validated_discussion_starts_the_requested_parallel_work(self):
+        reply = self.reply(suffix='<workers n="2">Independent writing and test runs.</workers>')
+        self.apply(reply)
+        self.assertEqual(self.r.mg['par_req']['status'], 'approved')
+        self.assertEqual(self.r.mg['par_req']['n'], 2)
+        with mock.patch.object(self.r, 'par_start') as start:
+            self.r.ph_work(self.r.mg)
+        start.assert_called_once()
+        self.assertEqual(self.r.mg['phase'], 'parallel')
+
+    def test_unresolved_discussion_does_not_release_worker_request(self):
+        self.apply(self.reply(answers={'Q1': 'Use A'},
+                              suffix='<workers n="2">Independent work.</workers>'))
+        self.assertNotIn('par_req', self.r.mg)
+
+    def test_worker_request_without_a_gate_and_budget_checks(self):
+        self.r.mg['gate'] = None
+        self.apply(self.reply(suffix='<workers n="2">Independent work.</workers>'))
+        self.assertEqual(self.r.mg['par_req']['status'], 'approved')
+
+    def test_worker_request_above_budget_still_needs_approval(self):
+        self.apply(self.reply(suffix='<workers n="4">Independent work.</workers>'))
+        self.assertEqual(self.r.mg['par_req']['status'], 'gate')
+
     def test_partial_answers_leave_gate_open_and_release_nothing(self):
         with mock.patch.object(self.r, 'route_reply') as route:
             self.apply(self.reply(answers={'Q1': 'Use A'}))

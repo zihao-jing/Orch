@@ -30,6 +30,7 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -56,6 +57,7 @@ _PURPOSE_FLOW = {  # who talks to whom in each kind of turn
 
 
 STATE_GAP = 1.0     # seconds between two `state` events: a busy run writes state.json several times a second
+SSE_MAX_AGE = 120.0  # periodically close streams, including abandoned connections held open by proxies
 GZIP_MIN = 1024     # replies shorter than this go out uncompressed
 PREVIEW_CHARS = 900  # a turn's output is sent in full up to this length; longer ones are fetched with /api/turn
 CHAT_TAIL = 60       # chat messages per conversation in the state payload; older ones come from /api/chat
@@ -167,6 +169,85 @@ class StateDeltas:
         return "[" + ",".join(o if isinstance(o, str) else f"[{o[0]},{o[1]}]" for o in ops) + "]"
 
 
+class LiveEvents:
+    """Read live files once per polling interval, shared by all connected browsers."""
+    INTERVAL = 0.4
+    KEEP = 128
+
+    def __init__(self, board: Any):
+        self.board = board
+        self.lock = threading.Lock()
+        self.scanned = float('-inf')
+        self.rd = None
+        self.offsets: Dict[str, int] = {}
+        self.sig: Tuple = ()
+        self.last_state = float('-inf')
+        self.seq = 0
+        self.batches = deque(maxlen=self.KEEP)
+
+    def poll(self, cursor: Optional[int]) -> Tuple[int, bytes]:
+        with self.lock:
+            now = time.monotonic()
+            if now - self.scanned >= self.INTERVAL:
+                data = self.scan(now)
+                self.scanned = now
+                if data:
+                    self.seq += 1
+                    self.batches.append((self.seq, data))
+                    while len(self.batches) > 1 and sum(len(x[1]) for x in self.batches) > 2 * 1024 * 1024:
+                        self.batches.popleft()
+            if cursor is None or (self.batches and cursor < self.batches[0][0] - 1):
+                return self.seq, b'event: state\ndata: {}\n\n'
+            return self.seq, b''.join(data for seq, data in self.batches if seq > cursor)
+
+    def scan(self, now: float) -> bytes:
+        rd = self.board.run_dir
+        if rd is None:
+            return b''
+        first = rd != self.rd
+        if first:
+            self.rd, self.offsets, self.sig = rd, {}, ()
+            self.batches.clear()
+        files = [rd / 'state.json', rd / 'chat.jsonl']
+        stamps = []
+        for f in files:
+            try:
+                stamps.append(f.stat().st_mtime_ns)
+            except FileNotFoundError:
+                stamps.append(0)
+        sig = tuple(stamps) + (self.board._tl[0] if self.board._tl else 0,)
+        out = []
+        if sig != self.sig and now - self.last_state >= STATE_GAP:
+            self.sig, self.last_state = sig, now
+            out.append(b'event: state\ndata: {}\n\n')
+        for f in sorted((rd / 'live').glob('*.jsonl')):
+            try:
+                size = f.stat().st_size
+                off = self.offsets.get(f.name, size if first else 0)
+                if size < off:
+                    off = 0
+                self.offsets[f.name] = off
+                if size <= off:
+                    continue
+                with f.open('rb') as stream:
+                    stream.seek(off)
+                    chunk = stream.read(size - off)
+            except FileNotFoundError:
+                continue
+            cut = chunk.rfind(b'\n') + 1
+            self.offsets[f.name] = off + cut
+            for line in chunk[:cut].splitlines():
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event['turn'] = f.stem
+                out.append(b'event: live\ndata: ' + json.dumps(event, ensure_ascii=False).encode() + b'\n\n')
+        return b''.join(out)
+
+
 class Board:
     def __init__(self, name: str, run_dir: Callable[[], Optional[Path]], mon: Optional[MonitorConfig] = None):
         self.name, self._run_dir, self.mon = name, run_dir, mon
@@ -179,6 +260,7 @@ class Board:
         self._refresh_lock = threading.Lock()
         self._refresh_error = ""
         self._tl: Optional[Tuple[float, Any, Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]], str]] = None
+        self.live_events = LiveEvents(self)
 
     @property
     def run_dir(self) -> Optional[Path]:
@@ -1459,54 +1541,26 @@ def _handler(boards: Dict[str, Board]):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Accel-Buffering", "no")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             self.end_headers()
-            offsets: Dict[str, int] = {}
-            sig: Tuple = ()
-            first = True
-            last_ping = time.time()
-            last_state = last_ping - STATE_GAP
+            self.connection.settimeout(10)
+            cursor = None
+            started = last_ping = time.monotonic()
             try:
-                while True:
-                    rd = b.run_dir
-                    if rd is not None:
-                        files = [rd / "state.json", rd / "chat.jsonl"]
-                        new_sig = tuple(f.stat().st_mtime_ns if f.exists() else 0 for f in files) + (
-                            b._tl[0] if b._tl is not None else 0,)
-                        if new_sig != sig and time.time() - last_state >= STATE_GAP:  # a change inside the gap waits for it
-                            sig, last_state = new_sig, time.time()
-                            self.wfile.write(b"event: state\ndata: {}\n\n")
-                        ld = rd / "live"
-                        for f in (sorted(ld.glob("*.jsonl")) if ld.is_dir() else []):
-                            size = f.stat().st_size
-                            off = offsets.get(f.name)
-                            if off is None:
-                                offsets[f.name] = size if first or time.time() - f.stat().st_mtime > 5 else 0
-                                if offsets[f.name] == size:
-                                    continue
-                                off = 0
-                            if size > off:
-                                with open(f, "rb") as fh:
-                                    fh.seek(off)
-                                    chunk = fh.read(size - off)
-                                cut = chunk.rfind(b"\n") + 1
-                                offsets[f.name] = off + cut
-                                for ln in chunk[:cut].splitlines():
-                                    try:
-                                        ev = json.loads(ln)
-                                    except json.JSONDecodeError:
-                                        continue
-                                    ev["turn"] = f.stem
-                                    self.wfile.write(b"event: live\ndata: " + json.dumps(ev, ensure_ascii=False)
-                                                     .encode("utf-8") + b"\n\n")
-                        first = False
-                    if time.time() - last_ping > 15:
+                # Bound stream lifetime so abandoned proxy connections cannot accumulate forever.
+                while time.monotonic() - started < SSE_MAX_AGE:
+                    cursor, data = b.live_events.poll(cursor)
+                    if data:
+                        self.wfile.write(data)
+                    if time.monotonic() - last_ping > 15:
                         self.wfile.write(b": ping\n\n")
-                        last_ping = time.time()
+                        last_ping = time.monotonic()
                     self.wfile.flush()
-                    time.sleep(0.4)
+                    time.sleep(LiveEvents.INTERVAL)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
+            finally:
+                self.close_connection = True
 
     return H
 

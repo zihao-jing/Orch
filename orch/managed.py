@@ -1458,6 +1458,9 @@ class ManagedRunner(MonitorRunner):
             else:
                 mg.pop("discussion_saved", None)
                 self.st.pop("discussion_since", None)
+                # turn() defers all dispatch controls for discussion_apply until validation.
+                # Release the manager's worker request along with its agreed instructions.
+                self.take_workers(self.manager, r)
                 if gate:
                     self.st.setdefault("gate_queue", []).append({"kind": "gate", "gate": gate["key"],
                         "decision": decision, "message": "Applied the agreed discussion.", "discussion_result": r})
