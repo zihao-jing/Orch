@@ -245,18 +245,31 @@ def due(state: Dict[str, Any], rem: Dict[str, Any], rng: Any = random) -> bool:
 STYLE_HEADING = "How I want you to write and communicate:"
 
 
-def style_pool(text: str, role: str) -> List[str]:
-    """A role's rules in the style file: the "## All" lines and those under its own role's heading (manager, critic,
-    worker). The same rules open the system prompt and feed the reminder."""
+def style_groups(text: str, role: str) -> List[List[str]]:
+    """A role's rules in the style file, each as its wordings (the rule's own line first, then the indented lines
+    under it): the "## All" rules and those under the role's own heading (manager, critic, worker)."""
     want = {"all", ROLE_OF.get(role, role)}
-    out: List[str] = []
+    out: List[List[str]] = []
     section = ""
     for line in re.sub(r"<!--.*?-->", "", text or "", flags=re.S).splitlines():
         if line.startswith("## "):
             section = line[3:].strip().lower()
-        elif section in want and line.startswith("- ") and line[2:].strip():
-            out.append(line[2:].strip())
+            continue
+        if section not in want:
+            continue
+        m = re.match(r"^(\s*)- (.+)$", line)
+        if not m or not m.group(2).strip():
+            continue
+        if m.group(1) and out:
+            out[-1].append(m.group(2).strip())
+        elif not m.group(1):
+            out.append([m.group(2).strip()])
     return out
+
+
+def style_pool(text: str, role: str) -> List[str]:
+    """A role's rules, each in its first wording: what the system prompt lists."""
+    return [g[0] for g in style_groups(text, role)]
 
 
 def style_section(text: str, role: str) -> str:
@@ -266,8 +279,9 @@ def style_section(text: str, role: str) -> str:
 
 
 def style_text(text: str, role: str, rng: Any = random) -> str:
-    """One reminder of 2-3 of this role's rules, drawn at random ('' when the file has none)."""
-    pool = style_pool(text, role)
-    if not pool:
+    """One reminder of 2-3 different rules of this role, each in a wording picked at random ('' when none)."""
+    groups = style_groups(text, role)
+    if not groups:
         return ""
-    return "\n".join(f"- {x}" for x in rng.sample(pool, min(len(pool), rng.randint(2, 3))))
+    picked = rng.sample(groups, min(len(groups), rng.randint(2, 3)))  # different rules, one wording each
+    return "\n".join(f"- {rng.choice(g)}" for g in picked)

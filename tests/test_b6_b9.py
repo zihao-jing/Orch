@@ -358,10 +358,18 @@ class TestStyleRules(unittest.TestCase):
         self.assertTrue(any("concise" in x for x in pools["worker"]))
         self.assertEqual(R.style_pool(text, "verifier"), R.style_pool(text, "critic"))
         for role, pool in pools.items():
-            for _ in range(20):
-                lines = R.style_text(text, role).splitlines()
-                self.assertIn(len(lines), {min(len(pool), 2), min(len(pool), 3)})
-                self.assertTrue(all(x[2:] in pool for x in lines))
+            groups = R.style_groups(text, role)
+            self.assertEqual([g[0] for g in groups], R.style_pool(text, role))
+            seen = set()
+            for _ in range(40):
+                lines = [x[2:] for x in R.style_text(text, role).splitlines()]
+                self.assertIn(len(lines), {min(len(groups), 2), min(len(groups), 3)})
+                hit = [next(i for i, g in enumerate(groups) if x in g) for x in lines]
+                self.assertEqual(len(hit), len(set(hit)))  # never two wordings of one rule together
+                seen.update(lines)
+            self.assertTrue(seen - set(pool), role)  # the other wordings are used too
+        g = R.style_groups("## Worker\n- Short.\n  - Brief.\n- Plain.\n", "worker")
+        self.assertEqual(g, [["Short.", "Brief."], ["Plain."]])
         self.assertEqual(R.style_pool("## All\n- Shared.\n\n## Worker\n- Own.\n", "worker"), ["Shared.", "Own."])
 
     def test_the_system_prompt_has_the_role_rules_with_names(self):
