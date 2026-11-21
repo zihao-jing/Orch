@@ -102,6 +102,34 @@ class TestRemindersStripped(unittest.TestCase):
         self.assertNotIn("system-reminder", text)
 
 
+class TestShortReplyFlags(unittest.TestCase):
+    def flagged(self, purpose, status_out, status="ok"):
+        rd = Path(tempfile.mkdtemp()) / "run"
+        rd.mkdir()
+        turn(rd, "r001-t01-x", "x", "worker", "10:00:00", "10:01:00", "Check it.", status_out, purpose=purpose)
+        if status != "ok":
+            path = rd / "rounds" / "r001" / "t01-x.json"
+            data = json.loads(path.read_text())
+            data["status"] = status
+            path.write_text(json.dumps(data))
+        _, stats = audit.build(rd, 1, 1)
+        return [f["turn"] for f in stats["flags"] if f["kind"] == "short or failed reply"]
+
+    def test_short_ok_verify_turn_is_not_flagged(self):
+        verdict = "Checked the rows against the spec; all match. <verdict>PASS</verdict>"
+        self.assertLess(len(verdict), audit.TINY_REPLY)
+        self.assertEqual(self.flagged("verify", verdict), [])
+
+    def test_compact_turn_with_empty_output_is_not_flagged(self):
+        self.assertEqual(self.flagged("compact", ""), [])
+
+    def test_short_ok_work_turn_is_still_flagged(self):
+        self.assertEqual(self.flagged("work", "Fine."), ["r001-t01-x"])
+
+    def test_verify_turn_with_error_status_is_still_flagged(self):
+        self.assertEqual(self.flagged("verify", "Checked.", status="error"), ["r001-t01-x"])
+
+
 class TestAuditorPrompt(unittest.TestCase):
     def test_the_prompt_states_the_design(self):
         p = " ".join((ROOT / "orch" / "prompts" / "auditor.md").read_text().lower().split())
