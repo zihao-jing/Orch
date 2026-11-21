@@ -429,7 +429,7 @@ class TestGateSummary(unittest.TestCase):
         ts = turns(rec)
         self.assertIn("`<summary>`", next(t for t in ts if t["purpose"] == "plan")["input"])
         review = next(t for t in ts if t["purpose"] == "review")
-        self.assertIn("(what\nchanged, what was checked, where to look)", review["input"])
+        self.assertIn("Score it against the rubric and decide.", review["input"])  # the gate rules are in the protocol
         self.assertIn("Changed: the part is done", rec.state["final_report"])
         assert_no_role_leaks(self, rec, also=["Changed: the part is done"])
 
