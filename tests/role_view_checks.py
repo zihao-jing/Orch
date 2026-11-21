@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 ABOVE = {  # words a role must never read
-    "verifier": ("manager", "orch", "real user"),
-    "worker": ("manager", "orch", "real user", "critic"),
+    "verifier": ("manager", "orch", "real user", "upper level", "upper-level"),
+    "worker": ("manager", "orch", "real user", "critic", "worker", "upper level", "upper-level"),
 }
 _TAG = re.compile(r"<message\s+to\s*=\s*\"[^\"]*\"[^>]*>", re.I)
 _PATH = re.compile(r"\S*[./]orch/\S*")

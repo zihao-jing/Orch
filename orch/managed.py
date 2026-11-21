@@ -445,9 +445,12 @@ class ManagedRunner(MonitorRunner):
                 sent.append(rid)
 
         seen_protocol = self.st.setdefault("communication_protocol_seen", {})
-        if seen_protocol.get(agent.name) != CP.VERSION or not self.has_session(agent):
-            add("communication_protocol", "Communication rule: untagged text is always for me (your upper level). "
-                "Use explicit recipient tags for anyone else. A verdict alone assigns no worker turn.")
+        if role != "worker" and (seen_protocol.get(agent.name) != CP.VERSION or not self.has_session(agent)):
+            # This is part of the agent's role view, not an explanation of the orchestration.
+            text = ("Communication rule: untagged text is always for me. "
+                    "Use explicit recipient tags for anyone else. "
+                    "A verdict alone does not assign further work; explicitly address any next instruction.")
+            add("communication_protocol", text)
             seen_protocol[agent.name] = CP.VERSION
         if role == "manager" and self.st.get("night"):
             # the text is long and the manager keeps it in view: the first turn after night mode turns on, then

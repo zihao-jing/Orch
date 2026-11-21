@@ -48,6 +48,9 @@ class TestRoleViews(unittest.TestCase):
     def test_the_helper_finds_leaks_and_allows_tag_syntax_and_paths(self):
         self.assertTrue(leaks("Your manager wants this.", "verifier"))
         self.assertTrue(leaks("The critic said so.", "worker"))
+        self.assertTrue(leaks("A verdict alone assigns no worker turn.", "worker"))
+        self.assertTrue(leaks("This is for me (your upper level).", "worker"))
+        self.assertTrue(leaks("This is for me (your upper level).", "verifier"))
         self.assertTrue(leaks("Sent by orch.", "verifier"))
         self.assertTrue(leaks("Ask Alex.", "verifier", ["Alex"]))
         self.assertFalse(leaks("The critic said so.", "verifier"))  # the critic may know its own role
@@ -172,6 +175,27 @@ class TestRoleViews(unittest.TestCase):
         self.assertIn("Possible, but not suggested", sp["boss"])
         self.assertIn("does not know that I exist", sp["boss"])
         self.assertIn("`.orch/` folder", sp["writer"])
+
+    def test_communication_reminder_preserves_role_view_in_new_sessions(self):
+        from orch.managed import ManagedRunner
+        cfg = make_cfg(self.tmp, [managed(mgr={"milestones": 1})])
+        status, rec = run(cfg)
+        self.assertEqual(status, "completed")
+        reminders = [t for t in turns(rec) if "communication_protocol" in (t.get("reminders") or [])]
+        workers = [t for t in reminders if t["role"] == "worker"]
+        self.assertFalse(workers)
+        self.assertTrue(reminders)
+        for t in reminders:
+            self.assertNotIn("upper level", t["input"])
+            self.assertIn("explicitly address any next instruction", t["input"])
+        r = ManagedRunner(load_config(cfg).monitor("m"), threading.Event(), resume=True, log=lambda s: None)
+        r.rec = rec
+        # A replacement worker session must not receive a routing reminder either.
+        with mock.patch.object(r, "has_session", return_value=False):
+            prompt, sent = r.add_reminders(r.workers[0], "Continue the edit.", "work")
+        self.assertNotIn("communication_protocol", sent)
+        self.assertNotIn("Reply directly to me.", prompt)
+        self.assertFalse(leaks(prompt, "worker"))
 
 
 if __name__ == "__main__":
