@@ -98,9 +98,6 @@ details.ckp>summary::-webkit-details-marker{display:none}
 #audit-card[open]>summary .mute{display:none}
 details.ckp>summary h2{margin:0}details.ckp>summary:before{content:"▸";color:var(--mute);font-size:12px}details.ckp[open]>summary:before{content:"▾"}
 details.ckp .bar{margin-top:8px}
-/* charts */
-.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
-.chart{position:relative}.chart svg{width:100%;height:auto;display:block}
 .tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--ring);border-radius:8px;padding:6px 9px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.12);white-space:nowrap;display:none;z-index:5}
 .tip b{font-size:13px}
 details.tbl>summary{cursor:pointer;color:var(--mute);font-size:12px;margin-top:6px}
@@ -607,18 +604,8 @@ function versionAtStop(){  // once per stop (a gate, a job, the end), like the b
   verStop = stop; }
 const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started'], open:['p-warn','↺ open again']};
 
-// ---------------------------------------------------------------- charts (inline SVG)
-function barChart(rows, min){  // the manager's scores per criterion, out of 5 (inline SVG; hover a bar for its name)
-  if (!rows.length) return '';
-  const W=560, lw=170, pr=40, rh=28, pt=8, H = pt + rows.length*rh + 26, iw = W-lw-pr, X = v => lw + v/5*iw;
-  let g = '';
-  [0,1,2,3,4,5].forEach(v => g += `<line x1="${X(v)}" x2="${X(v)}" y1="${pt}" y2="${H-22}" stroke="var(--grid)"/><text x="${X(v)}" y="${H-8}" text-anchor="middle" font-size="11" fill="var(--mute)">${v}</text>`);
-  rows.forEach((r,i) => { const y = pt + i*rh + 7, name = r[0].length > 24 ? r[0].slice(0,23)+'…' : r[0];
-    g += `<text x="${lw-10}" y="${y+11}" text-anchor="end" font-size="12" fill="var(--ink2)"><title>${esc(r[0])}</title>${esc(name)}</text>`;
-    g += `<rect x="${lw}" y="${y}" width="${Math.max(2, X(r[1])-lw)}" height="14" rx="4" fill="var(--s1)"><title>${esc(r[0])}: ${r[1]} / 5</title></rect>`;
-    g += `<text x="${X(r[1])+6}" y="${y+11}" font-size="12" fill="var(--ink)">${r[1]}</text>`; });
-  if (min != null) g += `<line x1="${X(min)}" x2="${X(min)}" y1="${pt}" y2="${H-22}" stroke="var(--ink2)" stroke-dasharray="4 3"/><text x="${X(min)+4}" y="${pt+9}" font-size="11" fill="var(--ink2)">bar ${min}</text>`;
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Manager scores per criterion, out of 5">${g}</svg></div>`;
+function scoreLine(r){  // the manager's review as one line: overall, then each criterion's score (names are in the rubric fold)
+  return [r.score != null ? r.score + '/5' : null, ...(r.criteria||[]).map((c, i) => (i + 1) + ': ' + c[1])].filter(x => x != null).join(' · ');
 }
 function checklistItems(text){  // "- [x] item — note" lines of a critic review
   return String(text||'').split('\n').map(l => l.match(/^\s*[-*]\s*\[([ xX~\-])\]\s*(.+)$/)).filter(Boolean).map(m => {
@@ -645,20 +632,23 @@ function checklistHTML(ms){
   if (done.length) h += `<details class="tbl"><summary>Done (${done.length})</summary><ul class="ck">${done.map(li).join('')}</ul></details>`;
   return h;
 }
-function msInfoHTML(ms){  // a milestone's report, checklist and scores, folded at the top of the milestone
+const MS_FOLDS = [['checklist', 'Checklist'], ['report', 'Report'], ['scores', 'Scores']];
+function msFoldHTML(ms, fold){  // the body of one of a milestone's three folds
   const m = ((D.managed||{}).milestones||[])[ms]; if (!m) return '';
+  if (fold === 'checklist') return checklistHTML(ms);
+  if (fold === 'report'){
+    let h = `<div class="ink2" style="margin-bottom:6px">Done when: ${inline(m.done_when||'—')}</div>`;
+    if (m.status === 'done') h += `<div class="row" style="margin:0 0 6px"><button class="sm" data-reopen="${ms}" title="Move this milestone back to open: shown as open, and its checklist gets an open item">↺ Move back to open</button></div>`;
+    if (m.status === 'open') h += `<div class="ink2" style="font-size:12px">↺ Moved back to open ${tm(m.reopened_at)}.</div>`;
+    if (m.gate_summary) h += `<div class="rec"><div class="k">What changed, what was checked, where to look</div><div class="md">${md(m.gate_summary)}</div></div>`;
+    return h + (m.summary ? `<div class="ink2" style="font-size:12px;font-weight:600;margin-top:8px">Report from ${esc(who('manager'))}</div><div class="md">${md(m.summary)}</div>` : '<div class="empty">The manager has not reported on this milestone yet.</div>');
+  }
   const revs = (D.reviews||[]).filter(r => r.milestone === ms), last = revs[revs.length-1];
-  let h = `<div class="ink2" style="margin-bottom:6px">Done when: ${inline(m.done_when||'—')}</div>`;
-  if (m.status === 'done') h += `<div class="row" style="margin:0 0 6px"><button class="sm" data-reopen="${ms}" title="Move this milestone back to open: shown as open, and its checklist gets an open item">↺ Move back to open</button></div>`;
-  if (m.status === 'open') h += `<div class="ink2" style="font-size:12px">↺ Moved back to open ${tm(m.reopened_at)}.</div>`;
+  let h = last ? `<div class="ink2" style="font-size:12.5px;margin-bottom:6px">${esc(scoreLine(last))}</div>` : '';
   if ((m.rubric||[]).length) h += `<details class="tbl"><summary>Rubric (${m.rubric.length} criteria)</summary><ol>${m.rubric.map(x => `<li>${inline(x)}</li>`).join('')}</ol></details>`;
-  if (m.gate_summary) h += `<div class="rec"><div class="k">What changed, what was checked, where to look</div><div class="md">${md(m.gate_summary)}</div></div>`;
-  h += m.summary ? `<div class="ink2" style="font-size:12px;font-weight:600;margin-top:8px">Report from ${esc(who('manager'))}</div><div class="md">${md(m.summary)}</div>` : '<div class="empty">The manager has not reported on this milestone yet.</div>';
-  h += checklistHTML(ms);
-  if (last){ h += `<div class="ink2" style="font-size:12px;font-weight:600;margin:10px 0 2px">Manager scores${last.score != null ? ' · overall ' + last.score + '/5' : ''}</div>` + barChart(last.criteria||[], D.min_score);
-    if (revs.length > 1) h += '<details class="tbl"><summary>Review history</summary><div class="tw"><table><tr><th>review</th><th>round</th><th class="num">score</th><th>decision</th></tr>' +
-      revs.map((r,i) => `<tr><td>${i+1}</td><td>${r.round}</td><td class="num">${r.score ?? '—'}</td><td>${r.decision==='ACCEPT'?pill('p-good','✓ accept'):pill('p-warn','↺ revise')}</td></tr>`).join('') + '</table></div></details>'; }
-  return h;
+  if (revs.length > 1) h += '<details class="tbl"><summary>Review history</summary><div class="tw"><table><tr><th>review</th><th>round</th><th class="num">score</th><th>decision</th></tr>' +
+    revs.map((r,i) => `<tr><td>${i+1}</td><td>${r.round}</td><td class="num">${r.score ?? '—'}</td><td>${r.decision==='ACCEPT'?pill('p-good','✓ accept'):pill('p-warn','↺ revise')}</td></tr>`).join('') + '</table></div></details>';
+  return h || '<div class="empty">The manager has not scored this milestone yet.</div>';
 }
 
 function preview(text){  // first line of prose, without markdown, for a folded message
@@ -702,7 +692,7 @@ const BLOCKS = [['user', () => 'You ↔ ' + who('manager')], ['mc', () => who('m
 const OTHER = new Set(['system', 'warning', 'job', 'reminder', 'check']);  // small tagged lines; the filter hides them
 const groupCache = new Map(), groupPending = new Set();  // group key -> {n, items, more}
 const msgCache = new Map(), msgPending = new Set();       // item id -> its full text (api/message)
-const openItems = new Set(), openG = new Set(), shutG = new Set(), openInfo = new Set();  // openG/shutG: "<block>|<step key>"
+const openItems = new Set(), openG = new Set(), shutG = new Set(), openInfo = new Set();  // openG/shutG: "<block>|<step key>"; openInfo: "<milestone>|<fold>"
 let showOther = true; try { showOther = localStorage.getItem('orch-other') !== '0'; } catch(e){}
 // which conversation cards are hidden (filter) or folded; how many lines each step of a card shows (newest first)
 const PAGE = 10, shown = new Map();  // "<block>|<step key>" -> lines shown
@@ -836,7 +826,8 @@ function renderSteps(ms){
       + `<div class="t">${esc(k < 0 ? 'The plan' : (m ? m.title : ''))}</div>${st ? pill(st[0], st[1]) : ''}${m && m.score != null ? ` <span class="ink2" style="font-size:12px">${m.score}/5</span>` : ''}`
       + `<div class="cnt">${n} message${n === 1 ? '' : 's'}${x ? ` · <b style="color:var(--you)">${x} for you</b>` : ''}</div></div>`;
   }).join(''));
-  setHTML($('msinfo'), mss[ms] ? `<details class="msinfo" data-info="${ms}"${openInfo.has(ms) ? ' open' : ''} style="border-top:0;padding:0;margin-top:8px"><summary>Report, checklist and scores</summary>${openInfo.has(ms) ? `<div class="mi">${msInfoHTML(ms)}</div>` : ''}</details>` : '');
+  setHTML($('msinfo'), mss[ms] ? MS_FOLDS.map(([f, label]) => { const key = ms + '|' + f, open = openInfo.has(key);
+    return `<details class="msinfo" data-info="${key}"${open ? ' open' : ''} style="border-top:0;padding:0;margin-top:8px"><summary>${label}</summary>${open ? `<div class="mi">${msFoldHTML(ms, f)}</div>` : ''}</details>`; }).join('') : '');
 }
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
@@ -863,7 +854,7 @@ document.addEventListener('toggle', e => {  // remember what is open; fetch what
     if (d.open !== has) renderTimeline(); return; }
   if (d.dataset.card !== undefined){ const b = d.dataset.card, has = !!d.querySelector(':scope>details,:scope>details.ln,:scope>.lmore,:scope>.bmore');
     if (d.open) shutCard.delete(b); else shutCard.add(b); saveB(); if (d.open !== has) renderTimeline(); return; }
-  if (d.dataset.info !== undefined){ const k = +d.dataset.info; if (d.open !== openInfo.has(k)){ d.open ? openInfo.add(k) : openInfo.delete(k); renderTimeline(); } }
+  if (d.dataset.info !== undefined){ const k = d.dataset.info; if (d.open !== openInfo.has(k)){ d.open ? openInfo.add(k) : openInfo.delete(k); renderTimeline(); } }
 }, true);
 function findItem(id){
   for (const it of D.tl_items || []) if (it.id === id) return it;

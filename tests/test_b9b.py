@@ -100,6 +100,16 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(block_of("human", "verifier"), "mc")  # I talk to the critic as its usual user
         self.assertEqual(line_of("Here is the plan:\n\n**Step one** is `x`\n<message to=\"w\">later</message>"), "Step one is x")
 
+    def test_plan_steps_stay_out_of_the_timeline(self):
+        rd = make_run(self.tmp)  # the event stays in events.jsonl; the board no longer shows it
+        with open(rd / "events.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": ts(5), "event": "plan_step", "turn": "r001-t02-boss", "done": 1, "total": 2,
+                                "next": "Check the tables"}) + "\n")
+        b = Board("m", lambda: rd)
+        lines = [it["line"] for g in b.state()["tl_groups"] for it in b.items(g["key"])["items"]]
+        self.assertTrue(any("waiting for your OK" in x for x in lines), lines)  # the timeline does have events
+        self.assertFalse(any("of 2 done" in x or "next: Check" in x for x in lines), lines)
+
     def test_state_carries_lines_of_the_open_step_only(self):
         rd = make_run(self.tmp)
         b = Board("m", lambda: rd)
