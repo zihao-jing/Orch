@@ -23,6 +23,7 @@ Nothing in the agents' messages mentions a workflow; relayed text reads like a n
 from __future__ import annotations
 
 import dataclasses
+import difflib
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -448,7 +449,12 @@ class ManagedRunner(MonitorRunner):
                 "Use explicit recipient tags for anyone else. A verdict alone assigns no worker turn.")
             seen_protocol[agent.name] = CP.VERSION
         if role == "manager" and self.st.get("night"):
-            add("night_mode", self.mtpl("night_manager"))
+            # the text is long and the manager keeps it in view: the first turn after night mode turns on, then
+            # every 5th manager turn (the count restarts in switch_night)
+            n = self.st.get("night_turns", 0)
+            self.st["night_turns"] = n + 1
+            if n % 5 == 0:
+                add("night_mode", self.mtpl("night_manager"))
         if role == "manager" and self.discussion_on():
             add("discussion", self.mtpl("discussion_manager"))
         if role == "critic" and (self.par or self.carries_from_user(agent)):
@@ -466,6 +472,10 @@ class ManagedRunner(MonitorRunner):
                     gb = self.golden_board_reminder(agent, role, text, R.due(counters, rem))
                     if gb:
                         add(R.GOLDEN_BOARD, gb)
+                continue
+            if rem["id"] == R.STYLE_RULES:
+                if R.applies(rem, purpose) and R.targets(rem, agent.name, role) and R.due(counters, rem):
+                    add(R.STYLE_RULES, R.style_text(self.style_rules_text(), role))
                 continue
             if not text or not R.applies(rem, purpose) or not R.targets(rem, agent.name, role):
                 continue
@@ -493,6 +503,11 @@ class ManagedRunner(MonitorRunner):
     # gets it at the end of a message: once whenever it changed or the agent's session is new, and on the reminder's
     # schedule. The critic and the worker read it as their own user's standing rules; a board that names a layer above
     # one of them is held from it (and the manager is told) until it is rewritten.
+
+    def style_rules_text(self) -> str:
+        """The rules the style reminder samples: the project's `.orch/style-rules.md` when there is one, else orch's."""
+        own = self.rec.run_dir.parent / "style-rules.md"
+        return B.read(own if own.is_file() else PROMPTS_DIR / "style-rules.md")
 
     def golden_path(self) -> Path:
         c = self.mon.controller.golden_board
@@ -565,27 +580,47 @@ class ManagedRunner(MonitorRunner):
             g["prune_due"] = False
         return g
 
-    def golden_board_reminder(self, agent: AgentConfig, role: str, intro: str, due: bool) -> str:
-        """The board for this agent's message, or '': when it changed since the agent last got it, when the
-        agent's session is new, or when the reminder is due. Nothing while the board is empty."""
+    def golden_content(self, role: str) -> str:
+        """What this role is sent of the board: all of it, or for the worker only its "## Boundaries" section (the
+        worker needs the hard limits; the rest is for the layers above it, and the critic passes on what a step needs)."""
         body = self.golden_body()
+        return B.boundaries(body) if role == "worker" else body
+
+    def golden_board_reminder(self, agent: AgentConfig, role: str, intro: str, due: bool) -> str:
+        """The board for this agent's message, or '': in full when the agent's session is new (or compacted), as
+        the added and removed lines when it changed since the agent last got it, and one line when the reminder is
+        due and nothing changed. Nothing while there is nothing to send."""
+        content = self.golden_content(role)
         g = self.st.get("golden") or {}
-        if not body or (role != "manager" and agent.role in (g.get("leaks") or {})):
+        if not content or (role != "manager" and self.golden_leaks(content).get(agent.role)):
             return ""
         seen = (self.st.get("golden_seen") or {}).get(agent.name) or {}
         sid = (self.st["sessions"].get(agent.name) or {}).get("session_id")
-        if not (due or not sid or seen.get("hash") != g.get("hash") or seen.get("session") != sid):
-            return ""
-        head = render(intro or "", **self.names(), golden_board=str(self.golden_path())).strip()
-        return f"{head}\n\n{body}" if head else body
+        path = str(self.golden_path())
+        head = render(intro or "", **self.names(), golden_board=path).strip()
+        self.__dict__.setdefault("golden_sent", {})[agent.name] = content  # what after_turn records as seen
+        if not sid or seen.get("session") != sid or seen.get("text") is None:
+            return f"{head}\n\n{content}" if head else content
+        if seen.get("hash") != B.digest(content):
+            lines = [d for d in difflib.unified_diff(seen["text"].splitlines(), content.splitlines(), lineterm="", n=0)
+                     if d[:1] in "+-" and d[:3] not in ("+++", "---") and d[1:].strip()]
+            if lines:
+                return f"Standing rules changed (`{path}`):\n" + "\n".join(f"{d[0]} {d[1:]}" for d in lines)
+        return f"Standing rules unchanged: `{path}`" if due else ""
 
     def golden_after_turn(self, agent: AgentConfig, r: Dict[str, Any], before: Optional[str]) -> None:
         """After a turn: the agent has the board it was sent; a board the manager changed in its own turn counts as
         seen by it (it wrote it)."""
         g = self.check_golden() if agent.role == "manager" else (self.st.get("golden") or {})
+        role = R.ROLE_OF.get(agent.role) or ""
         sent = R.GOLDEN_BOARD in (r.get("reminders") or [])
-        if sent or (agent.role == "manager" and before is not None and g.get("hash") != before):
-            self.st.setdefault("golden_seen", {})[agent.name] = {"hash": g.get("hash"), "session": r.get("session_id")}
+        wrote = agent.role == "manager" and before is not None and g.get("hash") != before
+        if sent or wrote:
+            # the text is kept to diff against next time: what was sent, or what the manager wrote
+            text = self.__dict__.get("golden_sent", {}).get(agent.name) if sent else None
+            text = self.golden_content(role) if text is None else text
+            self.st.setdefault("golden_seen", {})[agent.name] = {
+                "hash": B.digest(text), "text": text, "session": r.get("session_id")}
 
     MAY_ADDRESS = RT.MAY_ADDRESS  # whom each role may write to with <message to="…"> (besides to="you", its own user)
 
@@ -2543,6 +2578,7 @@ class ManagedRunner(MonitorRunner):
         self.st.pop("night_queued", None)
         self.st.pop("night_queued_for", None)
         self.st["night"] = want
+        self.st.pop("night_turns", None)
         self.rec.event("night", on=want)
         self.rec.progress("🌙 night mode on: the manager decides alone" if want else "☀ night mode off")
 
