@@ -107,7 +107,7 @@ def strip_checklist(text: str) -> str:
 
 
 def classify(c: Any, res: TurnResult) -> Tuple[str, str]:
-    """Return (status, reason). Catches failures a backend reports as success (exit 0, empty reply)."""
+    """Return (status, reason). A successful turn may finish tool work without a text reply."""
     if res.status != "ok":
         return res.status, ""
     text, err = res.output or "", res.stderr or ""
@@ -117,7 +117,7 @@ def classify(c: Any, res: TurnResult) -> Tuple[str, str]:
         return "needs_human", "agent needs a permission / allowance decision"
     if trailing_question(text):
         return "needs_human", "agent asked the human a question"
-    if not text.strip():
+    if not text.strip() and not res.meta.get("tools_completed"):
         return "error", "empty reply (exit code 0 but no output)"
     return "ok", ""
 

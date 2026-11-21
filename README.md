@@ -670,7 +670,9 @@ backend_options: {permission_mode: auto}   # options on top of the model's (on a
 ```
 
 * A failed turn (API error, overload, rate limit, crash) is retried on the same model after each of `retry_waits`,
-  then on `backup`, then `backup2` (each with the same waits). An unusable reply (exit 0, no text) gets the
+  then on `backup`, then `backup2` (each with the same waits). A successful OpenCode turn with completed tool
+  work needs no final text reply; it proceeds to review without a retry or model switch. An unusable reply
+  (exit 0, no text or recorded completed tool work) gets the
   `retries` immediate corrections instead. A billing or account problem is not retried: the run stops and the
   board says why. Each retry and switch is in the turn record (`retries`, `fallbacks`), in `state.json`
   (`reliability`) and on the board. `retry_waits` and `fallback_cooldown` can be set per agent too.

@@ -754,6 +754,8 @@ class OpenCodeBackend(Backend):
             meta["models"] = [str(req.options["model"])]
         if p["steps"]:
             meta["num_turns"] = p["steps"]
+        if p["tools_completed"]:
+            meta["tools_completed"] = p["tools_completed"]
         if p["errors"]:
             meta["error"] = "; ".join(p["errors"])[:2000]
             err = (err + "\n" if err else "") + meta["error"]
@@ -1235,6 +1237,7 @@ def _parse_opencode(text: str) -> Dict[str, Any]:
     order: List[str] = []
     usage: Dict[str, Any] = {}
     cost, steps, errors = 0.0, 0, []
+    tools_completed = 0
     for ev in events:
         sid = ev.get("sessionID") or sid
         part = ev.get("part") if isinstance(ev.get("part"), dict) else {}
@@ -1245,6 +1248,10 @@ def _parse_opencode(text: str) -> Dict[str, Any]:
                 texts[mid] = []
                 order.append(mid)
             texts[mid].append(str(part["text"]))
+        elif kind == "tool_use":
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            if state.get("status") == "completed":
+                tools_completed += 1
         elif kind == "step_finish":
             steps += 1
             c = part.get("cost")
@@ -1263,7 +1270,8 @@ def _parse_opencode(text: str) -> Dict[str, Any]:
             errors.append(str(msg or "unknown error"))
     reply = "\n\n".join(t.strip() for t in texts[order[-1]] if t.strip()) if order else ""
     return {"reply": reply, "session_id": sid, "usage": usage if any(usage.values()) else {},
-            "cost": round(cost, 6), "steps": steps, "errors": errors, "parsed": len(events)}
+            "cost": round(cost, 6), "steps": steps, "tools_completed": tools_completed,
+            "errors": errors, "parsed": len(events)}
 
 
 OPENCODE_TOKEN_KEYS = {"input": "input_tokens", "output": "output_tokens", "reasoning": "reasoning_tokens",
