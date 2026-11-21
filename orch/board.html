@@ -177,6 +177,10 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
 .tlbar{display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .tlbar input[type=search]{flex:1 1 220px;min-width:0;font:inherit;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:6px 10px}
 .tlbar label{font-size:12px;color:var(--ink2);display:flex;gap:5px;align-items:center;white-space:nowrap}
+.milestone-head{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;margin-bottom:10px}
+.milestone-head h2,.milestone-head .tlbar{margin:0}
+.milestone-panel{border-top:1px solid var(--grid);margin-top:10px;padding-top:10px}
+.milestone-panel h3{font-size:12.5px;color:var(--ink2);margin:0 0 6px}
 #sres:empty{display:none}#sres{margin-bottom:12px;border:1px solid var(--s1);border-radius:10px;padding:6px 8px;background:var(--surface)}
 .shead{font-size:12px;color:var(--ink2);display:flex;gap:8px;align-items:center;margin:2px 4px 6px}
 .snip{font-size:12px;color:var(--mute);margin:0 0 4px 20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -236,9 +240,8 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <span id="status"></span>
   <span class="mute mono" id="runid"></span>
   <span style="flex:1"></span>
-  <span class="mute mono" id="ver" style="font-size:12px"></span> <button class="sm" id="verbtn" title="Compare this orch with origin/main (checks only when the run is at a gate, waiting for you, or ended)">Check for update</button> <button class="sm" id="updbtn" hidden title="Take in the new orch and restart this run; it carries on where it stopped. Starts when the run waits for you with nothing running.">Update and restart</button>
+  <span class="mute mono" id="ver" hidden style="font-size:12px"></span> <button class="sm" id="updbtn" hidden title="Take in the new commits from main and restart this run; it carries on where it stopped.">Update and restart</button>
   <select id="mon" style="display:none"></select>
-  <a class="sm btn" id="replink" href="report" target="_blank" title="The run's static report (report.html): every turn's input and output, to keep or share">📄 Report</a>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
   <button class="sm" id="theme" title="Toggle light/dark">◐</button>
   <button class="sm" id="reviewbtn" title="Ask the manager for a review file: a short Markdown review you can comment in and send back">📝 Review file</button>
@@ -250,7 +253,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <main>
    <div id="needs"></div>
    <div class="card" id="now-card"><h2>Working now</h2><div class="nowl" id="now"></div><div class="stats" id="stats"></div></div>
-   <div class="card" id="tl-card"><h2>Milestones</h2><div class="steps" id="steps"></div><div id="msinfo"></div>
+   <div class="card" id="tl-card"><div class="milestone-head"><h2>Milestones</h2><div class="tlbar" id="msfilter" role="group" aria-label="Milestone details"></div></div><div class="steps" id="steps"></div><div id="msinfo"></div>
     <div class="tlbar" style="margin:10px 0 0"><input type="search" id="q" placeholder="Search all messages…" aria-label="Search all messages">
      <label title="Progress checks, jobs, reminders sent, retries, model switches, session resets and warnings"><input type="checkbox" id="other"> checks, jobs &amp; system lines</label></div>
     <div class="tlbar" id="bfilter" style="margin:6px 0 0" title="Which conversations to show below"></div>
@@ -279,7 +282,6 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
 const MONS = __MONITORS__;
 const qsM = new URLSearchParams(location.search).get('m');
 let M = MONS.includes(qsM) ? qsM : MONS[0];
-document.getElementById('replink').href = 'report?m=' + encodeURIComponent(M);
 let D = null;
 const chatOlder = new Map(), chatMoreFlag = new Map(); let chatFirstId = '';  // older chat messages fetched on request
 const live = {};
@@ -348,7 +350,7 @@ function table(rows){
   return '<div class="tw"><table><tr>' + head.map(c=>'<th>'+inline(c)+'</th>').join('') + '</tr>' +
     body.map(r => '<tr>' + r.map(c => `<td${num(c)?' class="num"':''}>${inline(c)}</td>`).join('') + '</tr>').join('') + '</table></div>';
 }
-const STATUS = {running:['p-run','● running'], awaiting_approval:['p-you','⏸ waiting for you'], waiting_job:['p-run','⏳ waiting for a job'], completed:['p-good','✓ completed'],
+const STATUS = {running:['p-run','● running'], response_sent:['p-run','✓ response sent'], awaiting_approval:['p-you','⏸ waiting for you'], waiting_job:['p-run','⏳ waiting for a job'], completed:['p-good','✓ completed'],
   failed:['p-crit','✕ failed'], stopped:['p-warn','■ stopped'], max_rounds_reached:['p-warn','! round limit'], needs_human:['p-you','? needs you'], starting:['p-run','starting']};
 const pill = (cls, txt) => `<span class="pill ${cls}">${esc(txt)}</span>`;
 const stPill = s => { const x = STATUS[s] || ['', s || '…']; return pill(x[0], x[1]); };
@@ -361,6 +363,21 @@ const byName = n => (D.agents||[]).find(a => a.name === n);
 const called = n => n === 'human' ? 'you' : ((byName(n)||{}).called || n);
 const tm = s => s ? String(s).slice(11,16) : '';
 function setHTML(el, html){ if (el._h !== html){ el._h = html; el.innerHTML = html; } }
+
+// An accepted gate response is no longer an action for the user, even while the run is processing it.
+// Keep the receipt across refreshes, scoped to this monitor, run and gate; a new gate needs a new response.
+const gateReceiptKey = 'orch:submitted-gate:' + M;
+let gateReceipt = null;
+try { gateReceipt = JSON.parse(sessionStorage.getItem(gateReceiptKey)); } catch(e){}
+function pendingGate(){
+  const g = (D.managed||{}).gate;
+  return g && gateReceipt && gateReceipt.run === D.run_id && gateReceipt.key === g.key ? gateReceipt : null;
+}
+function gateSubmitted(body){
+  gateReceipt = {run: D.run_id, key: body.gate, decision: body.decision};
+  try { sessionStorage.setItem(gateReceiptKey, JSON.stringify(gateReceipt)); } catch(e){}
+  render();
+}
 
 // The poll asks only for what changed since the payload it holds (SNAP, version VER) and rebuilds the rest;
 // D is a fresh copy for render, so SNAP stays exactly what the server sent. One poll at a time.
@@ -412,8 +429,9 @@ function paintLive(t){ if (raf[t]) return; raf[t] = requestAnimationFrame(() => 
 function render(){
   if (!D || !D.run_id){ $('title').textContent = 'Orch board · ' + M; setHTML($('status'), stPill('starting')); return; }
   const mg = D.managed || {};
-  $('title').textContent = D.monitor; setHTML($('status'), stPill(D.status)); $('runid').textContent = D.run_id;
-  document.title = (D.status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
+  const status = D.status === 'awaiting_approval' && pendingGate() ? 'response_sent' : D.status;
+  $('title').textContent = D.monitor; setHTML($('status'), stPill(status)); $('runid').textContent = D.run_id;
+  document.title = (status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderNow(mg); renderTimeline(); renderQs(); renderReviews(mg); renderDecisions(); renderAudit(); renderChat();
   Object.keys(live).forEach(paintLive);
   versionAtStop();
@@ -456,6 +474,7 @@ function renderNow(mg){  // the switches, and the status area: only the agents w
     lines.push(`<div class="bad">⏳ <b>${esc(called(n))}</b>: ${what}</div>`); });
   Object.keys(D.terminal||{}).forEach(n => lines.push(`<div class="mute" title="orch holds this agent's turns and routes the messages it writes there">⌨ ${esc(called(n))} is open in a terminal</div>`));
   if (D.stop_reason && D.status === 'stopped') lines.push(`<div class="bad">⛔ ${esc(D.stop_reason)}</div>`);
+  if (pendingGate()) lines.push(`<div class="mute">✓ Response sent. ${pendingGate().decision === 'revise' ? 'Waiting for the manager.' : 'Waiting for the run to continue.'}</div>`);
   if (!lines.length) lines.push(`<div class="mute">${mg.held ? (String(mg.held.why).startsWith('question') ? '⏸ Nobody is working: the work waits for your answer to ' + esc(String(mg.held.why).slice(9)) : '⏸ Nobody is working: the manager\'s next step waits for the discussion to close')
     : D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? '⏸ Paused until your task is done' : '⏸ Nobody is working: waiting for your OK')
     : D.status === 'waiting_job' ? '⏳ Waiting for the worker\'s job to finish' : 'Nobody is working right now (' + esc(D.status||'') + ')'}</div>`);
@@ -475,7 +494,7 @@ function fullC(c){ const m = c.len > (c.text||'').length && msgCache.get('c:' + 
 const clipNote = c => c.len > (c.text||'').length ? `<button class="more" data-chatfull="${esc(c.id)}">Show the whole message (${Math.round(c.len/1000)}k characters)</button>` : '';
 function renderNeeds(mg){
   const QA = D.queued_answers || {};
-  const g = mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !QA[q.id] && !qThread(q.id).some(c => c.settle && c.status === 'running'));  // settled ones leave; so does one the manager is writing up
+  const g = pendingGate() ? null : mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !QA[q.id] && !qThread(q.id).some(c => c.settle && c.status === 'running'));  // settled ones leave; so does one the manager is writing up
   const threads = Object.fromEntries(mine.map(q => [q.id, qThread(q.id)]));
   const revs = (D.review_files||[]).filter(r => r.status === 'written' && r.exists);  // B9: a review file to comment in
   const job = mg.job, sig = JSON.stringify([job && job.since, g && g.key, discussWanted(), !!(mg.discussion_batch||{}).gate, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status)), revs.map(r => r.path)]);
@@ -587,16 +606,30 @@ async function post(url, body, b){
   const done = () => { if (!key) return; busyKeys.delete(key);
     document.querySelectorAll('button.loading').forEach(x => { if (btnKey(x) === key){ x.classList.remove('loading'); if (x === b) x.disabled = was; } }); };
   try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json();
-    done(); if (j.error) alert(j.error);
+    done(); if (!r.ok || j.error) alert(j.error || 'The request was not accepted.');
+    else if (url === 'api/gate') gateSubmitted(body);
     if (key) await load(); else soon(); return j; }  // the refresh then sets each button as the new state has it
   catch(e){ done(); alert('Could not reach the board server.'); } }
 
 // the update check: the commit this orch runs from, and whether main has a newer one (orch/update.py)
-// checked by hand, and by itself each time the run stops to wait for me; updating needs the Update button
-let verLatest = '', verStop = '', verBusy = false, verTimer = 0;
+// Check quietly at safe points; show an action only for a newer main that can be applied.
+let verLatest = '', verStop = '', verBusy = false, verTimer = 0, verOffer = false, verSeq = 0;
+function updateSafe(){
+  return D && ['awaiting_approval', 'waiting_job', 'done', 'stopped', 'error', 'interrupted', 'paused',
+    'completed', 'failed', 'max_rounds_reached', 'needs_human'].includes(D.status)
+    && !(D.running||[]).length && !D.auditing && !(D.chat||[]).some(c => c.status === 'running') && !pendingGate();
+}
+function paintUpdateControls(){
+  const safe = updateSafe();
+  $('updbtn').hidden = !(safe && verOffer && !verBusy);
+  $('ver').hidden = !(safe && (verOffer || verBusy));
+}
 async function checkVersion(){
-  const v = $('ver'), u = $('updbtn'); v.textContent = 'checking…';
+  if (!updateSafe()){ paintUpdateControls(); return; }
+  const v = $('ver'), seq = ++verSeq;
+  clearTimeout(verTimer);
   try { const j = await (await fetch('api/version?m=' + encodeURIComponent(M), {cache:'no-store'})).json();
+    if (seq !== verSeq) return;
     const p = j.progress || {}, busy = p.state === 'requested' || p.state === 'waiting' || p.state === 'restarting';
     verLatest = j.latest || '';
     const n = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
@@ -609,20 +642,22 @@ async function checkVersion(){
     else if (busy) t += ' · ' + (p.message || 'update requested').replace(/^⬆ /, '');
     else if (p.state === 'failed' && p.error) t += ' · last update failed: ' + p.error;
     v.textContent = t;
-    u.hidden = !(j.checked && j.update) || busy;
+    verOffer = !!(j.checked && j.update && j.behind > 0 && !j.ahead && j.branch === 'main' && !j.dirty);
     verBusy = busy && !(p.state === 'restarting' && j.current === p.new);
-  } catch(e){ v.textContent = verBusy ? 'restarting…' : 'Could not reach the board server.'; u.hidden = true; }
-  clearTimeout(verTimer); if (verBusy) verTimer = setTimeout(checkVersion, 5000); }  // follow the update through the restart
-$('verbtn').addEventListener('click', checkVersion);
+  } catch(e){ if (seq !== verSeq) return; verOffer = false; v.textContent = verBusy ? 'restarting…' : ''; }
+  paintUpdateControls();
+  if (verBusy && updateSafe()) verTimer = setTimeout(checkVersion, 5000); }  // follow the update through the restart
 $('updbtn').addEventListener('click', async () => {
+  if (!updateSafe() || !verOffer || verBusy) return;
   if (!confirm(`Update orch to ${verLatest || 'the newest version on main'} and restart this run? It carries on where it stopped; the board reconnects by itself.`)) return;
   $('updbtn').hidden = true;
   await post('api/update', {});
   checkVersion(); });
-function versionAtStop(){  // once per stop (a gate, a job, the end), like the button would
-  const g = ((D.managed || {}).gate || {}).key || '', stop = ['awaiting_approval', 'waiting_job', 'done', 'stopped'].includes(D.status) ? D.status + '|' + g : '';
-  if (stop && stop !== verStop) checkVersion();
-  verStop = stop; }
+function versionAtStop(){  // once per quiet stop; invalidate an old offer as soon as work resumes
+  const g = ((D.managed || {}).gate || {}).key || '', stop = updateSafe() ? D.run_id + '|' + D.status + '|' + g : '';
+  if (!stop && verStop){ ++verSeq; verOffer = false; clearTimeout(verTimer); }
+  if (stop && stop !== verStop){ verOffer = false; checkVersion(); }
+  verStop = stop; paintUpdateControls(); }
 const MS_ST = {done:['p-good','✓ done'], active:['p-run','● in progress'], awaiting_ok:['p-you','⏸ waiting for you'], pending:['','not started'], open:['p-warn','↺ open again']};
 
 function scoreLine(r){  // the manager's review as one line: overall, then each criterion's score (names are in the rubric fold)
@@ -653,8 +688,8 @@ function checklistHTML(ms){
   if (done.length) h += `<details class="tbl"><summary>Done (${done.length})</summary><ul class="ck">${done.map(li).join('')}</ul></details>`;
   return h;
 }
-const MS_FOLDS = [['checklist', 'Checklist'], ['report', 'Report'], ['scores', 'Scores']];
-function msFoldHTML(ms, fold){  // the body of one of a milestone's three folds
+const MS_PANELS = [['checklist', 'Checklist'], ['report', 'Report'], ['scores', 'Scores']];
+function msPanelHTML(ms, fold){  // the body of a selected milestone detail panel
   const m = ((D.managed||{}).milestones||[])[ms]; if (!m) return '';
   if (fold === 'checklist') return checklistHTML(ms);
   if (fold === 'report'){
@@ -713,10 +748,11 @@ const BLOCKS = [['user', () => 'You ↔ ' + who('manager')], ['mc', () => who('m
 const OTHER = new Set(['system', 'warning', 'job', 'reminder', 'check']);  // small tagged lines; the filter hides them
 const groupCache = new Map(), groupPending = new Set();  // group key -> {n, items, more}
 const msgCache = new Map(), msgPending = new Set();       // item id -> its full text (api/message)
-const openItems = new Set(), openG = new Set(), shutG = new Set(), openInfo = new Set();  // openG/shutG: "<block>|<step key>"; openInfo: "<milestone>|<fold>"
+const openItems = new Set(), openG = new Set(), shutG = new Set(), openInfo = new Set();  // openG/shutG: "<block>|<step key>"; openInfo: "<milestone>|<panel>"
 let showOther = true; try { showOther = localStorage.getItem('orch-other') !== '0'; } catch(e){}
 // which conversation cards are hidden (filter) or folded; how many lines each step of a card shows (newest first)
 const PAGE = 10, shown = new Map();  // "<block>|<step key>" -> lines shown
+const STEP_PAGE = 5, shownSteps = new Map();  // "<block>|<milestone>" -> steps shown
 let hiddenB = new Set(), shutCard = new Set(), wantItem = null;
 try { hiddenB = new Set(JSON.parse(localStorage.getItem('orch-hidden-blocks') || '[]')); shutCard = new Set(JSON.parse(localStorage.getItem('orch-shut-cards') || '[]')); } catch(e){}
 const saveB = () => { try { localStorage.setItem('orch-hidden-blocks', JSON.stringify([...hiddenB])); localStorage.setItem('orch-shut-cards', JSON.stringify([...shutCard])); } catch(e){} };
@@ -746,7 +782,8 @@ async function loadMsg(id){
 const ST_LABEL = {delivered:'✓ delivered', sent:'→ sent', held:'⏸ held', superseded:'↷ superseded', dropped:'⊘ dropped', running:'● running', open:'? open',
   answered:'✓ answered', passed_up:'↑ passed up', night:'🌙 decided', failed:'⚠ not delivered', unseen:'? unseen', unknown:'⚠ unconfirmed', error:'✕ error', timeout:'✕ timeout'};
 function itemBody(it){
-  if (it.status === 'running' && it.tid) return `<div data-live="${esc(it.tid)}"></div>`;
+  if (it.status === 'running' && it.tid) return promptPanel({turn_id: it.tid}, 'Input to this turn' + (it.in_len != null ? ` · ${it.in_len.toLocaleString()} chars` : ''))
+    + `<div data-live="${esc(it.tid)}"></div>`;
   const m = msgCache.get(it.id);
   if (!m){ loadMsg(it.id); return '<div class="mute">Loading…</div>'; }
   if (m.error) return `<div class="mute">${esc(m.error)}</div>`;
@@ -819,14 +856,21 @@ function cardHTML(b, title, gsel){
   const has = gsel.filter(g => cnt(g) > 0);
   if (!has.length) return '';
   const n = has.reduce((a, g) => a + g.blocks[b][0], 0), open = !shutCard.has(b);
+  const stepKey = b + '|' + has[0].ms;
+  let limit = shownSteps.get(stepKey) || STEP_PAGE;
+  const target = wantItem && findItem(wantItem);
+  const at = target && target.block === b ? has.findIndex(g => g.ms === target.ms && g.step === target.step) : -1;
+  if (at >= limit){ limit = Math.ceil((at + 1) / STEP_PAGE) * STEP_PAGE; shownSteps.set(stepKey, limit); }
   let body = '';
   if (open && has.length === 1 && !has[0].step) body = stepItems(b, has[0]);
-  else if (open) body = has.map((g, i) => {
+  else if (open) body = has.slice(0, limit).map((g, i) => {
     const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
     return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : 'Before the steps'}</b><span class="lab">${esc(g.label || '')}</span>`
       + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
       + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
   }).join('');
+  const left = has.length - limit;
+  if (open && left > 0) body += `<div class="bmore"><button class="sm" data-stepsmore="${esc(stepKey)}">See more</button><span>${left} older step${left === 1 ? '' : 's'}</span></div>`;
   return `<details class="card bcard b-${b}" data-card="${b}"${open ? ' open' : ''}><summary><h2>${esc(title())}<span class="mute" style="font-weight:400">${n}</span></h2></summary>${body}</details>`;
 }
 function renderFilter(){
@@ -847,8 +891,9 @@ function renderSteps(ms){
       + `<div class="t">${esc(k < 0 ? 'The plan' : (m ? m.title : ''))}</div>${st ? pill(st[0], st[1]) : ''}${m && m.score != null ? ` <span class="ink2" style="font-size:12px">${m.score}/5</span>` : ''}`
       + `<div class="cnt">${n} message${n === 1 ? '' : 's'}${x ? ` · <b style="color:var(--you)">${x} for you</b>` : ''}</div></div>`;
   }).join(''));
-  setHTML($('msinfo'), mss[ms] ? MS_FOLDS.map(([f, label]) => { const key = ms + '|' + f, open = openInfo.has(key);
-    return `<details class="msinfo" data-info="${key}"${open ? ' open' : ''} style="border-top:0;padding:0;margin-top:8px"><summary>${label}</summary>${open ? `<div class="mi">${msFoldHTML(ms, f)}</div>` : ''}</details>`; }).join('') : '');
+  setHTML($('msfilter'), MS_PANELS.map(([f, label]) => `<label><input type="checkbox" data-info="${ms}|${f}" aria-controls="ms-panel-${f}"${mss[ms] && openInfo.has(ms + '|' + f) ? ' checked' : ''}${mss[ms] ? '' : ' disabled'}> ${label}</label>`).join(''));
+  setHTML($('msinfo'), mss[ms] ? MS_PANELS.filter(([f]) => openInfo.has(ms + '|' + f)).map(([f, label]) =>
+    `<section class="milestone-panel" id="ms-panel-${f}" aria-label="${label}"><h3>${label}</h3>${msPanelHTML(ms, f)}</section>`).join('') : '');
 }
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
@@ -861,6 +906,8 @@ function renderTimeline(){
 }
 $('steps').addEventListener('click', e => { const t = e.target.closest('[data-selms]'); if (!t) return;
   const k = +t.dataset.selms; selMs = k === curMs() ? null : k; renderTimeline(); });
+$('msfilter').addEventListener('change', e => { const key = e.target.dataset.info; if (!key) return;
+  e.target.checked ? openInfo.add(key) : openInfo.delete(key); renderSteps(shownMs()); });
 document.addEventListener('toggle', e => {  // remember what is open; fetch what an opened fold needs
   const d = e.target; if (!d.dataset) return;
   if (d.dataset.id){ const id = d.dataset.id;
@@ -875,7 +922,6 @@ document.addEventListener('toggle', e => {  // remember what is open; fetch what
     if (d.open !== has) renderTimeline(); return; }
   if (d.dataset.card !== undefined){ const b = d.dataset.card, has = !!d.querySelector(':scope>details,:scope>details.ln,:scope>.lmore,:scope>.bmore');
     if (d.open) shutCard.delete(b); else shutCard.add(b); saveB(); if (d.open !== has) renderTimeline(); return; }
-  if (d.dataset.info !== undefined){ const k = d.dataset.info; if (d.open !== openInfo.has(k)){ d.open ? openInfo.add(k) : openInfo.delete(k); renderTimeline(); } }
 }, true);
 function findItem(id){
   for (const it of D.tl_items || []) if (it.id === id) return it;
@@ -886,6 +932,7 @@ function findItem(id){
 $('other').addEventListener('change', e => { showOther = e.target.checked; try { localStorage.setItem('orch-other', showOther ? '1' : '0'); } catch(err){}
   renderTimeline(); $('sres').classList.toggle('hide-other', !showOther); });
 $('timeline').addEventListener('click', e => {
+  const s = e.target.closest('[data-stepsmore]'); if (s){ const k = s.dataset.stepsmore; shownSteps.set(k, (shownSteps.get(k) || STEP_PAGE) + STEP_PAGE); renderTimeline(); return; }
   const m = e.target.closest('[data-pmore]'); if (m){ const k = m.dataset.pmore; shown.set(k, (shown.get(k) || PAGE) + PAGE); renderTimeline(); return; }
   const a = e.target.closest('[data-pall]'); if (a){ shown.set(a.dataset.pall, 1e9); renderTimeline(); return; }
   const b = e.target.closest('[data-gall]'); if (b){ b.disabled = true; loadGroup(b.dataset.gall, true); } });

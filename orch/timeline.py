@@ -336,21 +336,49 @@ class Builder:
                      block=blk, needs=bool(k == "gate" and gate and n == last_gate))
 
 
-def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -> Dict[int, List[str]]:
+def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
+           recovered: Optional[List[Dict[str, Any]]] = None) -> Dict[int, List[str]]:
     """Each item's milestone (`ms`, -1 before the milestones) and step (`step`: 1.. by the critic's plan, total+1 after
     its last step, 0 for a milestone without a plan), by time. Returns {milestone: step labels}."""
     seq = sorted(((t.get("started_at") or "", t.get("milestone")) for t in turns if t.get("started_at")),
                  key=lambda x: x[0])
     keys = [x[0] for x in seq]
-    plans: Dict[int, List[Tuple[str, int, int]]] = {}
+    plans: Dict[int, List[Tuple[str, int, int]]] = {}  # timestamp, priority, next step
     labels: Dict[int, List[str]] = {}
+    by_id = {t["turn_id"]: t for t in turns}
+    explicit: Dict[str, int] = {}
+    workers: Dict[Tuple[Any, Any, Any], int] = {}
+    for t in turns:
+        step = t.get("par_step")
+        if type(step) is int and step > 0:
+            explicit[t["turn_id"]] = step
+            workers[(t.get("milestone"), t.get("round"), t.get("agent"))] = step
+    for t in turns:
+        if t.get("purpose") == "par_review" and t.get("par_worker"):
+            step = workers.get((t.get("milestone"), t.get("round"), t["par_worker"]))
+            if step is not None:
+                explicit.setdefault(t["turn_id"], step)
     for t in turns:
         if t.get("plan") and t.get("milestone") is not None and t.get("status") != "running":
+            done, total = map(int, t["plan"])
             plans.setdefault(t["milestone"], []).append((t.get("ended_at") or t.get("started_at") or "",
-                                                          int(t["plan"][0]), int(t["plan"][1])))
+                                                          0, min(done + 1, total + 1) if total else 0))
             if t.get("plan_text"):
                 from .report import checklist_items
                 labels[t["milestone"]] = [s for _, s in checklist_items(t["plan_text"])]
+    # Reviewed historical corrections supply transitions lost from old checklist snapshots. They affect only
+    # this read-only projection, never the run's messages, checklist or scheduler. Later snapshots take over.
+    for entry in recovered or []:
+        if not isinstance(entry, dict):
+            continue
+        turn = entry.get("turn")
+        t = by_id.get(turn) if isinstance(turn, str) else None
+        step, when = entry.get("step"), entry.get("when", "after")
+        if not t or t.get("milestone") is None or type(step) is not int or step < 1 or when not in ("start", "after"):
+            continue
+        ts = t.get("started_at" if when == "start" else "ended_at")
+        if ts:
+            plans.setdefault(t["milestone"], []).append((ts, 1, step))
     for ps in plans.values():
         ps.sort()
     last_ms = seq[-1][1] if seq and seq[-1][1] is not None else -1
@@ -364,6 +392,9 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -> Dict[int
         else:
             ms = last_ms
         it["ms"] = ms
+        if it.get("tid") in explicit:
+            it["step"] = explicit[it["tid"]]
+            continue
         ps = plans.get(ms)
         if not ps:
             it["step"] = 0
@@ -376,8 +407,7 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]]) -> Dict[int
                 break
         if not ts:
             prev = ps[-1]
-        done, total = (prev[1], prev[2]) if prev else (0, ps[0][2])
-        it["step"] = min(done + 1, total + 1) if total else 0
+        it["step"] = prev[2] if prev else 1
     return labels
 
 

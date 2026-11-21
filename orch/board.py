@@ -8,7 +8,7 @@ answers and approvals become ``inbox/*.json`` control files, the live view tails
 chat with the manager resumes the manager's own session (under the same per-agent lock the run uses), with
 the exchange kept in ``chat.jsonl``.
 
-Endpoints: GET / · GET /report (the run's static report) · GET /log/<path> (files below the output folder) ·
+Endpoints: GET / · GET /log/<path> (individual files below the output folder; no report or log browsing pages) ·
 GET /api/state · /api/items?g= · /api/message?id= · /api/search?q= · /api/turn?id= · /api/chat · /api/audit ·
 GET /api/events (SSE) · POST /api/chat · /api/answer · /api/gate · /api/note · /api/night · /api/discussion ·
 /api/review · /api/review_comments · /api/job · /api/milestone · /api/stop
@@ -33,14 +33,13 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import reminders as REM
 from . import routing as RT
 from .backends import TurnRequest, run_variants
 from .config import MonitorConfig
 from .recorder import agent_lock, live_event, now_iso, read_json
-from . import report as R
 from . import tags as T
 from . import timeline as TL
 from .report import checklist_items, review_checklist, turn_costs
@@ -323,7 +322,13 @@ class Board:
             stt = p.stat()
         except OSError:
             return None
-        key = (stt.st_mtime_ns, stt.st_size)
+        round_path = p.parent / "round.json"
+        try:
+            rst = round_path.stat()
+            round_key = (rst.st_mtime_ns, rst.st_size)
+        except OSError:
+            round_key = None
+        key = (stt.st_mtime_ns, stt.st_size, round_key)
         hit = self._rows.get(p)
         if hit and hit[0] == key:
             return hit[1]
@@ -365,6 +370,16 @@ class Board:
                 m = [v] if v in ("PASS", "FAIL") else re.findall(r"VERDICT:\s*\**\s*(PASS|FAIL)", out, re.I)
                 if m:
                     row["verdict"] = m[-1].upper()
+                if t.get("status") == "ok" and t.get("purpose") in ("verify", "par_review", "verdict"):
+                    # The scheduler can derive or overrule the reply's verdict from the checklist. Its saved
+                    # round result is authoritative, including old reviews with no verdict tag at all.
+                    summary = read_json(round_path, {}) or {}
+                    verdict = (summary.get("verdicts") or {}).get(t.get("agent"))
+                    if t["turn_id"] in (summary.get("turns") or []) and verdict in ("PASS", "FAIL"):
+                        row["verdict"] = verdict
+                    elif t.get("purpose") == "verify" and snap and items:
+                        if row.get("verdict") != "FAIL":
+                            row["verdict"] = "PASS" if all(d for d, _ in items + steps) else "FAIL"
             from . import tags as T
             seen = {"input": _flat(t.get("input") or ""),
                     "cut_in": [(x.get("at") or "", _flat(x.get("message") or "")) for x in t.get("interruptions") or []
@@ -404,7 +419,9 @@ class Board:
                 self._tl = (time.time(), rd, d, [], [], "")
                 return d, [], [], ""
             items = TL.Builder(rd, d, d.get("_chat_all") or [], TL.read_events(rd / "events.jsonl", self._events)).build()
-            labels = TL.assign(items, d.get("turns") or [])
+            recovery = read_json(rd / "timeline-steps.json", {}) or {}
+            recovered = recovery.get("transitions") if isinstance(recovery, dict) and recovery.get("run_id") == d["run_id"] else None
+            labels = TL.assign(items, d.get("turns") or [], recovered if isinstance(recovered, list) else None)
             items = TL.order(items)
             gs, cur = TL.groups(items, labels)
             self._tl = (time.time(), rd, d, items, gs, cur)
@@ -1272,11 +1289,6 @@ def _handler(boards: Dict[str, Board]):
                 self.js(self.board(q).message((q.get("id") or [""])[0]))
             elif u.path == "/api/search":
                 self.js(self.board(q).search((q.get("q") or [""])[0]))
-            elif u.path == "/report":
-                rd = self.board(q).run_dir
-                if rd is None or not (rd / "state.json").is_file():
-                    return self.send(404, b"no run yet", "text/plain")
-                self.send(200, R.render_run_report(rd).encode("utf-8"), "text/html; charset=utf-8")
             elif u.path == "/api/chat":
                 self.js(self.board(q).chat_before((q.get("with") or [""])[0], (q.get("before") or [""])[0]))
             elif u.path == "/api/turn":
@@ -1286,23 +1298,14 @@ def _handler(boards: Dict[str, Board]):
             elif u.path == "/api/events":
                 self.events(self.board(q))
             elif u.path == "/log" or u.path.startswith("/log/"):
-                self.log_file(u.path[len("/log"):].lstrip("/"), q)
+                self.log_file(u.path[len("/log"):].lstrip("/"))
             else:
                 self.send(404, b"not found", "text/plain")
 
-        def redirect(self, to: str) -> None:
-            self.send_response(302)
-            self.send_header("Location", to)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-
-        def log_file(self, rel: str, q: Dict[str, List[str]]) -> None:
-            """Files below the output folder by their path there, read-only (review files, a run's records).
-            B9b: the log pages are gone, every message is on the dashboard: /log/, /log/index.html and /log/run lead
-            back to it; a run's report.html is rendered fresh (the static report, as /report gives it)."""
+        def log_file(self, rel: str) -> None:
+            """Direct read-only file links used by the dashboard, without report or log browsing pages."""
             if rel in ("", "index.html", "run"):
-                m = (q.get("m") or [""])[0]
-                return self.redirect(("../" if self.path.startswith("/log/") else "./") + (f"?m={quote(m)}" if m else ""))
+                return self.send(404, b"not found", "text/plain")
             roots = []
             for b in boards.values():
                 rd = b.run_dir
@@ -1315,7 +1318,7 @@ def _handler(boards: Dict[str, Board]):
                 if not (f == root or root in f.parents):
                     continue  # nothing outside the output folder
                 if f.name == "report.html" and (f.parent / "state.json").is_file():
-                    return self.send(200, R.render_run_report(f.parent).encode("utf-8"), "text/html; charset=utf-8")
+                    return self.send(404, b"not found", "text/plain")
                 if f.is_file():
                     ctype = mimetypes.guess_type(f.name)[0] or "text/plain"
                     if f.suffix in (".md", ".jsonl", ".log", ".txt", ".yaml", ".yml", ".tex", ".csv", ".py") or ctype.startswith("text/"):

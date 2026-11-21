@@ -686,20 +686,15 @@ class TestManaged(unittest.TestCase):
         try:
             page = urllib.request.urlopen(url).read().decode()
             self.assertIn("Talk to the manager", page)
-            # B9b: the log page is gone; its old address leads back to the dashboard, and relative URLs stay
-            # under a reverse proxy's external prefix.
-            from urllib.parse import urljoin
+            # Report and log browsing routes are disabled; the dashboard still serves messages and chat.
             import http.client
             conn = http.client.HTTPConnection("127.0.0.1", 8890)
-            conn.request("GET", "/log/run?m=m")
-            response = conn.getresponse()
-            self.assertEqual(response.status, 302)
-            location = response.getheader("Location")
-            self.assertEqual(urljoin("https://example.test/proxy/8765/log/run?m=m", location),
-                             "https://example.test/proxy/8765/?m=m")
-            response.read()
+            for path in ("/log/run?m=m", "/report?m=m"):
+                conn.request("GET", path)
+                response = conn.getresponse()
+                self.assertEqual(response.status, 404)
+                response.read()
             conn.close()
-            self.assertIn("<details", urllib.request.urlopen(url + "report?m=m").read().decode())  # the static report
             st = json.loads(urllib.request.urlopen(url + "api/state").read())
             self.assertEqual(st["run_id"], rec.run_dir.name)
             req = urllib.request.Request(url + "api/chat", data=json.dumps({"message": "How is it going?"}).encode(),

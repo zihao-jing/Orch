@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from orch import report as R  # noqa: E402
 from orch.board import Board, serve  # noqa: E402
-from orch.timeline import ITEMS_MAX, block_of, line_of  # noqa: E402
+from orch.timeline import ITEMS_MAX, assign, block_of, line_of  # noqa: E402
 
 AGENTS = [{"name": "boss", "role": "manager", "display_name": "Alex"},
           {"name": "critic", "role": "verifier", "display_name": "Jordan"},
@@ -100,6 +100,85 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(block_of("human", "verifier"), "mc")  # I talk to the critic as its usual user
         self.assertEqual(line_of("Here is the plan:\n\n**Step one** is `x`\n<message to=\"w\">later</message>"), "Step one is x")
 
+    def test_recovered_transitions_fill_missing_snapshots_without_rewriting_turns(self):
+        rd = make_run(self.tmp, milestones=1, rounds=3)
+        reviews = sorted(rd.glob("rounds/r*/t*-critic.json"))
+        review = reviews[1]  # finishes step 1, but its historical snapshot was lost
+        t = json.loads(review.read_text())
+        t["checklist_file"] = {"plan": "", "checklist": ""}
+        review.write_text(json.dumps(t))
+        before = review.read_bytes()
+        recovery = {"run_id": rd.name, "transitions": [{"turn": t["turn_id"], "step": 2, "when": "after"}]}
+        (rd / "timeline-steps.json").write_text(json.dumps(recovery))
+        b = Board("m", lambda: rd)
+        self.assertTrue(any(it.get("purpose") == "work" and "NEEDLE-0-1" in it["line"]
+                            for it in b.items("0|2")["items"]))
+        # The later valid snapshot still takes over: the third work turn is after the last step.
+        self.assertTrue(any("NEEDLE-0-2" in it["line"] for it in b.items("0|3")["items"]))
+        self.assertEqual(review.read_bytes(), before)
+        recovery["run_id"] = "another-run"
+        (rd / "timeline-steps.json").write_text(json.dumps(recovery))
+        b = Board("m", lambda: rd)
+        self.assertTrue(any("NEEDLE-0-1" in it["line"] for it in b.items("0|1")["items"]))
+
+    def test_parallel_work_and_reviews_follow_their_own_assignment(self):
+        turns = [
+            {"turn_id": "plan", "milestone": 0, "started_at": ts(0), "ended_at": ts(1), "plan": [1, 19]},
+            {"turn_id": "a", "agent": "worker-a", "milestone": 0, "round": 3, "started_at": ts(2), "par_step": 12},
+            {"turn_id": "b", "agent": "worker-b", "milestone": 0, "round": 4, "started_at": ts(3), "par_step": 9},
+            {"turn_id": "rb", "milestone": 0, "round": 4, "started_at": ts(4), "purpose": "par_review", "par_worker": "worker-b"},
+            {"turn_id": "ra", "milestone": 0, "round": 3, "started_at": ts(5), "purpose": "par_review", "par_worker": "worker-a"},
+        ]
+        items = [{"tid": t["turn_id"], "ts": t["started_at"], "ms": 0, "_turn": True} for t in turns[1:]]
+        assign(items, turns)
+        self.assertEqual([it["step"] for it in items], [12, 9, 9, 12])
+
+    def test_recovery_is_scoped_to_its_turn_milestone(self):
+        turns = [{"turn_id": "old", "milestone": 0, "started_at": ts(0), "ended_at": ts(1)},
+                 {"turn_id": "new", "milestone": 1, "started_at": ts(2), "ended_at": ts(3)}]
+        items = [{"ts": ts(1)}, {"ts": ts(4)}]
+        assign(items, turns, [{"turn": "old", "step": 18}, {"turn": "missing", "step": 99},
+                             {"turn": "new", "step": "bad"}])
+        self.assertEqual([it["step"] for it in items], [18, 0])
+
+    def test_critic_label_uses_recorded_verdict_and_updates_when_round_finishes(self):
+        rd = make_run(self.tmp, milestones=1)
+        path = sorted(rd.glob("rounds/r*/t*-critic.json"))[1]
+        t = json.loads(path.read_text())
+        t["output"] = "All done. <verdict>PASS</verdict>"
+        t["checklist_file"] = {"checklist": "- [x] checked", "plan": "- [x] finished"}
+        path.write_text(json.dumps(t))
+        b = Board("m", lambda: rd)
+        self.assertEqual(b._turn_entry(path)[0]["verdict"], "PASS")
+        # The scheduler overrules a claimed PASS. Only round.json changes, so its cache key must count too.
+        summary = {"turns": [t["turn_id"]], "verdicts": {"critic": "FAIL"}}
+        (path.parent / "round.json").write_text(json.dumps(summary))
+        self.assertEqual(b._turn_entry(path)[0]["verdict"], "FAIL")
+        t["output"] = "Please fix the remaining items."  # current protocol has no verdict tag
+        path.write_text(json.dumps(t))
+        self.assertEqual(b._turn_entry(path)[0]["verdict"], "FAIL")
+        summary["turns"] = ["another-turn"]
+        (path.parent / "round.json").write_text(json.dumps(summary))
+        self.assertEqual(b._turn_entry(path)[0]["verdict"], "PASS")
+
+    def test_untagged_checklist_review_labels_open_items_and_open_plan(self):
+        rd = make_run(self.tmp, milestones=1)
+        path = sorted(rd.glob("rounds/r*/t*-critic.json"))[1]
+        t = json.loads(path.read_text())
+        for checklist, plan, status, purpose, verdict in (
+            ("- [ ] fix this", "- [ ] step", "ok", "verify", "FAIL"),
+            ("- [x] checked", "- [ ] next step", "ok", "verify", "FAIL"),
+            ("- [x] checked", "- [x] step", "ok", "verify", "PASS"),
+            ("", "", "ok", "verify", None),
+            ("- [ ] fix this", "- [ ] step", "running", "verify", None),
+            ("- [ ] fix this", "- [ ] step", "ok", "brief", None),
+        ):
+            with self.subTest(checklist=checklist, plan=plan, status=status, purpose=purpose):
+                t.update(output="Review notes", status=status, purpose=purpose,
+                         checklist_file={"checklist": checklist, "plan": plan})
+                path.write_text(json.dumps(t))
+                self.assertEqual(Board("m", lambda: rd)._turn_entry(path)[0].get("verdict"), verdict)
+
     def test_plan_steps_stay_out_of_the_timeline(self):
         rd = make_run(self.tmp)  # the event stays in events.jsonl; the board no longer shows it
         with open(rd / "events.jsonl", "a", encoding="utf-8") as f:
@@ -177,8 +256,10 @@ class TimelineTest(unittest.TestCase):
         self.assertLess(slim, 250_000, slim)  # chat tail in full is the largest part
         self.assertLessEqual(len(b.state()["tl_items"]), ITEMS_MAX)
 
-    def test_http_endpoints_log_page_gone_and_report(self):
+    def test_http_endpoints_disable_report_and_log_pages_but_keep_file_links(self):
         rd = make_run(self.tmp)
+        (rd / "report.html").write_text("<html>Saved report</html>")
+        (rd / "review.md").write_text("Review comments")
         b = Board("m", lambda: rd)
         srv, url = serve({"m": b}, port=8930)
         try:
@@ -191,15 +272,22 @@ class TimelineTest(unittest.TestCase):
             self.assertIn("text", get("api/message?m=m&id=" + urllib.request.quote(first)))
             import http.client
             c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
-            c.request("GET", "/log/")
-            r = c.getresponse()
-            self.assertEqual((r.status, r.getheader("Location")), (302, "../"))
-            r.read()
+            for path in ("/report?m=m", "/log", "/log/", "/log/index.html", "/log/run?m=m",
+                         f"/log/m/{rd.name}/report.html"):
+                c.request("GET", path)
+                r = c.getresponse()
+                self.assertEqual(r.status, 404, path)
+                r.read()
+            c.close()
+            with urllib.request.urlopen(url + f"log/m/{rd.name}/review.md") as r:
+                self.assertEqual(r.read().decode(), "Review comments")
             page = urllib.request.urlopen(url).read().decode()
             self.assertNotIn("📜 Log", page)
+            self.assertNotIn('id="replink"', page)
             self.assertIn('id="timeline"', page)
         finally:
             srv.shutdown()
+            srv.server_close()
 
     def test_report_cuts_long_texts_on_a_large_run(self):
         small = R.render_run_report(make_run(self.tmp / "a"))
