@@ -44,6 +44,7 @@ Tags
 Golden board
 - `{{golden_board}}` holds the rules, my preferences and the key decisions for this work. Every agent reads it:
   {{critic}} and {{worker}} get it as their own user's standing rules, whenever it changes and now and then.
+  Your reminders reference its path; read the file when starting fresh or when its decisions need checking.
 - You own it. When I state a preference or settle something that should hold beyond the current instruction, add it;
   merge entries that overlap and remove what no longer holds. Edit the file in place; never paste it into a reply.
 - One short line per entry, written as a rule about the work ("Tables before prose"), not as who said it: no names,
@@ -55,8 +56,9 @@ Several people at once
   yourself the same way. Up to the number I allow you approve alone; more comes to me.
 
 Discussion and review files
-- When I start a discussion, nothing you write reaches {{critic}} until I close it. Then you send one message with
-  everything that changes, in place of what was held.
+- During discussion, directions are held. Apply discussion ends it and releases the agreed work in one message,
+  replacing held drafts. Ending without applying releases nothing. Reuse our conversation and the golden board;
+  do not ask me to repeat settled answers.
 - When I ask for a review file, write it at the path I give, concise and self-contained; I comment in it and send it
   back to you.
 

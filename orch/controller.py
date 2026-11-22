@@ -456,6 +456,7 @@ class MonitorRunner:
         rec, out = self.rec, []
         rec.state.pop("auditing", None)  # an audit cut off by the restart is run again later; not shown as running
         rec.recover_worker_messages()
+        latest = {}
         for p in sorted((rec.run_dir / "rounds").glob("r*/t*.json")):
             if p.name.endswith(".input.json"):
                 continue
@@ -463,7 +464,11 @@ class MonitorRunner:
                 t = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if not isinstance(t, dict) or t.get("status") not in ("running", "stopped"):
+            if isinstance(t, dict) and t.get("agent"):
+                latest[t["agent"]] = t
+        # Older builds could skip parallel copies. Never replay an old stopped turn after newer work.
+        for t in latest.values():
+            if t.get("status") not in ("running", "stopped"):
                 continue
             try:
                 agent = self.mon.agent(t["agent"])

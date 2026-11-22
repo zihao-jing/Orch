@@ -2,7 +2,7 @@
 
 A check is evidence, never a verdict: what the monitor saw ("item 2: done, results/x.json has 120 rows"; "log quiet
 for 25 min"), ending with `<status>ok|quiet|off-track|stopped</status>`. orch reads the status to decide whether the
-critic is woken now (quiet, off track, stopped) or reads the report at its next turn (ok).
+critic is woken now (quiet, off track, stopped), or after every two OK checks for the same worker.
 """
 from __future__ import annotations
 

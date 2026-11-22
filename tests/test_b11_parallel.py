@@ -177,6 +177,65 @@ class TestParallelRun(Base):
 
 
 class TestParallelResume(Base):
+    def test_explicit_worker_timeout_reaches_continuation_handler(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}})
+        original = MockBackend.run
+        timed_out = []
+
+        def timeout(backend, req, should_stop):
+            if req.agent == 'writer-2' and req.context.get('purpose') == 'work' and not timed_out:
+                timed_out.append(True)
+                return TurnResult('timeout', 'Partial work saved.', req.session_id)
+            return original(backend, req, should_stop)
+
+        with mock.patch.object(MockBackend, 'run', timeout):
+            status, rec = run(cfg)
+        self.assertEqual(status, 'completed', rec.state.get('error'))
+        self.assertTrue(any(e['event'] == 'safety_timeout' and e.get('agent') == 'writer-2' for e in events(rec)))
+
+    def test_all_interrupted_workers_resume_with_continue_in_their_own_sessions(self):
+        cfg = self.cfg(worker={"delays": {"work": 0.01}}, monitor={"replies": {"check": ["ok"]}})
+        stop = threading.Event()
+        ready = threading.Barrier(3)
+        original = MockBackend.run
+
+        def interrupt(backend, req, should_stop):
+            if req.role == 'worker' and req.context.get('purpose') == 'work':
+                sid = 'session-' + req.agent
+                req.on_event({'k': 'session', 's': sid})
+                req.on_event({'k': 'text', 's': 'Started the assigned work.'})
+                ready.wait(timeout=5)
+                stop.set()
+                return TurnResult('stopped', 'Partial work', sid)
+            return original(backend, req, should_stop)
+
+        with mock.patch.object(MockBackend, 'run', interrupt):
+            status, rec = run(cfg, stop=stop)
+        self.assertEqual(status, 'stopped')
+        stopped = {t['agent']: t for t in turns(rec) if t['purpose'] == 'work'}
+        self.assertEqual(len(stopped), 3)
+        status, rec = run(cfg, resume=True)
+        self.assertEqual(status, 'completed', rec.state.get('error'))
+        for name, before in stopped.items():
+            after = next(t for t in turns(rec) if t['agent'] == name and t['status'] == 'ok')
+            self.assertEqual(after['session_id'], before['session_id'])
+            self.assertEqual(after['continues'], before['turn_id'])
+            self.assertEqual(after['input'].strip(), 'continue')
+        self.assertEqual({e['agent'] for e in events(rec) if e['event'] == 'turn_recovered'}, set(stopped))
+
+    def test_old_stopped_turn_cannot_replace_a_newer_completed_turn(self):
+        from test_b6_b9 import unit
+        r = unit(self.tmp)
+        a = r.workers[0]
+        for rnd, status in ((1, 'stopped'), (2, 'ok')):
+            r.rec.write_turn({'round': rnd, 'seq': 1, 'turn_id': r.rec.turn_id(rnd, 1, a.name),
+                              'agent': a.name, 'role': 'worker', 'purpose': 'work', 'status': status,
+                              'session_id': 'saved-session', 'output': 'work', 'input': 'old request'})
+        r.rec.update_session(a.name, session_id='saved-session', last_turn=r.rec.turn_id(2, 1, a.name))
+        self.assertEqual(r.recover_interrupted(), [])
+        self.assertNotIn('cut_off', r.st['sessions'][a.name])
+        self.assertEqual(r.st['sessions'][a.name]['last_turn'], r.rec.turn_id(2, 1, a.name))
+
     def fail_assignment(self, cfg, stop=None):
         original = MockBackend.run
 

@@ -42,7 +42,6 @@ SETTINGS_KEYS = ("models", "retry_waits", "fallback_cooldown")
 MODEL_KEYS = ("backend", "backend_options", "env", "retries")  # a model is shown by its id
 
 # B5: a turn that progress checks watch (a worker's, in managed mode) may run long; only this high limit stops it
-SAFETY_TIMEOUT = 28800.0  # 8 h
 CHECK_EVERY = 20.0  # minutes between quick checks of a worker's turn or job
 MANAGER_CHECK_EVERY = 60.0  # minutes between status summaries for the manager while work runs
 CHECK_SESSIONS = ("own", "side")
@@ -127,13 +126,11 @@ class AgentConfig:
         return self.fresh_session or ("compact" if self.role in ("verifier", "worker") else "")
 
     def turn_limit(self, watched: bool = False) -> float:
-        """Seconds a turn may run before it is stopped. `safety_timeout` when set. Otherwise `timeout` keeps its
-        old meaning for turns nobody watches (manager, critic, auditor, monitor; a worker with checks off), and a
-        watched turn (a worker's, with progress checks on) gets at least the 8 h safety limit: an older `timeout`
-        below it no longer cuts the turn."""
-        if self.safety_timeout:
+        """Seconds before stopping a turn; zero means unlimited. Watched workers have no default deadline.
+        An explicit safety_timeout overrides this, including zero. Unwatched turns retain timeout."""
+        if self.safety_timeout is not None:
             return float(self.safety_timeout)
-        return max(float(self.timeout or 0), SAFETY_TIMEOUT) if watched else float(self.timeout or 0)
+        return 0.0 if watched else float(self.timeout or 0)
 
     def variants(self) -> List[Variant]:
         """The primary model first, then each backup."""
@@ -615,7 +612,7 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
         memory_heading=str(merged.get("memory_heading", AgentConfig.memory_heading) or ""),
         fresh_session=fresh,
         state_file=_expand(merged["state_file"], base) if merged.get("state_file") else "",
-        safety_timeout=safety or None,
+        safety_timeout=safety,
         check_every=every,
         check_session=session,
         compact_between_steps=_as_bool(merged.get("compact_between_steps", False)),

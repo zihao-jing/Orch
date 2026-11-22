@@ -308,6 +308,11 @@ class Board:
             if c.get("status") == "running":
                 live[c["id"]] = self._live_text(rd / "live" / f"{c['id']}.jsonl")
         ledger = st.get("messages") or []
+        turn_recipients = {}
+        for msg in ledger:
+            if msg.get("source") and msg.get("to") and not msg.get("by_design"):
+                turn_recipients.setdefault(msg["source"], []).append(
+                    {k: msg.get(k) for k in ("to", "status", "i")})
         relays = _relays(rd, chat_all, turns, ledger) if history else {}
         routes, received = _routes(rd, turns, seen, cfg.get("agents") or [], st.get("worker_messages") or [], ledger)
         held = {}  # blocks of a reply orch keeps from the next agent by design: logged, not lost
@@ -368,6 +373,7 @@ class Board:
             "messages": _message_log(rd, chat_all, turns, {a["name"]: a["called"] for a in agents}, mgr_name,
                                      st.get("worker_messages") or [], st.get("fwd") or {}) if full else [],
             "_chat_all": chat_all,
+            "_turn_recipients": turn_recipients,
             "min_score": (cfg.get("controller") or {}).get("min_score"),
             "can_chat": self.mon is not None and bool(self.mon.by_role("manager")),
             "audit": self._audit(rd) if history else {},
@@ -444,7 +450,7 @@ class Board:
             row = {k: t.get(k) for k in ("turn_id", "round", "seq", "agent", "role", "purpose", "status",
                                          "duration_s", "started_at", "ended_at", "milestone", "asked", "tag_reminder", "reminders",
                                          "cut_short", "interruptions", "continues", "model_change", "par_worker",
-                                         "par_step")}
+                                         "par_step", "watching", "watch_kind")}
             row["session_reset"] = "; ".join(str(x.get("reason") or "") for x in t.get("session_reset") or []
                                              if isinstance(x, dict)) or None
             row["output"] = out[:PREVIEW_CHARS]

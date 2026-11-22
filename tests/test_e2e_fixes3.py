@@ -52,8 +52,9 @@ class TestObservationsNeedNoAnswer(unittest.TestCase):
     def test_a_progress_check_alone_brings_no_reply_routing_reminder(self):
         status, rec = run(_cfg(Path(tempfile.mkdtemp()).resolve(), monitor={"replies": {"check": [FINE]}}))
         self.assertEqual(status, "completed")
-        review = next(t for t in turns(rec) if t["agent"] == "critic" and t["purpose"] == "verify")
-        self.assertIn("Progress check,", review["input"])
+        review = next(t for t in turns(rec) if t["agent"] == "critic"
+                      and t["purpose"] in ("verify", "incoming") and "Progress check:" in t["input"])
+        self.assertIn("Progress check:", review["input"])
         self.assertNotIn("reply_routing", review.get("reminders") or [])
         self.assertNotIn("If I asked you something", review["input"])
 

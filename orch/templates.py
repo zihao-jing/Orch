@@ -573,12 +573,15 @@ Running now: {{what}}, for {{minutes}} min, in `{{cwd}}`.
 
 {{step}}
 
-Reply in a few lines and end with `<status>ok|quiet|off-track|stopped</status>`.""",
+Reply in at most three short lines: current progress, evidence of activity or a blocker, and any action needed.
+Omit unchanged checklist items and speculative ETAs. Active tools or background jobs count as activity even
+when the conversation is silent. End with `<status>ok|quiet|off-track|stopped</status>`.""",
     # B8: the worker's model changed (a retry fell back to a backup, or the settings changed); the critic is told once,
     # in one neutral line, at its next turn. {{who}}: "The person you instruct" (one worker) or that worker's name
     "worker_model_changed": "{{who}} is now on a different model; keep instructions short and explicit.",
     # the check's report as the critic reads it: an observation about the work, like a check-in result
-    "progress_check_report": "Progress check, {{minutes}} min into {{what}}:\n\n{{report}}",
+    "progress_check_report": "Progress check: {{worker}} · {{status}} · {{minutes}} min\n{{report}}\n\n"
+                             "Reply target: **{{worker}}** (only if not healthy).",
     # the critic's own session runs the check (check_session: own, no monitor)
     "critic_quick_check": """\
 Quick check: how is the run going? {{worker}} is still working ({{what}}, {{minutes}} min so far); leave that work
@@ -589,11 +592,8 @@ running and don't start a review.
 
 Look at the logs and outputs, in a few lines. Write to {{worker}} in `<message to="{{worker}}">…</message>` only if
 the run is quiet, off track, or a job or watcher it relies on has died; otherwise no message.""",
-    # the critic is woken by a check that found a problem
-    "critic_check_turn": "The progress check above found something that may need you. {{worker}} is still working: "
-                         "don't start a review. If the run is quiet, off track, or a job or watcher it relies on has "
-                         "died, send {{worker}} a short message in `<message to=\"{{worker}}\">…</message>`, as \"I\", "
-                         "saying what to check or change. If it needs nothing from you, reply in one line.",
+    # The report carries the status and reply target; no separate intervention reminder.
+    "critic_check_turn": "",
     # a worker turn started by a message while its background job keeps running
     "worker_job_message": "{{human_messages}}\n\nYour background job ({{jobs}}) is still running and is being "
                           "watched; you don't need to check on it or wait for it. Act on my message above, then reply "
@@ -611,49 +611,24 @@ the run is quiet, off track, or a job or watcher it relies on has died; otherwis
     "discussion_manager": "Our discussion has not been applied: nothing you write reaches {{critic}} until I apply it. Keep what "
                           "{{critic}} should get for the one message you send then.",
     "manager_discussion_apply": """\
-I clicked Apply discussion. End our discussion and apply the decisions we already agreed in this conversation.
-Do not ask me to repeat answers. Resolve every listed question covered by my answers; leave genuinely unanswered
-questions open. Do not treat discussion alone as approval of something I did not agree to.
-
-Open questions (IDs and text): {{questions}}
-Current gate (empty if none): {{gate}}
-
-Return one <discussion-resolution> JSON object </discussion-resolution> with exactly:
-{"answers": {"Q1": "the complete agreed answer"}, "gate": "approve"}
-Only include listed question IDs actually answered. The gate value is approve, revise, or keep.
-Use keep if anything essential is unresolved, and explain only what remains to me.
-For no gate, use approve to apply the agreed directions, or keep if clarification is needed.
-For a wait gate, approve means the human task is done; revise means replace the pause with the agreed work.
-For a milestone, approve means accept it; revise means continue work with our agreed changes.
-For a workers gate, approve authorizes the proposed worker count; revise keeps one worker.
-For a plan gate, revise must also include the complete revised numbered milestone list in this reply.
-
-If applying changes to ongoing work, include ONE complete <message to="{{critic}}"> with all agreed answers
-and directions needed by the critic. For a wait gate revised into work also include <decision>CONTINUE</decision>.
-If questions remain, do not send directions yet. No separate acknowledgements per question.
-Save standing decisions on the golden board. These held messages have not been sent; carry over what still applies:
-{{held}}
+Apply our agreed discussion and start the agreed work. Use our conversation and the golden board at `{{golden_board}}`.
+Open question IDs: {{questions}}. Gate: {{gate}}. Details if needed: `{{discussion_context}}`.
+Return <discussion-resolution>{"answers":{"Q1":"agreed answer"},"gate":"approve|revise|keep"}</discussion-resolution>.
+Include only answered IDs; use {} if none. Keep unresolved questions open; use keep and ask only what remains.
+{{gate_rule}}
+When applying, send {{critic}} one complete agreed instruction via <message to="{{critic}}">; include any agreed
+<workers n="N">reason</workers> request. This replaces held drafts. Apply only what I agreed to.
 """,
     "manager_discussion_end": """\
-I closed our discussion. Send {{critic}} the new directions now, in one `<message to="{{critic}}">…</message>`:
-everything we settled that changes the work, complete on its own. It replaces the messages held during the
-discussion; carry over what in them still applies.
-
+Apply our agreed directions in one complete `<message to="{{critic}}">…</message>`, replacing held drafts.
+Use our conversation and the golden board at `{{golden_board}}`. If nothing changes, no message is needed.
 {{held}}
-
-If nothing changes for {{critic}}, write no message; one line for me is enough. Anything settled that should hold
-beyond this goes on the golden board.
 """,
     # a discussion I closed while a plan or milestone gate was open: added to the manager's turn after my decision
     "manager_discussion_at_gate": """\
-We closed our discussion before this decision, and nothing from it has reached {{critic}} yet. Fold everything we
-settled there that changes the work into what you write now, together with the above, so that {{critic}} gets one
-message, complete on its own. It replaces the messages held during the discussion; carry over what in them still
-applies.
-
+We closed our discussion before this decision. Combine it with our agreed directions in one complete message
+to {{critic}}, replacing held drafts. Use our conversation and the golden board at `{{golden_board}}`.
 {{held}}
-
-Anything settled that should hold beyond this goes on the golden board.
 """,
     "discussion_held_none": "Nothing was held during the discussion.",
     "discussion_held": "Held during the discussion (not sent):\n\n{{messages}}",

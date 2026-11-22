@@ -159,7 +159,9 @@ class TestDiscussion(unittest.TestCase):
         ts = turns(rec)
         self.assertFalse([t for t in ts if t["purpose"] == "discussion"])  # no turn of its own: it went with the kickoff
         kick = next(t for t in ts if t["agent"] == "boss" and t["purpose"] == "kickoff")
-        self.assertIn("HELD-MARK", kick["input"])  # the manager sees what was held
+        self.assertNotIn("HELD-MARK", kick["input"])
+        self.assertIn(str(rec.run_dir / "discussion-context.json"), kick["input"])
+        self.assertIn("HELD-MARK", (rec.run_dir / "discussion-context.json").read_text())
         self.assertIn("We closed our discussion before this decision", kick["input"])
         old = next(m for m in rec.state["messages"] if m["id"] == held["id"])
         self.assertEqual(old["status"], "superseded")
@@ -189,8 +191,10 @@ class TestDiscussion(unittest.TestCase):
         self.assertFalse([t for t in ts if t["purpose"] in ("discussion", "incoming")])
         fb = [t for t in ts if t["agent"] == "boss" and t["purpose"] == "feedback"]
         self.assertEqual(len(fb), 1)  # one manager turn carries my note and the discussion
-        for mark in ("NOTE-R", "HELD-MARK", "We closed our discussion before this decision"):
+        for mark in ("NOTE-R", "We closed our discussion before this decision"):
             self.assertIn(mark, fb[0]["input"])
+        self.assertNotIn("HELD-MARK", fb[0]["input"])
+        self.assertIn(str(rec.run_dir / "discussion-context.json"), fb[0]["input"])
         old = next(m for m in rec.state["messages"] if m["id"] == held["id"])
         self.assertEqual(old["status"], "superseded")
         ev = [json.loads(x) for x in (rec.run_dir / "events.jsonl").read_text().splitlines() if x.strip()]
@@ -316,6 +320,29 @@ class TestGoldenResend(unittest.TestCase):
         self.assertIn("- - Short prose", out)
         self.assertIn("+ - Plain prose", out)
         self.assertNotIn("Tables first", out)
+
+    def test_manager_gets_a_path_on_new_changed_and_compacted_sessions(self):
+        a = self.r.manager
+        first = self.sent(a, "manager")
+        self.assertIn(str(self.r.golden_path()), first)
+        self.assertNotIn("Tables first", first)
+        self.assertEqual(self.r.golden_board_reminder(a, "manager", "", False), "")
+        self.r.golden_path().write_text(self.r.golden_path().read_text() + '\n- NEW RULE\n')
+        self.r.check_golden()
+        changed = self.sent(a, "manager", False)
+        self.assertIn('Read the golden board', changed)
+        self.assertNotIn('NEW RULE', changed)
+        self.r.after_compact(a, 'test')
+        self.assertIn('Read the golden board', self.r.golden_board_reminder(a, "manager", "", False))
+
+    def test_manager_own_edit_is_not_sent_back_as_a_change(self):
+        a = self.r.manager
+        self.sent(a, "manager")
+        before = self.r.check_golden()['hash']
+        self.r.golden_board_reminder(a, "manager", "", True)
+        self.r.golden_path().write_text(self.r.golden_path().read_text() + '\n- OWN EDIT\n')
+        self.r.golden_after_turn(a, {'reminders': ['golden_board'], 'session_id': 's1'}, before)
+        self.assertEqual(self.r.golden_board_reminder(a, "manager", "", False), "")
 
     def test_worker_gets_only_boundaries(self):
         w = self.r.workers[0]

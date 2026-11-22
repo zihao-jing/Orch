@@ -107,7 +107,7 @@ checkin_every: 2            # a status line for the manager every 2 rounds (0 = 
 role: worker
 backend: claude
 backend_options: {model: sonnet, effort: medium, permission_mode: auto}
-safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
+safety_timeout: 0           # no turn deadline; progress checks watch long-running work
 check_every: 20             # minutes between quick checks of a running turn or job (0 = off)
 fresh_session: compact      # each milestone: summarise the session in place (the default for the critic and workers;
                             # a new session when that fails); milestone = always a new session; never = keep it
@@ -310,18 +310,19 @@ the turn's output (or which job processes still run) and the current step's item
   side session with the monitor's prompt. `check_session` in the checker's `agent.yaml`: `own` (its continuing
   session; the monitor's default; for the critic, its own conversation, where it messages the worker itself) or
   `side` (a fresh session for each check; the critic's default).
-* **What the critic sees.** The report arrives as an observation about the work: "Progress check, 14 min into Sam's
-  current turn: …", with no word of a monitor or of orch. orch removes verdict words (PASS/FAIL, `<verdict>`) and
-  lines about its own tooling before the critic reads it, and flags both on the board.
-* **When the critic is woken.** All fine (`ok`): the report waits for the critic's next turn (only the newest one).
-  Quiet, off track or stopped: a short critic turn starts now; the critic messages the worker only if needed, and
-  nothing of it goes up to the manager. A turn that wrote nothing to its output for a whole interval counts as quiet,
-  whatever the check says.
+* **What the critic sees.** A short report naming the exact worker, status and elapsed time, followed by up to
+  three lines of progress, activity or blockers, and any action needed. orch removes verdict words
+  (PASS/FAIL, `<verdict>`) and lines about its own tooling before the critic reads it, and flags both on the board.
+* **When the critic is woken.** Every second consecutive `ok` check for the same worker, and every non-OK check.
+  A non-OK check resets that worker's healthy count; counts survive restarts. The latest report replaces an older
+  waiting report without losing a pending wake. An explicit monitor status is respected even when the worker's
+  conversation is silent while tools or background jobs are active. A short reply-target line names the exact
+  worker, only to be contacted if unhealthy; no separate intervention reminder is added.
 * **The manager** gets a one-line status (the latest checks and the plan) every `check_every` minutes of its own
   (default 60), waiting for its next turn; it starts no manager turn.
-* **Turn limit.** `safety_timeout` (seconds) is an agent's hard per-turn limit. Without it, a watched worker turn
-  gets 8 h: an older `timeout` below that no longer cuts it; the other agents (and a worker with checks off) keep
-  `timeout` as before.
+* **Turn limit.** Watched worker turns have no default deadline. `safety_timeout: 0` explicitly disables the
+  deadline, including when checks are off; a positive value opts into a limit in seconds. Other agents and
+  workers with checks off retain `timeout` unless `safety_timeout` is explicitly set.
 * **The board** shows a live line per working agent from its latest check: "Sam: step 3, running 14 min — log
   active".
 

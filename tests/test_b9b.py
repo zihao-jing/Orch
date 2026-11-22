@@ -92,6 +92,85 @@ class TimelineTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
+    def test_critic_reply_uses_recorded_recipient_not_worker_default(self):
+        rd = make_run(self.tmp, milestones=1, rounds=1, chats=0)
+        path = next(rd.glob('rounds/r*/t*-writer.json'))
+        w = json.loads(path.read_text())
+        critic = dict(w, agent='critic', role='verifier', purpose='incoming', seq=99,
+                      turn_id='r099-t99-critic', output='No intervention needed.')
+        (path.parent/'t99-critic.json').write_text(json.dumps(critic))
+        st = json.loads((rd/'state.json').read_text())
+        st['messages'] = [dict(id='M1', source=critic['turn_id'], **{'from': 'critic'},
+                               to='boss', status='held', i=None)]
+        (rd/'state.json').write_text(json.dumps(st))
+        b = Board('m', lambda: rd)
+        _d, items, _gs, _cur = b._timeline()
+        it = next(i for i in items if i.get('tid') == critic['turn_id'])
+        self.assertEqual((it['from'], it['to'], it['block'], it['status']), ('critic', 'boss', 'mc', 'held'))
+        self.assertNotIn('lane', it)
+
+    def test_parallel_followup_without_assignment_does_not_take_other_workers_step(self):
+        turns = [
+            dict(turn_id='plan', milestone=3, started_at=ts(0), ended_at=ts(1), plan=[37, 38]),
+            dict(turn_id='assigned', agent='a', purpose='work', milestone=3, round=10,
+                 started_at=ts(2), par_worker='a', par_step=37),
+            dict(turn_id='pilot', agent='b', purpose='work', milestone=3, round=11,
+                 started_at=ts(3), par_worker='b', par_step=38),
+            dict(turn_id='followup', agent='a', purpose='work', milestone=3, round=12,
+                 started_at=ts(4), par_worker='a', par_step=None),
+            dict(turn_id='review', agent='critic', purpose='par_review', milestone=3, round=12,
+                 started_at=ts(5), par_worker='a', par_step=None),
+        ]
+        items = [dict(tid=t['turn_id'], ts=t['started_at'], ms=3, _turn=True) for t in turns[1:]]
+        assign(items, turns)
+        self.assertEqual([it['step'] for it in items], [37, 38, 0, 0])
+        self.assertTrue(all(it.get('unassigned') for it in items[2:]))
+
+    def test_critic_messages_to_two_workers_keep_both_recipients(self):
+        from orch.timeline import Builder
+        d = dict(agents=[dict(name='critic', role='verifier', called='critic'),
+                         dict(name='a', role='worker', called='a'), dict(name='b', role='worker', called='b')],
+                 turns=[dict(turn_id='review', agent='critic', role='verifier', purpose='par_review', status='ok')],
+                 routes={'review': [dict(i=0, to='a', status='read', preview='A task'),
+                                    dict(i=1, to='b', status='read', preview='B task')]})
+        builder = Builder(self.tmp, d, [], [])
+        builder.turns()
+        rows = builder.items
+        self.assertEqual(rows[0]['to'], '')  # no invented recipient for the whole turn
+        self.assertEqual([(r['to'], r['lane']) for r in rows[1:]], [('a', 'a'), ('b', 'b')])
+
+    def test_historical_monitor_report_follows_watched_worker_in_dashboard(self):
+        from datetime import datetime, timedelta
+        rd = make_run(self.tmp, milestones=1, rounds=1, chats=0)
+        path = next(rd.glob('rounds/r*/t*-writer.json'))
+        w = json.loads(path.read_text())
+        w['par_step'] = 38
+        path.write_text(json.dumps(w))
+        when = (datetime.fromisoformat(w['started_at']) + timedelta(seconds=1)).isoformat()
+        check = dict(turn_id='historical-monitor', agent='monitor-2', role='monitor', purpose='check',
+                     watching='writer', watch_kind='turn', status='error', started_at=when, ended_at=when,
+                     output='Monitor failed to inspect the logs.', round=w['round'], seq=99)
+        saved = path.parent / 't99-monitor-2.json'
+        saved.write_text(json.dumps(check))
+        original = saved.read_bytes()
+        board = Board('m', lambda: rd)
+        items = board.items('0|38')['items']
+        report = next(it for it in items if it.get('tid') == 'historical-monitor')
+        self.assertEqual((report['block'], report['from'], report['to'], report['status']),
+                         ('mon', 'monitor-2', 'critic', 'error'))
+        self.assertEqual(saved.read_bytes(), original)
+
+    def test_monitor_checks_follow_their_worker_not_another_parallel_round(self):
+        turns = [
+            dict(turn_id='a', agent='a', purpose='work', milestone=2, started_at=ts(0), par_step=38),
+            dict(turn_id='b', agent='b', purpose='work', milestone=2, started_at=ts(2), par_step=37),
+            dict(turn_id='check', purpose='check', watching='a', started_at=ts(4)),
+        ]
+        items = [dict(tid='check', ts=ts(4), ms=-1, _turn=True), dict(ts=ts(5))]
+        assign(items, turns)
+        self.assertEqual((items[0]['ms'], items[0]['step']), (2, 38))
+        self.assertEqual(items[1]['ms'], 2)  # missing check metadata must not move later events before milestone 1
+
     def test_message_models_come_from_each_turn_and_chat(self):
         rd = make_run(self.tmp, milestones=1, rounds=1, chats=1)
         for path in rd.glob("rounds/r*/t*.json"):
@@ -248,9 +327,13 @@ class TimelineTest(unittest.TestCase):
         self.assertTrue(q["needs"])
         retry = next(it for it in st["tl_items"] if it["kind"] == "system")
         self.assertEqual((retry["block"], retry.get("lane")), ("cw", "writer"))
-        # the critic's <message to="boss"> in a verify turn shows in the manager ↔ critic block too
+        # A critic reply with a single recipient lives in manager ↔ critic; unfolding
+        # the whole reply retains its tagged message without a duplicate timeline row.
         mc = [it for it in b.items("0|1")["items"] if it["block"] == "mc"]
-        self.assertTrue(any(it["id"].count(":") == 2 and "FYI step 1 done" in it["line"] for it in mc), mc)
+        reply = next(it for it in mc if it.get("purpose") == "verify")
+        self.assertEqual((reply["from"], reply["to"]), ("critic", "boss"))
+        self.assertNotIn("lane", reply)
+        self.assertIn("FYI step 1 done", b.message(reply["id"])["text"])
         self.assertEqual(len(st["decisions"][0]["text"]), 601)  # clipped; the whole text on unfold
         self.assertEqual(len(b.message("d:S1")["text"]), 5000)
 

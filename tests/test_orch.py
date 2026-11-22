@@ -1980,7 +1980,7 @@ class TestProjectFolder(unittest.TestCase):
         self.assertIn("Edit", mo.backend_options["disallowed_tools"])
         self.assertIn("Quick check", mo.current_system_prompt())
         self.assertNotRegex(mo.current_system_prompt().lower().replace("`.orch/`", ""), r"manager|orch\b")
-        self.assertEqual((mon.agent("worker").turn_limit(True), mon.agent("worker").check_every), (28800.0, 20.0))
+        self.assertEqual((mon.agent("worker").turn_limit(True), mon.agent("worker").check_every), (0.0, 20.0))
         aud = mon.agent("auditor")
         self.assertFalse((d / "agents/auditor/system_prompt.md").exists())  # orch's own prompt: it audits orch
         self.assertIn("You are the auditor", aud.current_system_prompt())

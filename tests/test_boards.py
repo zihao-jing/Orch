@@ -85,11 +85,14 @@ class TestBoardsRun(unittest.TestCase):
         ts = turns(rec)
         by = {a: [t for t in ts if t["agent"] == a] for a in ("boss", "critic", "writer")}
         for a, its in by.items():
-            self.assertIn(RULE, its[0]["input"], a)  # the first message of a session carries the board
+            if a == "boss":
+                self.assertNotIn(RULE, its[0]["input"])
+            else:
+                self.assertIn(RULE, its[0]["input"], a)
             self.assertIn("golden_board", its[0].get("reminders") or [], a)
         self.assertIn("My standing rules for this work", by["critic"][0]["input"])
         self.assertIn("My boundaries for this work", by["writer"][0]["input"])  # the default board puts RULE under Boundaries
-        self.assertIn(f"The golden board (`{self.golden}`)", by["boss"][0]["input"])
+        self.assertIn(f"Read the golden board at `{self.golden}`", by["boss"][0]["input"])
         self.assertIn(str(self.golden), by["boss"][0]["system_prompt"])  # the manager knows where it is
         # the change reaches the critic and the worker once; the manager wrote it, so it is not sent back to it
         self.assertEqual(sum(NEW_RULE in t["input"] for t in by["critic"]), 1)
@@ -114,7 +117,8 @@ class TestBoardsRun(unittest.TestCase):
             if t["agent"] in ("critic", "writer"):
                 self.assertNotIn("Alex wants", t["input"])
         boss = [t for t in ts if t["agent"] == "boss"]
-        self.assertIn("Alex wants", boss[0]["input"])
+        self.assertIn(str(self.golden), boss[0]["input"])
+        self.assertNotIn("Alex wants", boss[0]["input"])
         self.assertTrue(any("The golden board names Alex" in t["input"] for t in boss))
         self.assertTrue(any(e["event"] == "board_warning" and e.get("what") == "golden_leak" for e in _events(rec)))
         assert_no_role_leaks(self, rec, load_config(cfg).monitor("m"))

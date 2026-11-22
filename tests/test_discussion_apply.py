@@ -72,6 +72,33 @@ class TestApplyDiscussion(unittest.TestCase):
         say.assert_not_called()
         self.assertEqual(len(self.r.st['gate_queue']), 1)
 
+    def test_apply_references_details_without_replaying_them(self):
+        self.r.setup_boards()
+        self.r.golden_path().write_text('## Rules\n' + 'GOLDEN-CONTENT ' * 1000)
+        self.r.st['questions'][0]['text'] = 'QUESTION-CONTENT ' * 1000
+        self.r.mg['gate']['text'] = 'GATE-CONTENT ' * 1000
+        self.r.set_discussion(True)
+        self.r.deliver(self.r.manager, self.r.critic, 'HELD-CONTENT ' * 1000)
+        say = self.apply(self.reply())
+        prompt, _ = self.r.add_reminders(self.r.manager, say.call_args.args[1], 'discussion_apply')
+        for marker in ('QUESTION-CONTENT', 'GATE-CONTENT', 'HELD-CONTENT', 'GOLDEN-CONTENT'):
+            self.assertNotIn(marker, prompt)
+        path = self.r.rec.run_dir / 'discussion-context.json'
+        self.assertIn(str(path), prompt)
+        self.assertIn(str(self.r.golden_path()), prompt)
+        context = json.loads(path.read_text())
+        self.assertEqual(context['questions'][0]['text'], self.r.st['questions'][0]['text'])
+        self.assertEqual(context['gate']['text'], self.r.mg['gate']['text'])
+        self.assertEqual(context['held'][0]['body'], 'HELD-CONTENT ' * 1000)
+        self.assertIn('CONTINUE', prompt)
+        self.assertNotIn('numbered milestone list', prompt)
+
+    def test_plan_apply_gets_only_its_gate_rule(self):
+        self.r.mg['gate'] = {'kind': 'plan', 'key': 'plan-0-0'}
+        prompt = self.apply(self.reply(gate='approve')).call_args.args[1]
+        self.assertIn('numbered milestone list', prompt)
+        self.assertNotIn('CONTINUE', prompt)
+
     def test_validated_discussion_starts_the_requested_parallel_work(self):
         reply = self.reply(suffix='<workers n="2">Independent writing and test runs.</workers>')
         self.apply(reply)

@@ -129,7 +129,7 @@ fallback:
   - {label: glm-5.3, backend: opencode, backend_options: {model: alibaba-token-plan-cn/glm-5.3}}
 # Codex instead: backend: codex, backend_options: {model: <model>, sandbox: workspace-write,
 #                extra_args: ["-c", "sandbox_workspace_write.network_access=true"]}
-safety_timeout: 28800       # per turn, a high safety limit (8 h): long turns are fine, progress checks watch them
+safety_timeout: 0           # no turn deadline; progress checks watch long-running work
 check_every: 20             # minutes between quick checks of a running turn or background job (0 = off)
 retries: 1
 fresh_session: compact      # each milestone: the session is summarised in place (a new one if that fails); milestone = always new

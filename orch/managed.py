@@ -284,6 +284,7 @@ class ManagedRunner(MonitorRunner):
     def mtpl(self, name: str, **values: Any) -> str:
         values.setdefault("instructions", self.mon.controller.instructions or "")
         values.setdefault("decisions", "")
+        values.setdefault("golden_board", str(self.golden_path()))
         if "checklist_path" not in values:
             p = self.checklist_path()
             values["checklist_path"] = str(p) if p else "your checklist file"
@@ -590,9 +591,8 @@ class ManagedRunner(MonitorRunner):
         return B.boundaries(body) if role == "worker" else body
 
     def golden_board_reminder(self, agent: AgentConfig, role: str, intro: str, due: bool) -> str:
-        """The board for this agent's message, or '': in full when the agent's session is new (or compacted), as
-        the added and removed lines when it changed since the agent last got it, and one line when the reminder is
-        due and nothing changed. Nothing while there is nothing to send."""
+        """The manager gets a path to its board. Other roles get their permitted content on a new/compacted
+        session, a diff on changes, and a short scheduled reminder. Nothing while there is nothing to send."""
         content = self.golden_content(role)
         g = self.st.get("golden") or {}
         if not content or (role != "manager" and self.golden_leaks(content).get(agent.role)):
@@ -602,6 +602,10 @@ class ManagedRunner(MonitorRunner):
         path = str(self.golden_path())
         head = render(intro or "", **self.names(), golden_board=path).strip()
         self.__dict__.setdefault("golden_sent", {})[agent.name] = content  # what after_turn records as seen
+        if role == "manager":
+            if not sid or seen.get("session") != sid or seen.get("hash") != B.digest(content):
+                return f"Read the golden board at `{path}` for current standing decisions."
+            return f"Golden board: `{path}`." if due else ""
         if not sid or seen.get("session") != sid or seen.get("text") is None:
             return f"{head}\n\n{content}" if head else content
         if seen.get("hash") != B.digest(content):
@@ -620,7 +624,7 @@ class ManagedRunner(MonitorRunner):
         wrote = agent.role == "manager" and before is not None and g.get("hash") != before
         if sent or wrote:
             # the text is kept to diff against next time: what was sent, or what the manager wrote
-            text = self.__dict__.get("golden_sent", {}).get(agent.name) if sent else None
+            text = self.__dict__.get("golden_sent", {}).get(agent.name) if sent and not wrote else None
             text = self.golden_content(role) if text is None else text
             self.st.setdefault("golden_seen", {})[agent.name] = {
                 "hash": B.digest(text), "text": text, "session": r.get("session_id")}
@@ -672,7 +676,7 @@ class ManagedRunner(MonitorRunner):
                       extra={"milestone": mg.get("ms", 0) if mg.get("milestones") else None,
                              "milestone_round": mg.get("ms_round", 0), **(extra or {})})
         self.after_state_turn(agent, r)
-        if r["status"] != "ok":
+        if r["status"] != "ok" and not (agent.role == "worker" and purpose == "work" and r["status"] == "timeout"):
             if self.mon.controller.stop_on_error:
                 raise _Failed(f"{agent.name} {purpose} turn ended with status {r['status']}")
         return r
@@ -857,6 +861,8 @@ class ManagedRunner(MonitorRunner):
     def switch_backends(self) -> None:
         """An agent moved to another backend starts a new session: with its handover notes (state file and what
         happened since), like after a reset, not just "pick up from the repository"."""
+        # Resume checks run before main_loop: copies must exist before backend/session recovery.
+        self.par_restore_agents()
         super().switch_backends()
         for a in self.mon.agents:
             note = self.tpl("backend_switched", agent=a.called, cwd=a.working_dir).strip()
@@ -1242,7 +1248,7 @@ class ManagedRunner(MonitorRunner):
         self.rec.progress(f"✉ {a.called}: {len(want)} message(s) from {', '.join(frm)} arrived; it answers now")
         self.rec.event("activation", agent=a.name, msgs=[m["id"] for m in want])
         checks = a.role == "verifier" and all(m.get("kind") == "progress_check" for m in want)
-        try:  # woken by a progress check that found a problem: it messages the worker if needed, nothing goes up
+        try:  # progress checks wake it for problems or a periodic healthy update
             prompt = (self.mtpl("manager_message_turn") if a.role == "manager" else
                       self.mtpl("critic_check_turn") if checks else self.critic_turn_prompt(mode))
             gate = self.mg.get("gate") or {}
@@ -1413,9 +1419,15 @@ class ManagedRunner(MonitorRunner):
             self.rec.save()
             return
         questions = [q for q in self.st.get("questions", []) if q.get("to") == "human" and q.get("status") == "open"]
-        prompt = self.mtpl("manager_discussion_apply", questions=json.dumps(
-            [{"id": q["id"], "text": q["text"]} for q in questions], ensure_ascii=False),
-            gate=json.dumps(gate, ensure_ascii=False), held=self.discussion_held_text())
+        gate_rule = {
+            "wait": "Approve confirms the human task is done; revise resumes agreed work and requires <decision>CONTINUE</decision>.",
+            "milestone": "Approve accepts this milestone; revise continues it with agreed changes.",
+            "workers": "Approve authorizes the proposed worker count; revise keeps one worker.",
+            "plan": "Approve accepts the plan; revise requires the complete revised numbered milestone list.",
+        }.get(gate.get("kind"), "With no gate, approve applies the agreed directions.")
+        prompt = self.mtpl("manager_discussion_apply", questions=", ".join(q["id"] for q in questions) or "none",
+                          gate=f"{gate.get('kind')} ({gate.get('key')})" if gate else "none",
+                          discussion_context=str(self.discussion_context()), gate_rule=gate_rule)
         pending["status"] = "running"
         self.rec.save()
         self._activating = True
@@ -1511,9 +1523,19 @@ class ManagedRunner(MonitorRunner):
         held = self.discussion_held()
         if not held:
             return self.mtpl("discussion_held_none").strip()
-        names = {x.name: x.called for x in self.mon.agents}
-        msgs = "\n\n".join(f"To {names.get(m['to'], m['to'])}:\n<<<\n{m['body']}\n>>>" for m in held)
-        return self.mtpl("discussion_held", messages=msgs).strip()
+        return f"Held drafts, if needed: `{self.discussion_context()}` (not sent)."
+
+    def discussion_context(self) -> Path:
+        """Keep exact IDs and recovery details available without replaying the discussion in every prompt."""
+        path = self.rec.run_dir / "discussion-context.json"
+        write_json(path, {
+            "golden_board": str(self.golden_path()),
+            "questions": [{"id": q["id"], "text": q["text"]} for q in self.st.get("questions", [])
+                          if q.get("to") == "human" and q.get("status") == "open"],
+            "gate": self.mg.get("gate") or {},
+            "held": [{"to": m["to"], "body": m["body"]} for m in self.discussion_held()],
+        })
+        return path
 
     def discussion_done(self, r: Dict[str, Any], why_none: str = "the discussion closed with nothing new to send",
                         at_gate: bool = False) -> None:
@@ -3290,8 +3312,8 @@ class ManagedRunner(MonitorRunner):
     # agent.yaml, else the monitor's; default 20; 0 = off). The monitor (role: monitor, a small cheap model) looks at
     # logs and status, with the current step's items from the critic's checklist file, and reports evidence only.
     # Without a monitor, the critic's side session does it (check_session: own runs it in the critic's own session).
-    # The report goes to the critic: held for its next turn when all is fine, waking it now when the run is quiet,
-    # off track or something it relies on has stopped. The manager gets a status line at its own, longer interval
+    # The report wakes the critic every second healthy check per worker, and on every non-OK check.
+    # The manager gets a status line at its own, longer interval
     # (no turn of its own). Each check updates the worker's status line on the board.
 
     def clock(self) -> float:
@@ -3446,7 +3468,7 @@ class ManagedRunner(MonitorRunner):
 
     def quick_check(self, watch: Dict[str, Any]) -> None:
         """One quick check of a running worker turn or job: the checker looks and reports evidence; the report goes
-        to the critic (problem: now; all fine: at its next turn); the status line is updated."""
+        to the critic (problem: now; healthy: every second check); the status line is updated."""
         w = self.mon.agent(watch["agent"])
         checker, where = self.checker(w)
         if self.rec.agent_busy(checker.name):  # e.g. a board chat with it: try again shortly
@@ -3459,7 +3481,7 @@ class ManagedRunner(MonitorRunner):
         _label, step = self.step_items(w)
         own_critic = checker.role == "verifier"
         tpl = "critic_quick_check" if own_critic else "monitor_check"
-        prompt = self.mtpl(tpl, what=what, minutes=mins, cwd=w.working_dir or self.mon.working_dir, activity=act,
+        prompt = self.mtpl(tpl, worker=w.name, what=what, minutes=mins, cwd=w.working_dir or self.mon.working_dir, activity=act,
                            step=step or "(No step items to look for yet.)").strip()
         if where == "side":  # a fresh session for each check
             self.st["sessions"].pop(checker.name, None)
@@ -3467,8 +3489,11 @@ class ManagedRunner(MonitorRunner):
         self.rec.event("progress_check", agent=w.name, checker=checker.name, where=where, watch=watch["kind"],
                        minutes=mins)
         try:
+            slot = self.par_slot(w.name) or {}
             r = self.turn(checker, prompt, int(self.st.get("round", 0)), "check",
-                          extra={"watching": w.name, "watch_kind": watch["kind"]})
+                          extra={"watching": w.name, "watch_kind": watch["kind"],
+                                 "milestone": self.mg.get("ms", 0) if self.mg.get("milestones") else None,
+                                 "par_step": slot.get("step")})
         except StopRequested:
             raise
         except Exception as e:  # a check that fails never stops the work
@@ -3483,7 +3508,7 @@ class ManagedRunner(MonitorRunner):
         status, tagged = P.parse_status(out)
         if own_critic and not tagged:  # the critic's own session: a message to the worker marks a problem
             status = P.QUIET if T.bodies(out, "message") else P.OK
-        if quiet is not None and quiet >= watch["every"] and status == P.OK:
+        if not tagged and not own_critic and quiet is not None and quiet >= watch["every"] and status == P.OK:
             status = P.QUIET  # orch's own evidence: nothing written in the turn for a whole interval
         report, flags = P.clean_report(T.outside(out) if own_critic else out, w.name, self.rec.run_dir)
         for f in flags:
@@ -3500,33 +3525,41 @@ class ManagedRunner(MonitorRunner):
             first = next((ln.strip() for ln in report.splitlines() if ln.strip()), "")
             slot["check"] = f"{status}: {_clip(first, 120)}" if first else status
             self.write_work_board()
-        self.rec.progress(f"🔎 progress check of {w.called} ({mins} min): {status}"
-                          + (" → the critic is told now" if problem and not own_critic else ""))
+        wake = False
         if not own_critic and report:
-            self.report_check(checker, w, watch, report, status, problem, r.get("turn_id") or "", mins)
+            wake = self.report_check(checker, w, watch, report, status, problem, r.get("turn_id") or "", mins)
+        self.rec.progress(f"🔎 progress check of {w.called} ({mins} min): {status}"
+                          + (" → the critic is told now" if wake else ""))
         self.rec.save()
 
     def report_check(self, checker: AgentConfig, w: AgentConfig, watch: Dict[str, Any], report: str, status: str,
-                     problem: bool, turn_id: str, mins: int) -> None:
-        """The report to the critic, as an observation about the work. A newer report replaces one still waiting.
-        All fine: held for the critic's next turn. A problem: it starts a short critic turn now (activate)."""
+                     problem: bool, turn_id: str, mins: int) -> bool:
+        """Send the latest evidence; wake on every second OK per worker or any problem.
+        Persist the count across restarts and retain an outstanding wake when replacing a queued report."""
         L, critic = self.ledger, self.critic
-        text = self.mtpl("progress_check_report", minutes=mins, what=self.what_runs(w, watch), report=report).strip()
+        counts = self.st.setdefault("progress_ok_counts", {})
+        count = 0 if problem else int(counts.get(w.name, 0)) + 1
+        wake = problem or count >= 2
+        counts[w.name] = 0 if wake else count
+        text = self.mtpl("progress_check_report", worker=w.name, status=status, minutes=mins,
+                         what=self.what_runs(w, watch), report=report).strip()
         for old in L.rows:  # B11: only an older report on the same worker
             if old.get("kind") == "progress_check" and old["to"] == critic.name and old["status"] in ("sent", "held") \
                     and old.get("worker", w.name) == w.name:
+                wake = wake or bool(old.get("activate"))
                 q = (self.st.get("fwd") or {}).get(critic.name) or []
                 if old["text"] in q:
                     q.remove(old["text"])
                 L.mark(old, "superseded", reason="replaced by a newer progress check", by=turn_id)
         m = L.add(checker.name, critic.name, report, text, source=turn_id, via="check", purpose="check",
-                  kind="progress_check", check_status=status, activate=bool(problem), carrier={"fwd": True},
+                  kind="progress_check", check_status=status, activate=bool(wake), carrier={"fwd": True},
                   worker=w.name)
-        if not problem:
+        if not wake:
             L.mark(m, "held", reason=RT.NEXT_TURN, next_turn=True)
         self.forward(critic, text)
         self.rec.event("check_report", agent=w.name, checker=checker.name, status=status, msg=m["id"],
-                       wakes=bool(problem))
+                       wakes=bool(wake))
+        return bool(wake)
 
     def manager_status(self) -> None:
         """The manager's light status look: one line from the latest checks and the plan, waiting for its next turn
@@ -3770,6 +3803,18 @@ class ManagedRunner(MonitorRunner):
         self.write_work_board()
         self.rec.save()
 
+    def par_restore_agents(self) -> None:
+        """Restore the active roster without dispatching work or changing slot status."""
+        par = self.mg.get("par") or {}
+        if not par.get("active"):
+            return
+        base = self.workers[0]
+        for name, s in par.get("slots", {}).items():
+            w = self.mon.agent(name) if self.has_agent(name) else self.par_clone(base, int(s.get("k") or 2), s.get("worktree"))
+            if name != base.name and s.get("monitor"):
+                self.par_monitor(w, int(s.get("k") or 2))
+        self.par_agents_extra()
+
     def par_restore(self) -> None:
         """After a restart in the middle of a parallel section: its copies come back; a turn that was cut off runs
         again (with the prompt it had)."""
@@ -3795,17 +3840,10 @@ class ManagedRunner(MonitorRunner):
                               "cannot safely restore an unstarted assignment; inspect the saved run state.")
         if not par.get("active"):
             return
-        base = self.workers[0]
-        for name, s in par.get("slots", {}).items():
-            if name == base.name or self.has_agent(name):
-                continue
-            w = self.par_clone(base, int(s.get("k") or 2), s.get("worktree"))
-            if s.get("monitor"):
-                self.par_monitor(w, int(s.get("k") or 2))
+        self.par_restore_agents()
+        for s in par.get("slots", {}).values():
             if s.get("status") == PW.WORKING:
                 s["status"] = PW.READY
-        if base.name in par.get("slots", {}) and par["slots"][base.name].get("status") == PW.WORKING:
-            par["slots"][base.name]["status"] = PW.READY
         for s in par.get("slots", {}).values():
             if s.get("status") == PW.JOB:  # its job is looked at again by the worker
                 s.update(status=PW.READY, instr=s.get("instr") or "Please check where your background job stands.")

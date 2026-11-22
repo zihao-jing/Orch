@@ -166,6 +166,9 @@ class Builder:
     def __init__(self, rd: Path, d: Dict[str, Any], chat_all: List[Dict[str, Any]], events: List[Tuple[int, Dict[str, Any]]]):
         self.rd, self.d, self.chat_all, self.events = rd, d, chat_all, events
         self.role = {a["name"]: a["role"] for a in d.get("agents") or []}
+        for t in d.get("turns") or []:
+            if t.get("agent") and t.get("role"):
+                self.role.setdefault(t["agent"], t["role"])  # historical copies may no longer be in the roster
         self.called = {a["name"]: a["called"] for a in d.get("agents") or []}
         self.mgr = next((a["name"] for a in d.get("agents") or [] if a["role"] == "manager"), "manager")
         self.items: List[Dict[str, Any]] = []
@@ -229,13 +232,24 @@ class Builder:
             if t.get("par_worker") and to_role == "worker":  # B11: a review of one of several workers: its lane
                 to = str(t["par_worker"])
             rows = routes.get(tid) or []
+            recorded = None
+            if role == "verifier" and purpose not in ("check", "compact"):
+                # A critic turn is not itself an instruction to a worker. Use recorded delivery;
+                # explicit messages to other recipients get their own rows below.
+                recipients = (self.d.get("_turn_recipients") or {}).get(tid) or rows
+                plain = [r for r in recipients if r.get("i") is None and r.get("to")]
+                choices = plain or [r for r in recipients if r.get("to") and r.get("status") != "you"]
+                targets = {r["to"] for r in choices}
+                recorded = choices[0] if len(targets) == 1 else None
+                to = recorded["to"] if recorded else ""
+                to_role = self.role_of(to) if to else "verifier"
             run = t.get("status") == "running"
             if run:
                 status = "running"
             elif t.get("status") not in ("ok", None):
                 status = str(t.get("status"))
             else:
-                mine = [r for r in rows if self.role_of(r.get("to")) == to_role]
+                mine = [recorded] if recorded else [r for r in rows if r.get("to") == to]
                 status = _ROUTE_STATUS.get(str(mine[0].get("status")), "") if mine else ""
             line = "session compacted" if kind == "system" else ("writing…" if run else line_of(t.get("output") or ""))
             ts = t.get("started_at")
@@ -244,7 +258,7 @@ class Builder:
                      len=t.get("output_len"), in_len=t.get("input_len"), verdict=t.get("verdict"),
                      round=t.get("round"), model=t.get("model"))
             for r in rows:  # each <message> it passed on to another level: an item in that block too
-                if r.get("status") == "you" or not r.get("to") or self.role_of(r.get("to")) == to_role:
+                if r.get("status") == "you" or not r.get("to") or r.get("to") == to:
                     continue
                 self.add(f"t:{tid}:{r.get('i')}", ts, agent, str(r.get("to")), "msg",
                          r.get("preview") or "", _ROUTE_STATUS.get(str(r.get("status")), str(r.get("status") or "")),
@@ -340,7 +354,8 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
            recovered: Optional[List[Dict[str, Any]]] = None) -> Dict[int, List[str]]:
     """Each item's milestone (`ms`, -1 before the milestones) and step (`step`: 1.. by the critic's plan, total+1 after
     its last step, 0 for a milestone without a plan), by time. Returns {milestone: step labels}."""
-    seq = sorted(((t.get("started_at") or "", t.get("milestone")) for t in turns if t.get("started_at")),
+    seq = sorted(((t.get("started_at") or "", t.get("milestone")) for t in turns
+                  if t.get("started_at") and t.get("milestone") is not None),
                  key=lambda x: x[0])
     keys = [x[0] for x in seq]
     plans: Dict[int, List[Tuple[str, int, int]]] = {}  # timestamp, priority, next step
@@ -353,6 +368,11 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
         if type(step) is int and step > 0:
             explicit[t["turn_id"]] = step
             workers[(t.get("milestone"), t.get("round"), t.get("agent"))] = step
+        elif t.get("purpose") == "work" and t.get("par_worker"):
+            # A parallel follow-up after a step passed has no new assignment. Do not borrow
+            # the global checklist's next step (which can belong to a different worker).
+            explicit[t["turn_id"]] = 0
+            workers[(t.get("milestone"), t.get("round"), t.get("agent"))] = 0
     for t in turns:
         if t.get("purpose") == "par_review" and t.get("par_worker"):
             step = workers.get((t.get("milestone"), t.get("round"), t["par_worker"]))
@@ -381,11 +401,31 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
             plans.setdefault(t["milestone"], []).append((ts, 1, step))
     for ps in plans.values():
         ps.sort()
+    # Old check turns omitted milestone/step metadata. Project them onto the work they watched;
+    # checks can share another worker's round number, so round alone is not sufficient.
+    checks = {}
+    for t in turns:
+        if t.get("purpose") != "check":
+            continue
+        watched = [w for w in turns if t.get("watching") and w.get("agent") == t["watching"]
+                   and w.get("purpose") == "work" and w.get("milestone") is not None
+                   and w.get("started_at") and w["started_at"] <= (t.get("started_at") or "")]
+        if watched:
+            w = max(watched, key=lambda w: w["started_at"])
+            checks[t["turn_id"]] = w["milestone"]
+            if w["turn_id"] in explicit:
+                explicit.setdefault(t["turn_id"], explicit[w["turn_id"]])
+        elif t.get("milestone") is None:
+            i = bisect.bisect_right(keys, t.get("started_at") or "") - 1
+            if i >= 0:
+                checks[t["turn_id"]] = seq[i][1]
     last_ms = seq[-1][1] if seq and seq[-1][1] is not None else -1
     for it in items:
         ts = it["ts"]
         if it.pop("_turn", False):
             ms = it.get("ms", -1)
+            if ms == -1 and it.get("tid") in checks:
+                ms = checks[it["tid"]]
         elif ts:
             i = bisect.bisect_right(keys, ts) - 1
             ms = seq[i][1] if i >= 0 and seq[i][1] is not None else -1
@@ -394,6 +434,8 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
         it["ms"] = ms
         if it.get("tid") in explicit:
             it["step"] = explicit[it["tid"]]
+            if it["step"] == 0:
+                it["unassigned"] = True
             continue
         ps = plans.get(ms)
         if not ps:
@@ -425,6 +467,8 @@ def groups(items: List[Dict[str, Any]], labels: Dict[int, List[str]]) -> Tuple[L
             g = out[k] = {"key": k, "ms": it["ms"], "step": s, "label": label[:LINE_CHARS], "n": 0, "needs": 0,
                           "other": 0, "last": "", "blocks": {}}
         g["n"] += 1
+        if it.get("unassigned"):
+            g["unassigned"] = True
         b = g["blocks"].setdefault(it["block"], [0, 0])  # [messages, all lines] of each block in this step
         b[1] += 1
         b[0] += 0 if it["kind"] in OTHER_KINDS else 1

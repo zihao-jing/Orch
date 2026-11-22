@@ -1,5 +1,5 @@
 """B5: progress checks. A monitor (or the critic's side session) looks at a running worker turn or job every few
-minutes and reports evidence to the critic; the critic is woken only for problems; no rounds are spent polling a
+minutes and reports evidence to the critic; the critic is woken for problems and every second healthy check; no rounds are spent polling a
 job; a safety limit replaces the flat turn timeout; the board gets a live status line."""
 
 import json
@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orch import progress as P  # noqa: E402
 from orch.config import AgentConfig, load_config  # noqa: E402
 from orch.managed import ManagedRunner  # noqa: E402
+from orch.recorder import Recorder  # noqa: E402
 from role_view_checks import assert_no_role_leaks  # noqa: E402
 from test_orch import make_cfg, managed, run, turns  # noqa: E402
 
@@ -54,17 +55,61 @@ class TestProgressUnit(unittest.TestCase):
 
     def test_turn_limit_semantics(self):
         a = AgentConfig(name="w", role="worker", timeout=7200)
-        self.assertEqual(a.turn_limit(watched=True), 28800)  # a watched turn: the safety limit, not the old 2 h
+        self.assertEqual(a.turn_limit(watched=True), 0)  # progress checks, no default deadline
         self.assertEqual(a.turn_limit(watched=False), 7200)  # nobody watches it: `timeout` as before
         a.safety_timeout = 600
         self.assertEqual((a.turn_limit(True), a.turn_limit(False)), (600, 600))
+        a.safety_timeout = 0
+        self.assertEqual((a.turn_limit(True), a.turn_limit(False)), (0, 0))
+
+    def test_explicit_zero_survives_config_loading(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _cfg(Path(td), worker_cfg={"safety_timeout": 0, "check_every": 0, "timeout": 0.1})
+            a = load_config(cfg).monitor('m').agent('writer')
+            self.assertEqual(a.safety_timeout, 0)
+            self.assertEqual(a.turn_limit(False), 0)
 
 
 class TestProgressRun(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
 
-    def test_monitor_checks_a_long_turn_and_fine_reports_wait_for_the_review(self):
+    def report_runner(self):
+        cfg = load_config(_cfg(self.tmp, monitor={}))
+        r = ManagedRunner(cfg.monitor('m'), threading.Event(), log=lambda s: None)
+        r.rec = Recorder.create(str(self.tmp / 'out'), 'm', cfg.monitor('m').snapshot())
+        return r
+
+    def test_cadence_is_per_worker_resets_on_problem_and_survives_reload(self):
+        r = self.report_runner()
+        a = r.mon.agent('writer')
+        b = AgentConfig(name='writer-2', role='worker')
+        watch = {'kind': 'turn'}
+        sequence = [(a, P.OK, False), (b, P.OK, False), (a, P.OK, True),
+                    (b, P.QUIET, True), (b, P.OK, False), (b, P.OK, True),
+                    (b, P.OFF_TRACK, True), (b, P.STOPPED, True)]
+        for i, (worker, status, expected) in enumerate(sequence):
+            r.report_check(r.monitor_agent, worker, watch, 'Evidence.', status, P.is_problem(status), str(i), 20)
+            m = r.ledger.rows[-1]
+            self.assertEqual(m['activate'], expected, (i, m))
+            self.assertIn(f'Progress check: {worker.name} · {status}', m['text'])
+            self.assertIn(f'Reply target: **{worker.name}** (only if not healthy).', m['text'])
+            r.ledger.mark(m, 'delivered')
+            r.st['fwd'] = {}
+            # The persisted state, rather than an in-memory watch, owns the cadence.
+            r.rec.state = json.loads(json.dumps(r.st))
+
+    def test_pending_wake_is_not_lost_when_a_new_healthy_report_arrives(self):
+        r = self.report_runner()
+        w = r.mon.agent('writer')
+        for i in range(3):
+            r.report_check(r.monitor_agent, w, {'kind': 'turn'}, f'Evidence {i}', P.OK, False, str(i), 20)
+        rows = r.ledger.rows
+        self.assertEqual([m['status'] for m in rows], ['superseded', 'superseded', 'sent'])
+        self.assertTrue(rows[-1]['activate'])
+        self.assertEqual(r.st['fwd']['critic'], [rows[-1]['text']])
+
+    def test_monitor_checks_wake_critic_every_second_healthy_report(self):
         cfg = _cfg(self.tmp, monitor={"replies": {"check": [FINE]}})
         seen = []
         orig = ManagedRunner.end_watch
@@ -82,12 +127,15 @@ class TestProgressRun(unittest.TestCase):
                   and t["round"] == first_review["round"]]
         self.assertGreaterEqual(len(checks), 3)  # every 0.3 s of a 1.5 s turn
         self.assertTrue(all(t.get("watching") == "writer" and t.get("watch_kind") == "turn" for t in checks))
+        self.assertTrue(all(t.get("milestone") == 0 for t in checks))
         self.assertIn("Quick check: how is the run going?", checks[0]["input"])
         self.assertIn("Latest activity in the turn's output", checks[-1]["input"])
-        # all fine: no extra critic turn; the newest report waits for the review, the older ones are replaced
-        self.assertFalse([t for t in ts if t["agent"] == "critic" and t["purpose"] == "incoming"])
-        self.assertEqual(first_review["input"].count("Progress check,"), 1)
-        self.assertIn("out.csv has 120 rows", first_review["input"])
+        woke = [t for t in ts if t["agent"] == "critic" and t["purpose"] == "incoming"]
+        self.assertTrue(woke)
+        self.assertIn("Progress check: writer · ok", woke[0]["input"])
+        self.assertIn("out.csv has 120 rows", woke[0]["input"])
+        reports = _events(rec, "check_report")
+        self.assertEqual([e["wakes"] for e in reports[:3]], [False, True, False])
         msgs = [m for m in rec.state["messages"] if m.get("kind") == "progress_check"]
         self.assertEqual({m["status"] for m in msgs}, {"superseded", "delivered"})
         self.assertTrue(all(m["to"] == "critic" and m["from"] == "monitor" for m in msgs))
@@ -114,31 +162,33 @@ class TestProgressRun(unittest.TestCase):
 
     def test_a_quiet_run_wakes_the_critic_who_messages_the_worker(self):
         critic = {"replies": {"incoming": ['<message to="Sam">Your log has been quiet for a while; check whether '
-                                           'train.py is still running and tell me.</message>']}}
+                                           'train.py is still running and tell me.</message>', 'No intervention needed.']}}
         cfg = _cfg(self.tmp, monitor={"replies": {"check": [QUIET, FINE]}}, critic=critic, worker={"delays": {"work": 1.2}})
         status, rec = run(cfg)
         self.assertEqual(status, "completed")
         ts = turns(rec)
         woke = [t for t in ts if t["agent"] == "critic" and t["purpose"] == "incoming"]
         self.assertTrue(woke)
-        self.assertIn("Progress check,", woke[0]["input"])
+        self.assertIn("Progress check: writer · quiet", woke[0]["input"])
         self.assertIn("log quiet for 25 min", woke[0]["input"])
-        self.assertIn("found something that may need you", woke[0]["input"])
-        # the critic's message reaches the worker; nothing of this goes up to the manager
+        self.assertNotIn("found something that may need you", woke[0]["input"])
+        self.assertNotIn('message to="The worker"', woke[0]["input"])
+        # The intervention reaches the worker; later healthy acknowledgments do not wake the manager.
         self.assertTrue(any("log has been quiet" in w["message"] for w in rec.state.get("worker_messages") or []))
         self.assertFalse([m for m in rec.state["messages"] if m["from"] == "critic" and m["to"] == "boss"
-                          and m.get("purpose") == "incoming"])
+                          and m.get("purpose") == "incoming" and m.get("activate")])
         self.assertTrue(any(e.get("wakes") for e in _events(rec, "check_report")))
         assert_no_role_leaks(self, rec, load_config(cfg).monitor("m"))
 
-    def test_a_silent_turn_is_noticed_within_one_interval_even_if_the_monitor_says_ok(self):
+    def test_explicit_healthy_assessment_is_not_overridden_by_conversation_silence(self):
         cfg = _cfg(self.tmp, monitor={"replies": {"check": [FINE]}}, worker={"delays": {"work": 0.9}, "activity": False})
         status, rec = run(cfg)
         self.assertEqual(status, "completed")
         ts = turns(rec)
         first = next(t for t in ts if t["purpose"] == "check")
         self.assertIn("Nothing written in the turn's output", first["input"])
-        self.assertTrue(any(e["status"] == "quiet" and e.get("wakes") for e in _events(rec, "check_report")))
+        self.assertTrue(all(e["status"] == "ok" for e in _events(rec, "check_report")))
+        self.assertFalse(_events(rec, "check_report")[0]["wakes"])
         self.assertTrue([t for t in ts if t["agent"] == "critic" and t["purpose"] == "incoming"])
 
     def test_without_a_monitor_the_critic_checks_in_a_side_session(self):
@@ -154,8 +204,8 @@ class TestProgressRun(unittest.TestCase):
         self.assertEqual(len({t["session_id"] for t in side}), len(side))  # a fresh session for each check
         self.assertEqual(len({t["session_id"] for t in main}), 1)  # the critic's own conversation is untouched
         self.assertFalse(set(t["session_id"] for t in side) & set(t["session_id"] for t in main))
-        review = next(t for t in main if t["purpose"] == "verify")
-        self.assertIn("out.csv has 120 rows", review["input"])
+        self.assertTrue(any("out.csv has 120 rows" in t["input"] for t in main
+                            if t["purpose"] in ("verify", "incoming")))
         assert_no_role_leaks(self, rec, load_config(cfg).monitor("m"))
 
     def test_the_critic_can_check_in_its_own_session(self):
@@ -183,7 +233,7 @@ class TestProgressRun(unittest.TestCase):
         status, rec = run(_cfg(self.tmp, monitor={"replies": {"check": [FINE]}}, worker=worker))
         self.assertEqual(status, "completed")
         ts = turns(rec)
-        seq = [(t["agent"], t["purpose"]) for t in ts if t["purpose"] in ("work", "verify", "incoming")]
+        seq = [(t["agent"], t["purpose"]) for t in ts if t["purpose"] in ("work", "verify")]
         self.assertEqual(seq[:4], [("writer", "work"), ("critic", "verify"), ("writer", "work"), ("critic", "verify")])
         job_checks = [t for t in ts if t["purpose"] == "check" and t.get("watch_kind") == "job"]
         self.assertGreaterEqual(len(job_checks), 2)
