@@ -29,7 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .backends import StopRequested, TurnRequest, TurnResult, claude_stream_report, get_backend
+from .backends import (StopRequested, TurnRequest, TurnResult, backend_executable, claude_stream_report, get_backend,
+                       missing_executable)
 from .config import HOT_AGENT_FIELDS, RUN_PROMPT_VARS, AgentConfig, MonitorConfig, load_config
 from .recorder import Recorder, now_iso, read_json
 from . import jobs as _jobs
@@ -988,11 +989,28 @@ class MonitorRunner:
                              f"({bill}). No retry or backup; the run stops. Fix the account and resume.")
                 self.log(f"r{rnd} ⛔ {agent.name}: billing or account problem; stopping")
                 break
+            nxt_i = vi + 1
+            exe = missing_executable(res)
+            if exe:  # a setup problem: no retry; only a backup that starts another executable can help
+                reason = f"executable not found: {exe}"
+                attempts[-1]["reason"] = reason
+                other = [i for i in range(vi + 1, len(chain))
+                         if backend_executable(chain[i].backend, chain[i].options) != exe]
+                if not other:
+                    record["setup_error"] = reason
+                    rec.event("setup_error", turn=record["turn_id"], agent=agent.name, model=v.label, executable=exe,
+                              problem=f"{agent.name} ({v.label}): executable not found: {exe}; the run stops")
+                    rec.progress(f"⛔ `{record['turn_id']}` **{agent.name}** (`{v.label}`): executable `{exe}` not "
+                                 f"found. No retry, and no backup uses another executable; the run stops. Install it "
+                                 f"or fix PATH / the `executable` option, then resume.")
+                    self.log(f"r{rnd} ⛔ {agent.name}: executable not found: {exe}; stopping")
+                    break
+                nxt_i = other[0]
             # B8: a provider error, overload, rate limit or crash (anything but an unusable reply) is retried on the
             # same model after each of the configured waits (1, 2, 4 min); an unusable reply (exit 0, no text) gets
             # the `retries` immediate corrections. Then the backups take over in order.
             waits = list(getattr(agent, "retry_waits", []) or [])
-            transient = stalled or bool(pe) or not reason
+            transient = not exe and (stalled or bool(pe) or not reason)
             if stalled:
                 # A provider recovery timeout uses the same Orch retry budget as other transient errors.
                 # Keep the session and evidence of completed work when continuing the interrupted attempt.
@@ -1015,7 +1033,7 @@ class MonitorRunner:
                         record["input"] = urgent_send
                     attempt += 1
                     continue
-            elif not stalled and fixes < v.retries:
+            elif not stalled and not exe and fixes < v.retries:
                 fixes += 1
                 if pe:
                     self.wait_provider(agent, pe)
@@ -1023,9 +1041,9 @@ class MonitorRunner:
                     break
                 attempt += 1
                 continue
-            if vi + 1 >= len(chain):
+            if nxt_i >= len(chain):
                 break
-            nxt = chain[vi + 1]
+            nxt = chain[nxt_i]
             if stalled and sid and nxt.session_key == v.session_key:
                 urgent_send = (self.tpl("turn_continue").strip() or "continue") + "\n\n" + recovery_note
             if stalled:
@@ -1033,12 +1051,12 @@ class MonitorRunner:
             record.setdefault("fallbacks", []).append({"at": now_iso(), "from": v.label, "to": nxt.label,
                                                        "reason": reason or res.status})
             rec.event("fallback", turn=record["turn_id"], agent=agent.name, old=v.label, new=nxt.label,
-                      reason=reason or res.status, backup=vi + 1)
+                      reason=reason or res.status, backup=nxt_i)
             self.set_reliability(agent, model=nxt.label, state="switched", reason=reason or res.status)
             rec.progress(f"↪ `{record['turn_id']}` **{agent.name}**: `{v.label}` failed ({reason or res.status}); "
                          f"switching to backup `{nxt.label}`")
             self.log(f"r{rnd} ↪ {agent.name}: {v.label} failed, switching to backup {nxt.label}")
-            vi, attempt, entering, waited, fixes = vi + 1, 0, True, 0, 0
+            vi, attempt, entering, waited, fixes = nxt_i, 0, True, 0, 0
         lock.__exit__(None, None, None)
         if attempts:  # the model this turn ended on (after any switch to a backup)
             self.turn_models = {**(getattr(self, "turn_models", None) or {}), agent.name: v.label}
@@ -1052,7 +1070,7 @@ class MonitorRunner:
         if res.status == "ok":
             for m in updates:
                 message_status(m["id"], "accepted", {"via": "prompt"})
-        billing = bool(record.get("billing_error"))
+        billing = bool(record.get("billing_error") or record.get("setup_error"))
         if fwd and res.status != "stopped" and not billing and not self.should_stop():  # a stopped turn is re-sent on resume
             left = (self.st.get("fwd") or {}).get(agent.name) or []
             if left[:len(fwd)] == fwd:
@@ -1102,8 +1120,10 @@ class MonitorRunner:
         if res.status == "stopped":
             raise StopRequested()
         if billing:  # B8: stop the whole run (as `orch stop` would); the board says why; resume once it is fixed
-            rec.set(stop_reason=f"billing or account problem ({agent.name}, {v.label}): {record['billing_error']}")
-            (rec.run_dir / "STOP").write_text("billing or account problem\n", encoding="utf-8")
+            what = "billing or account problem" if record.get("billing_error") else "setup problem"
+            rec.set(stop_reason=f"{what} ({agent.name}, {v.label}): "
+                                f"{record.get('billing_error') or record.get('setup_error')}")
+            (rec.run_dir / "STOP").write_text(what + "\n", encoding="utf-8")
             raise StopRequested()
         if res.status == "ok" and (self.st.get("asked") or {}).get("agent") == agent.name:
             rec.set(asked=None)  # the question has been dealt with

@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable
 
-from .backends import Backend, TurnRequest, TurnResult, _kill, _opt_list
+from .backends import MISSING_EXE, Backend, TurnRequest, TurnResult, _kill, _opt_list
 
 
 class _Cancelled(Exception):
@@ -35,6 +35,11 @@ def run_turn(req: TurnRequest, should_stop: Callable[[], bool], compact: bool = 
         proc = subprocess.Popen(cmd, cwd=req.cwd, env={**os.environ, **req.env},
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", start_new_session=True)
+    except FileNotFoundError as e:
+        why = f"{MISSING_EXE}{cmd[0]}"
+        if req.cwd and e.filename == req.cwd:
+            why = f"working directory not found: {req.cwd}"
+        return TurnResult("error", "", req.session_id, stderr=why + "\n", command=cmd)
     except OSError as e:
         return TurnResult("error", "", req.session_id, stderr=str(e), command=cmd)
 

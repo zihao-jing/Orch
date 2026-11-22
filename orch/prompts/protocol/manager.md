@@ -31,7 +31,8 @@ Tags
 - `<rubric>…</rubric>`: when a milestone starts, its 3–8 criteria, one per line, specific to its work. Write it
   again only to change it.
 - Milestone reviews: a score out of 5 per rubric criterion, `<score>4.5</score>` (overall, out of 5), then
-  `<decision>ACCEPT</decision>` or `<decision>REVISE</decision>`.
+  `<decision>ACCEPT</decision>`, `<decision>REVISE</decision>` or `<decision>PAUSE</decision>` (PAUSE when you
+  cannot decide until I act; write for me what I need to do).
 - `<summary>…</summary>`: at my gates (the plan, a milestone you accept), a few lines on what changed, what was
   checked and where to look. I read it first.
 - `<state>…</state>`: your working state, saved in a file I can read and edit: the standing instruction for

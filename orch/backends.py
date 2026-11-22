@@ -70,6 +70,28 @@ class StopRequested(Exception):
     pass
 
 
+# a turn whose CLI could not be started at all: a setup problem (fix the environment), not a provider error
+MISSING_EXE = "executable not found: "
+DEFAULT_EXE = {"claude": "claude", "qwen": "qwen", "opencode": "opencode", "codex": "codex", "agy": "agy"}
+
+
+def missing_executable(res: TurnResult) -> str:
+    """The executable a failed turn could not start; '' otherwise."""
+    if res.status != "error":
+        return ""
+    m = re.search(r"^" + re.escape(MISSING_EXE) + r"(.+)$", res.stderr or "", re.M)
+    return m.group(1).strip() if m else ""
+
+
+def backend_executable(backend: str, options: Dict[str, Any]) -> str:
+    """The executable a backend with these options starts ('' when it starts none)."""
+    if backend == "command":
+        cmd = options.get("command")
+        cmd = shlex.split(cmd) if isinstance(cmd, str) else [str(x) for x in (cmd or [])]
+        return cmd[0] if cmd else ""
+    return str(options.get("executable") or DEFAULT_EXE.get(backend, ""))
+
+
 # --------------------------------------------------------------------------- process helper
 
 
@@ -92,7 +114,9 @@ def run_process(cmd: List[str], stdin_text: Optional[str], cwd: str, timeout: fl
             start_new_session=True,
         )
     except FileNotFoundError as e:
-        return None, "", f"executable not found: {e}", "error"
+        if cwd and e.filename == cwd:
+            return None, "", f"working directory not found: {cwd}", "error"
+        return None, "", f"{MISSING_EXE}{cmd[0]}\n", "error"
     except OSError as e:
         return None, "", f"failed to start: {e}", "error"
 
@@ -1812,9 +1836,12 @@ def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
     import dataclasses
     res = TurnResult("error", "", req.session_id, stderr="no model to run")
     tried: List[str] = []
+    missing: set = set()
     for v in agent.variants():
         if req.session_id and session_key and v.session_key != session_key:
             continue
+        if backend_executable(v.backend, v.options) in missing:
+            continue  # the same missing executable: no point trying it again
         if on_model:
             on_model(v.label)
         try:
@@ -1824,6 +1851,8 @@ def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
         except Exception as e:
             res = TurnResult("error", "", req.session_id, stderr=f"{type(e).__name__}: {e}")
         tried.append(v.label)
+        if missing_executable(res):
+            missing.add(missing_executable(res))
         if res.status in ("ok", "stopped", "timeout") or should_stop():
             break
     if len(tried) > 1:
