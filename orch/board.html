@@ -253,7 +253,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
  <div class="grid" id="grid">
   <main>
    <div id="needs"></div>
-   <div class="card" id="now-card"><h2>Working now</h2><div class="nowl" id="now"></div><div class="stats" id="stats"></div></div>
+   <div class="card" id="now-card"><div class="row" style="justify-content:space-between;margin-bottom:10px"><h2 style="margin:0">Working now</h2><label class="mute" style="font-size:12px"><input type="checkbox" id="model-switches" checked> Model switches</label></div><div class="nowl" id="now"></div><div class="stats" id="stats"></div></div>
    <div class="card" id="tl-card"><div class="milestone-head"><h2>Milestones</h2><div class="tlbar" id="msfilter" role="group" aria-label="Milestone details"></div></div><div class="steps" id="steps"></div><div id="msinfo"></div>
     <div class="tlbar" style="margin:10px 0 0"><input type="search" id="q" placeholder="Search all messages…" aria-label="Search all messages">
      <label title="Progress checks, jobs, reminders sent, retries, model switches, session resets and warnings"><input type="checkbox" id="other"> checks, jobs &amp; system lines</label></div>
@@ -438,7 +438,7 @@ function paintLive(t){ if (raf[t]) return; raf[t] = requestAnimationFrame(() => 
 function render(){
   if (!D || !D.run_id){ $('title').textContent = 'Orch board · ' + M; setHTML($('status'), stPill('starting')); return; }
   const mg = D.managed || {};
-  const status = D.discussion_applying ? 'discussion_applying' : D.status === 'awaiting_approval' && pendingGate() ? 'response_sent' : D.status;
+  const status = D.discussion_applying && (D.discussion_progress||{}).stage !== 'paused' ? 'discussion_applying' : D.status === 'awaiting_approval' && pendingGate() ? 'response_sent' : D.status;
   $('title').textContent = D.monitor; setHTML($('status'), stPill(status)); $('runid').textContent = D.run_id;
   document.title = (status === 'awaiting_approval' ? '⏸ ' : '') + D.monitor + ' · Orch Board';
   renderNeeds(mg); renderNow(mg); renderTimeline(); renderQs(); renderReviews(mg); renderDecisions(); renderAudit(); renderChat();
@@ -451,13 +451,36 @@ const DOING = {discussion_apply:'applying discussion', plan:'drafting the milest
   review:'scoring the milestone', guidance:'passing on guidance', feedback:'reading your feedback', compact:'compacting its session',
   checkin:'sending a quick update', check:'checking on the work', ack:'reading the quick update', incoming:'answering a message that just arrived'};
 const mins = since => since ? Math.max(0, Math.round((Date.now() - Date.parse(since)) / 60000)) : 0;
+let showModelSwitches = true;
+try { showModelSwitches = localStorage.getItem('orch-model-switches') !== '0'; } catch(e){}
+$('model-switches').checked = showModelSwitches;
+$('model-switches').addEventListener('change', e => {
+  showModelSwitches = e.target.checked;
+  try { localStorage.setItem('orch-model-switches', showModelSwitches ? '1' : '0'); } catch(err){}
+  renderNow(D.managed || {});
+});
+const openErrors = new Set();
+function errorDetails(key, reason){
+  if (!reason) return '';
+  const text = String(reason), first = text.split('\n')[0], short = first.length > 140 ? first.slice(0, 140) + '…' : first;
+  return `<details data-error="${esc(key)}"${openErrors.has(key) ? ' open' : ''}><summary>${esc(short)}</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto">${esc(text)}</pre></details>`;
+}
+function workDetails(row, running){
+  const assignment = ((running||{}).step_label || row.step_label || row.step || '')
+    .replace(/^(Step (\d+))\s*·\s*Step \2\b\s*[:·—-]?\s*/i, '$1 · ');
+  const location = (running||{}).location || row.location || '';
+  const tid = (running||{}).turn_id;
+  const parts = [assignment, location].filter(Boolean).map(esc);
+  if (tid) parts.push(`<a href="#" data-goto="${esc(tid)}">View work</a>`);
+  return parts.length ? `<span class="mute"> · ${parts.join(' · ')}</span>` : '';
+}
 function renderNow(mg){  // the switches, and the status area: only the agents working now, one line each
   const nb = $('night'), want = nightWanted();  // the switch as last set (the run applies it when the current turn ends)
   nb.textContent = want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
   const qOpen = (D.questions||[]).some(q => q.status === 'open' && q.to === 'human');  // B9: no switch mid-question
   nb.disabled = qOpen && !(D.night_pending != null && D.night_pending !== !!D.night);
   nb.title = qOpen ? 'A question for you is open: night mode can switch once it is answered' : 'Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review';
-  const db = $('discuss'), dw = discussWanted();  // B6: shown as last set, at once
+  const db = $('discuss'), dw = discussWanted() || !!mg.discussion_saved;
   db.textContent = dw ? '✓ End discussion' : '💬 Discuss'; db.classList.toggle('ok', dw);
   db.title = dw ? 'End the discussion and choose whether the manager should act' : 'Discuss changes before applying them';
   db.disabled = !D.discussion_supported || !!D.discussion_applying;
@@ -465,7 +488,7 @@ function renderNow(mg){  // the switches, and the status area: only the agents w
   ab.title = D.discussion_supported ? 'Apply the decisions already agreed with the manager' : 'Available after the run restarts';
   if (!D.discussion_supported) db.title = ab.title;
   ab.textContent = D.discussion_applying ? 'Processing discussion…' : 'Apply discussion';
-  ab.hidden = !!chatWith && chatWith !== mgrName();
+  ab.hidden = (!!chatWith && chatWith !== mgrName()) || !hasDiscussion(mg);
   db.hidden = !(dw || !chatWith || chatWith === mgrName());  // a discussion is with the manager: shown there, or while open
   $('discpill').hidden = !dw;  // on the main page only while a discussion is open, as a reminder
   const rb = $('reviewbtn'); rb.disabled = !!mg.review_req; rb.textContent = mg.review_req ? '📝 Review asked…' : '📝 Review file';
@@ -476,24 +499,25 @@ function renderNow(mg){  // the switches, and the status area: only the agents w
     const m = x.since_ts ? Math.max(0, Math.round((Date.now()/1000 - x.since_ts)/60)) : 0, bad = x.status && x.status !== 'ok';
     lined.add(x.agent);
     const running = (D.running||[]).find(t => t.agent === x.agent);
-    lines.push(`<div class="${bad ? 'bad' : ''}" title="${esc(x.checked_at ? 'last check ' + x.checked_at : 'no check yet')}"><span class="dot live"></span> <b>${esc(called(x.agent))}</b>${running ? ' · ' + modelBadge(running.model) : ''}: ${x.step ? esc(x.step) + ', ' : ''}${x.kind === 'job' ? 'job running' : 'running'} ${m} min — ${esc(x.summary||'')}</div>`); });
+    lines.push(`<div class="${bad ? 'bad' : ''}" title="${esc(x.checked_at ? 'last check ' + x.checked_at : 'no check yet')}"><span class="dot live"></span> <b>${esc(called(x.agent))}</b>${running ? ' · ' + modelBadge(running.model) : ''}: ${x.kind === 'job' ? 'waiting for background jobs' : 'running'} ${m} min — ${esc(x.summary||'')}${workDetails(x, running)}</div>`); });
   (D.running||[]).forEach(t => { if (lined.has(t.agent)) return; lined.add(t.agent);
-    lines.push(`<div><span class="dot live"></span> <b>${esc(called(t.agent))}</b> · ${modelBadge(t.model)}: ${esc(DOING[t.purpose]||t.purpose)}, running ${mins(t.started_at)} min</div>`); });
+    lines.push(`<div><span class="dot live"></span> <b>${esc(called(t.agent))}</b> · ${modelBadge(t.model)}: ${esc(DOING[t.purpose]||t.purpose)}, running ${mins(t.started_at)} min${workDetails(t, t)}</div>`); });
   if (D.auditing) {  // the auditor reads how the agents talked (not the task): shown so the run does not look idle
     const au = D.auditing;
     lines.push(`<div><span class="dot live"></span> <b>${esc(called(au.agent || 'auditor'))}</b>: reading how the agents talked, rounds ${au.lo}–${au.hi}, running ${mins(au.since)} min</div>`); }
   Object.entries(D.reliability||{}).forEach(([n, x]) => {  // B8: a retry waiting, or a backup in use
+    if (!showModelSwitches && (x.state === 'switched' || x.state === 'backup')) return;
     // A previous turn's failure is history once a newer turn is running. Keep current retries and backups visible.
     if (x.state === 'failed' && x.at && (D.running||[]).some(t => t.agent === n && Date.parse(t.started_at) > Date.parse(x.at))) return;
-    const what = x.state === 'retrying' ? `${esc(x.model)} failed (${esc(x.reason||'error')}); retry ${x.retry}/${x.of} in ${x.wait_s}s`
-      : x.state === 'switched' ? `switched to backup ${esc(x.model)} (${esc(x.reason||'error')})`
+    const what = x.state === 'retrying' ? `${esc(x.model)} failed; retry ${x.retry}/${x.of} in ${x.wait_s}s`
+      : x.state === 'switched' ? `switched to backup ${esc(x.model)}`
       : x.state === 'backup' ? `on backup ${esc(x.model)}; ${esc(x.primary||'primary')} again after ${x.until ? new Date(x.until * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'the cooldown'}`
-      : `${esc(x.model)}: ${esc(x.state)} (${esc(x.reason||'')})`;
-    lines.push(`<div class="bad">⏳ <b>${esc(called(n))}</b>: ${what}</div>`); });
+      : `${esc(x.model)}: ${esc(x.state)}`;
+    lines.push(`<div class="bad">⏳ <b>${esc(called(n))}</b>: ${what}${errorDetails(n + ':' + (x.at || ''), x.reason)}</div>`); });
   Object.keys(D.terminal||{}).forEach(n => lines.push(`<div class="mute" title="orch holds this agent's turns and routes the messages it writes there">⌨ ${esc(called(n))} is open in a terminal</div>`));
   if (D.stop_reason && D.status === 'stopped') lines.push(`<div class="bad">⛔ ${esc(D.stop_reason)}</div>`);
-  if (D.error && D.status === 'failed') lines.push(`<div class="bad">⛔ ${esc(D.error)}</div>`);
-  if (D.discussion_applying) lines.push('<div class="mute">Processing discussion… Waiting for the manager to apply your agreed decisions.</div>');
+  if (D.error && D.status === 'failed') lines.push(`<div class="bad">⛔ Run failed${errorDetails('run:' + D.run_id, D.error)}</div>`);
+  if (D.discussion_applying && !(D.running||[]).some(t => t.purpose === 'discussion_apply')) lines.push(`<div class="mute">${esc((D.discussion_progress||{}).text || 'Waiting to apply the discussion…')}</div>`);
   else if (pendingGate()) lines.push(`<div class="mute">✓ Response sent. ${pendingGate().decision === 'revise' ? 'Waiting for the manager.' : 'Waiting for the run to continue.'}</div>`);
   if (!lines.length) lines.push(`<div class="mute">${mg.held ? (String(mg.held.why).startsWith('question') ? '⏸ Nobody is working: the work waits for your answer to ' + esc(String(mg.held.why).slice(9)) : '⏸ Nobody is working: the manager\'s next step waits for the discussion to close')
     : D.status === 'awaiting_approval' ? ((mg.gate||{}).kind === 'wait' ? '⏸ Paused until your task is done' : '⏸ Nobody is working: waiting for your OK')
@@ -517,16 +541,19 @@ function renderNeeds(mg){
   const g = pendingGate() || D.discussion_applying ? null : mg.gate, mine = (D.questions||[]).filter(q => q.status === 'open' && q.to === 'human' && !D.discussion_applying && !QA[q.id] && !qThread(q.id).some(c => c.settle && c.status === 'running'));  // settled ones leave; so does one the manager is writing up
   const threads = Object.fromEntries(mine.map(q => [q.id, qThread(q.id)]));
   const revs = (D.review_files||[]).filter(r => r.status === 'written' && r.exists);  // B9: a review file to comment in
-  const job = mg.job, sig = JSON.stringify([D.discussion_supported, D.discussion_applying, mg.discussion_saved, mg.discussion_error, job && job.since, g && g.key, discussWanted(), !!(mg.discussion_batch||{}).gate, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status)), revs.map(r => r.path)]);
+  const job = mg.job, dp = D.discussion_progress||{}, sig = JSON.stringify([D.discussion_supported, D.discussion_applying, dp, mg.discussion_saved, mg.discussion_error, job && job.since, g && g.key, discussWanted(), !!(mg.discussion_batch||{}).gate, mine.map(q => q.id), QA, D.can_chat, Object.values(threads).map(t => t.map(c => c.id + c.status)), revs.map(r => r.path)]);
   const el = $('needs'); if (el._sig === sig) return; el._sig = sig;
   const typed = {}; el.querySelectorAll('textarea,input').forEach(x => { if (x.id) typed[x.id] = x.value; });
   if (!g && !mine.length && !job && !revs.length && !D.discussion_applying && !mg.discussion_saved && !mg.discussion_error){ el.innerHTML = ''; return; }
-  let h = '<div class="card needs"><h2>' + (g || mine.length || revs.length ? 'Needs you' : 'Waiting for a job') + '</h2>';
-  if (D.discussion_applying) h += '<div class="rec">Processing discussion… The manager will apply the agreed answers and gate decision together.</div>';
+  let h = '<div class="card needs"><h2>' + (D.discussion_applying ? 'Applying discussion' : g || mine.length || revs.length || mg.discussion_error || mg.discussion_saved ? 'Needs you' : 'Waiting for a job') + '</h2>';
+  if (D.discussion_applying) {
+    h += `<div class="rec">${esc(dp.text || 'Waiting to apply the discussion…')}${dp.started_at ? ' Started at ' + tm(dp.started_at) + '.' : ''}</div>`;
+    if (dp.turn_id) h += `<div>${modelBadge(dp.model)}</div><div data-live="${esc(dp.turn_id)}"></div>`;
+  }
   else {
     if (mg.discussion_error) h += `<div class="rec">${esc(mg.discussion_error)}</div>`;
     else if (mg.discussion_saved) h += '<div class="mute">Discussion ended. Its instructions remain on hold until you apply it.</div>';
-    h += `<div class="row"><button class="ok" data-applydiscussion="1" ${D.discussion_supported ? '' : 'disabled title="Available after the run restarts"'}>Apply discussion</button></div>`;
+    if (hasDiscussion(mg)) h += `<div class="row"><button class="ok" data-applydiscussion="1" ${D.discussion_supported ? '' : 'disabled title="Available after the run restarts"'}>Apply discussion</button></div>`;
   }
   revs.forEach(r => { h += `<div class="q"><div class="row" style="align-items:center;gap:8px;margin-top:0">📝 <b>Review file to comment:</b> ${r.href ? `<a href="${esc(r.href)}" target="_blank">${esc(r.name)}</a>` : esc(r.name)}
       <span style="flex:1"></span><button class="sm" data-rc="${esc(r.path)}" title="Sends what you changed in the file (your comments) to the manager">↩ Send back comments</button></div>
@@ -901,7 +928,8 @@ function cardHTML(b, title, gsel){
   if (open && has.length === 1 && !has[0].step) body = stepItems(b, has[0]);
   else if (open) body = has.slice(0, limit).map((g, i) => {
     const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
-    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : g.unassigned ? 'No step assigned' : 'Before the steps'}</b><span class="lab">${esc(g.label || '')}</span>`
+    const label = g.step ? (g.label || '').replace(new RegExp('^Step\\s+' + g.step + '\\b\\s*[:·—-]?\\s*', 'i'), '') : (g.label || '');
+    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : g.unassigned ? 'No step assigned' : 'Before the steps'}</b><span class="lab">${esc(label)}</span>`
       + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
       + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
   }).join('');
@@ -931,12 +959,16 @@ function renderSteps(ms){
   setHTML($('msinfo'), mss[ms] ? MS_PANELS.filter(([f]) => openInfo.has(ms + '|' + f)).map(([f, label]) =>
     `<section class="milestone-panel" id="ms-panel-${f}" aria-label="${label}"><h3>${label}</h3>${msPanelHTML(ms, f)}</section>`).join('') : '');
 }
+function orderedStepGroups(gs, ms, running){
+  const activeUnassigned = g => g.unassigned && running.some(t => t.milestone === g.ms && t.par_worker && !(t.par_step > 0));
+  return gs.filter(g => g.ms === ms).sort((a, b) => Number(!!activeUnassigned(b)) - Number(!!activeUnassigned(a)) || b.step - a.step);
+}
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
   const gs = D.tl_groups || [], ms = shownMs();
   renderSteps(ms); renderFilter();
   if (!gs.length){ setHTML(el, '<div class="card"><div class="empty">No messages yet.</div></div>'); return; }
-  const gsel = gs.filter(g => g.ms === ms).sort((a, b) => b.step - a.step);  // the newest step first
+  const gsel = orderedStepGroups(gs, ms, D.running || []);
   const h = BLOCKS.map(([b, title]) => cardHTML(b, title, gsel)).join('');
   setHTML(el, h || '<div class="card"><div class="empty">No messages in this milestone yet.</div></div>');
 }
@@ -946,6 +978,7 @@ $('msfilter').addEventListener('change', e => { const key = e.target.dataset.inf
   e.target.checked ? openInfo.add(key) : openInfo.delete(key); renderSteps(shownMs()); });
 document.addEventListener('toggle', e => {  // remember what is open; fetch what an opened fold needs
   const d = e.target; if (!d.dataset) return;
+  if (d.dataset.error){ d.open ? openErrors.add(d.dataset.error) : openErrors.delete(d.dataset.error); return; }
   if (d.dataset.id){ const id = d.dataset.id;
     if (d.open === openItems.has(id)) return;
     d.open ? openItems.add(id) : openItems.delete(id);
@@ -1272,6 +1305,7 @@ $('chatsend').addEventListener('click', sendChat);
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
 function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_pending; }
 function discussWanted(){ return D.discussion_pending == null ? !!D.discussion : !!D.discussion_pending; }
+function hasDiscussion(mg){ return discussWanted() || !!D.discussion_applying || !!mg.discussion_saved || !!mg.discussion_error; }
 async function applyDiscussion(b){
   if (D.discussion_applying || !D.discussion_supported) return;
   D.discussion_applying = true; render();
@@ -1280,13 +1314,13 @@ async function applyDiscussion(b){
 }
 $('applydiscussion').addEventListener('click', e => applyDiscussion(e.currentTarget));
 $('discuss').addEventListener('click', async () => {
-  if (!discussWanted()){
-    if (await ask({title: 'Start a discussion?', body: 'The manager’s directions stay on hold until you apply the discussion.', ok: 'Start'}))
+  if (!discussWanted() && !(D.managed||{}).discussion_saved){
+    if (await ask({title: 'Start a discussion?', body: 'Discuss changes with the manager, then choose whether to apply them.', ok: 'Start'}))
       await post('api/discussion', {action: 'start'}, $('discuss'));
     return;
   }
   const choice = await ask({title: 'Should the manager act on this discussion?',
-    body: 'Apply discussion ends it and asks the manager to apply your agreed answers. End only leaves gates open and instructions on hold.',
+    body: 'Apply discussion asks the manager to hand off your agreed decisions. End only closes the discussion without a manager turn or sending its instructions; existing work continues. Any existing approval gate stays open.',
     ok: 'Apply discussion', alternative: 'End only', tone: 'ok'});
   if (choice === true) await applyDiscussion($('discuss'));
   else if (choice === 'end') await post('api/discussion', {action: 'end'}, $('discuss'));

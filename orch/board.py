@@ -600,8 +600,35 @@ class Board:
                        if len(c.get("text") or "") > CHAT_CLIP else c for c in d.get("chat") or []]
         ids = {c.get("id") for c in d.get("chat") or []}
         out["relays"] = {k: v for k, v in (d.get("relays") or {}).items() if k in ids}
-        out["running"] = [{k: t.get(k) for k in ("turn_id", "agent", "purpose", "started_at", "milestone", "model")}
+        out["running"] = [{k: t.get(k) for k in ("turn_id", "agent", "purpose", "started_at", "milestone", "model", "par_worker", "par_step")}
                           for t in d.get("turns") or [] if t.get("status") == "running"]
+        slots = (mg.get("par") or {}).get("slots", {}) if (mg.get("par") or {}).get("active") else {}
+        out["status_lines"] = {n: dict(x) for n, x in (out.get("status_lines") or {}).items()}
+        turn_items = {it.get("tid"): it for it in items if it.get("id") == "t:" + str(it.get("tid"))}
+        for row in out["running"] + list(out["status_lines"].values()):
+            slot = slots.get(row.get("agent"))
+            it = turn_items.get(row.get("turn_id")) or {}
+            if row.get("par_worker") or slot is not None:
+                step = row.get("par_step") if row.get("par_worker") else (slot or {}).get("step")
+                row["step_label"] = f"Step {step}" if type(step) is int and step > 0 else "Follow-up · no step assigned"
+                row["location"] = (slot or {}).get("out") or ""
+            elif it.get("step"):
+                row["step_label"] = f"Step {it['step']}"
+            if row.get("step_label") and it:
+                group = next((g for g in gs if g.get("key") == TL.key_of(it)), {})
+                if group.get("label") and it.get("step"):
+                    row["step_label"] += " · " + group["label"]
+        if out.get("discussion_applying"):
+            turn = next((t for t in out["running"] if t.get("purpose") == "discussion_apply"), None)
+            pending = mg.get("discussion_apply") or {}
+            if out.get("status") in ("stopped", "failed", "completed"):
+                out["discussion_progress"] = {"stage": "paused", "text": "Discussion application paused. Resume the run to continue."}
+            elif turn:
+                out["discussion_progress"] = {"stage": "running", "text": "The manager is applying your decisions.", **turn}
+            elif pending.get("result"):
+                out["discussion_progress"] = {"stage": "finishing", "text": "Finishing the discussion decision."}
+            else:
+                out["discussion_progress"] = {"stage": "queued", "text": "Waiting for the manager to apply your decisions."}
         out["checklists"] = _checklists(d.get("turns") or [])
         out.update(tl_groups=gs, tl_cur=cur, tl_items=shown, tl_more=len(mine) - len(shown))
         return out
@@ -847,18 +874,21 @@ class Board:
         cid = f"chat-{len(last) + 1:03d}-{int(time.time())}"
         n_chat = sum(1 for r in last if r.get("role") == "human" and not r.get("with") and (r.get("ts") or "") > since)
         tag = {"qid": qid, "settle": True} if settle else ({"qid": qid} if qid else {})
+        discussion_chat = self.discussion_on(rd)
         _append(rd / "chat.jsonl", {"id": cid + "-q", "role": "human", "text": shown, "ts": now_iso(), **tag})
         _append(rd / "chat.jsonl", {"id": cid, "role": "manager", "status": "running", "ts": now_iso(), **tag})
 
         def work() -> None:
             text, status, new_sid, cost = "", "error", sid, None
+            discussion_draft = discussion_chat
             try:
                 with self._chat_lock, agent_lock(rd, mgr.name):
                     prompt = message
                     if self.mon.controller.protocol:  # the chat reminders due (orch/reminders.py, `only: [chat]`)
                         for note in self._chat_reminders(mgr, n_chat):
                             prompt = REM.append(prompt, note)
-                    if self.discussion_on(rd):  # B6: what it writes for the critic is held until the discussion closes
+                    discussion_draft = discussion_draft or self.discussion_on(rd)
+                    if discussion_draft:  # keep discussion replies from leaking out after End only
                         critic = (self.mon.by_role("verifier") or [mgr])[0]
                         prompt = REM.append(prompt, render(self.mon.controller.templates["discussion_manager"],
                                                            critic=critic.called).strip())
@@ -877,7 +907,7 @@ class Board:
             except Exception as e:  # pragma: no cover
                 text = f"(chat failed: {e!r})"
             from .managed import manager_pause
-            problems = self._pass_on(mgr, text or "", cid) if status == "ok" else []
+            problems = self._pass_on(mgr, text or "", cid, discussion_draft=discussion_draft) if status == "ok" else []
             _append(rd / "chat.jsonl", {"id": cid, "role": "manager", "status": status, "text": text,
                                         "ts": now_iso(), "session_id": new_sid, "cost": cost,
                                         **({"problems": problems} if problems else {}), **tag})
@@ -941,7 +971,7 @@ class Board:
         for p in sorted((rd / "inbox").glob("*.json")):
             d = read_json(p) or {}
             if isinstance(d, dict) and d.get("kind") == "discussion":
-                on = bool(d.get("on")) or d.get("action") in ("end", "apply")
+                on = bool(d.get("on")) or d.get("action") == "apply"
         return on
 
     def _chat_reminders(self, a: Any, n: int) -> List[str]:
@@ -958,7 +988,7 @@ class Board:
                 out.append(render(text, critic=critic.called, worker=workers[0].called if workers else "").strip())
         return out
 
-    def _pass_on(self, a: Any, text: str, cid: str) -> List[str]:
+    def _pass_on(self, a: Any, text: str, cid: str, discussion_draft: bool = False) -> List[str]:
         """The <message> blocks of a chat reply, by the sender's role view (orch/routing.py), as notes in inbox/:
         the run records each one, delivers it (a note for an idle agent starts its turn; urgent ones cut in) and
         shows its status here. Untagged text and `to="you"` go to the sender's upper level. Bad addresses are listed and corrected at the sender's next turn."""
@@ -968,6 +998,7 @@ class Board:
             if a.role == "verifier" and t.role == "manager":
                 msg = render(self.mon.controller.templates["relay_note_up"], critic=a.called, note=msg).strip()
             self.control({"to": [t.name], "message": msg, "from": a.name, "source": cid, "i": x["i"], "via": "chat",
+                          **({"discussion_draft": True} if discussion_draft else {}),
                           **({"urgent": True} if x["urgent"] else {}), **({"additive": True} if x["additive"] else {})})
         if bad:
             self.control({"kind": "correction", "agent": a.name, "bad": bad, "source": cid})

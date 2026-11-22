@@ -611,7 +611,7 @@ the run is quiet, off track, or a job or watcher it relies on has died; otherwis
     "discussion_manager": "Our discussion has not been applied: nothing you write reaches {{critic}} until I apply it. Keep what "
                           "{{critic}} should get for the one message you send then.",
     "manager_discussion_apply": """\
-Apply our agreed discussion and start the agreed work. Use our conversation and the golden board at `{{golden_board}}`.
+Record our agreed decisions and hand off the work; do not execute the work in this turn. Use our conversation and the golden board at `{{golden_board}}`.
 Open question IDs: {{questions}}. Gate: {{gate}}. Details if needed: `{{discussion_context}}`.
 Return <discussion-resolution>{"answers":{"Q1":"agreed answer"},"gate":"approve|revise|keep"}</discussion-resolution>.
 Include only answered IDs; use {} if none. Keep unresolved questions open; use keep and ask only what remains.

@@ -11,6 +11,28 @@ from orch.recorder import Recorder
 
 
 class BackgroundBoardTest(unittest.TestCase):
+    def test_running_assignments_do_not_borrow_another_workers_step(self):
+        board = Board('m', lambda: Path('/unused'))
+        model = {'run_id': 'r', 'managed': {'par': {'active': True, 'slots': {
+            'worker': {'step': None, 'out': 'cases/'},
+            'worker-2': {'step': 38, 'out': 'pilots/architecture/'}}}},
+            'status_lines': {'worker': {'agent': 'worker', 'step': 'step 38'},
+                             'worker-2': {'agent': 'worker-2', 'kind': 'job'}},
+            'turns': [{'turn_id': 't1', 'agent': 'worker', 'status': 'running',
+                       'par_worker': 'worker', 'par_step': None},
+                      {'turn_id': 't2', 'agent': 'worker-2', 'status': 'running',
+                       'par_worker': 'worker-2', 'par_step': 38}]}
+        with mock.patch.object(board, '_timeline', return_value=(model, [], [], '')):
+            state = board.state()
+        a, b = state['running']
+        self.assertEqual(a['step_label'], 'Follow-up · no step assigned')
+        self.assertEqual(a['location'], 'cases/')
+        self.assertEqual(b['step_label'], 'Step 38')
+        self.assertEqual(b['location'], 'pilots/architecture/')
+        self.assertEqual(state['status_lines']['worker']['step_label'], a['step_label'])
+        self.assertEqual(state['status_lines']['worker-2']['location'], b['location'])
+        self.assertNotIn('step_label', model['status_lines']['worker'])
+
     def test_status_responds_while_one_shared_history_build_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             rd = Path(tmp)

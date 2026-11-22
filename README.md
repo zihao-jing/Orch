@@ -621,9 +621,9 @@ and observed running tools prevent recovery from terminating the turn. Healthy s
 still uses the normal turn timeout. This is not a general inactivity timeout.
 
 If the window expires, Orch stops the private OpenCode attempt, records `error_kind: provider_stall`
-and the provider's last error, and moves directly to the next configured fallback: OpenCode already
-spent this window retrying, so Orch does not add another same-model retry cycle. With no fallback the
-turn fails with that diagnostic. A fallback gets a continuation note, recent completed tool inputs and
+and the provider's last error, then retries the same model using `retry_waits`. Provider stalls and other
+transient errors share that retry budget. Only after all configured retries does Orch try the next fallback;
+with no fallback the turn fails with that diagnostic. Retries and fallbacks get a continuation note, recent completed tool inputs and
 any partial reply; it must inspect files and running jobs before proceeding, rather than replaying work.
 Detached jobs may survive the stopped attempt. This handoff is not a guarantee of exactly-once side effects.
 Explicit cancellation and the overall turn timeout keep their existing behavior; a plain timeout does

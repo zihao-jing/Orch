@@ -1112,6 +1112,15 @@ class ManagedRunner(MonitorRunner):
                 continue
             frm = str(data.get("from") or "human")
             sender = next((a for a in self.mon.agents if a.name == frm), None)
+            if sender is not None and sender.role == "manager" and data.get("discussion_draft") and not self.discussion_on():
+                (inbox / "dropped").mkdir(exist_ok=True)
+                os.replace(p, inbox / "dropped" / p.name)
+                for name in names:
+                    L.add(frm, name, msg, source=str(data.get("source") or p.name), i=data.get("i"),
+                          via="chat", status="dropped", activate=False,
+                          reason="discussion ended without sending its instructions")
+                changed = True
+                continue
             if sender is not None and sender.role == "manager" and self.discussion_on():
                 (inbox / "held").mkdir(exist_ok=True)  # B6: out of the inbox, so no turn takes it in
                 os.replace(p, inbox / "held" / p.name)
@@ -1391,13 +1400,27 @@ class ManagedRunner(MonitorRunner):
             mg["discussion_error"] = "The gate changed. Review it and apply the discussion again."
             self.rec.save()
             return
+        if d["action"] == "end":
+            # Close only the discussion decision; any existing approval gate stays open.
+            self.scan_inbox()  # include drafts already queued by a completed chat
+            self.st["discussion"] = False
+            self.st.pop("discussion_since", None)
+            for key in ("discussion_saved", "discussion_error", "discussion_batch"):
+                mg.pop(key, None)
+            for message in self.discussion_held():
+                self.ledger.mark(message, "dropped", activate=False,
+                                 reason="discussion ended without sending its instructions")
+            self.rec.event("discussion", on=False, action="end")
+            self.rec.save()
+            return
         self.st["discussion"] = False
         mg.pop("discussion_batch", None)
         mg["discussion_saved"] = True
         mg.pop("discussion_error", None)
         if d["action"] == "apply":
             gate = mg.get("gate") or {}
-            mg["discussion_apply"] = {"request": request, "gate": gate.get("key"), "status": "queued"}
+            mg["discussion_apply"] = {"request": request, "gate": gate.get("key"), "status": "queued",
+                                      "queued_at": now_iso()}
         self.rec.event("discussion", on=False, action=d["action"])
         self.rec.save()
 
@@ -1429,6 +1452,7 @@ class ManagedRunner(MonitorRunner):
                           gate=f"{gate.get('kind')} ({gate.get('key')})" if gate else "none",
                           discussion_context=str(self.discussion_context()), gate_rule=gate_rule)
         pending["status"] = "running"
+        pending["started_at"] = now_iso()
         self.rec.save()
         self._activating = True
         try:
@@ -3417,6 +3441,8 @@ class ManagedRunner(MonitorRunner):
         except Exception:
             return "", ""
         slot = self.par_slot(w.name) if w is not None else None
+        if slot is not None and not slot.get("step"):
+            return "no step assigned", ""
         if slot and slot.get("step"):
             s, title = PW.step_title(ck, slot["step"])
             items = "\n".join(f"- [{'x' if d else ' '}] {t}"

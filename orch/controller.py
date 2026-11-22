@@ -992,26 +992,30 @@ class MonitorRunner:
             # same model after each of the configured waits (1, 2, 4 min); an unusable reply (exit 0, no text) gets
             # the `retries` immediate corrections. Then the backups take over in order.
             waits = list(getattr(agent, "retry_waits", []) or [])
-            transient = bool(pe) or not reason
+            transient = stalled or bool(pe) or not reason
             if stalled:
-                # OpenCode has already spent its bounded recovery window retrying internally. Use the next
-                # configured variant, retaining the original task and evidence of potentially completed work.
+                # A provider recovery timeout uses the same Orch retry budget as other transient errors.
+                # Keep the session and evidence of completed work when continuing the interrupted attempt.
                 note = res.meta.get("recovery_note") or ""
                 if res.output:
                     note += "\nPartial reply from the previous attempt:\n" + res.output
-                recovery_note = "\n\n".join(x for x in (recovery_note, note) if x)
+                if note and note not in recovery_note:
+                    recovery_note = "\n\n".join(x for x in (recovery_note, note) if x)
+                    prompt = "\n\n".join(x for x in (prompt, note) if x)
                 sid = res.session_id or record.get("session_id") or sid
-                prompt = "\n\n".join(x for x in (prompt, note) if x)
-            elif transient and waits:
+            if transient and waits:
                 if waited < len(waits):
                     secs = waits[waited]
                     waited += 1
                     self.retry_wait(agent, record, v, waited, len(waits), secs, pe or reason or res.status)
                     if self.should_stop():
                         break
+                    if stalled and sid:
+                        urgent_send = (self.tpl("turn_continue").strip() or "continue") + "\n\n" + note
+                        record["input"] = urgent_send
                     attempt += 1
                     continue
-            elif fixes < v.retries:
+            elif not stalled and fixes < v.retries:
                 fixes += 1
                 if pe:
                     self.wait_provider(agent, pe)

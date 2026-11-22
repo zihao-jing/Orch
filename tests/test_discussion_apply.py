@@ -31,7 +31,7 @@ class TestApplyDiscussion(unittest.TestCase):
             self.r.apply_discussion()
         return say
 
-    def test_end_only_keeps_questions_gate_and_directions_held(self):
+    def test_end_only_keeps_existing_questions_and_gate_without_sending_directions(self):
         self.r.set_discussion(True)
         held = self.r.deliver(self.r.manager, self.r.critic, 'OLD INSTRUCTION')
         self.r.discussion_action({'action': 'end'})
@@ -39,10 +39,70 @@ class TestApplyDiscussion(unittest.TestCase):
             self.r.discussion_batch()
         say.assert_not_called()
         self.assertFalse(self.r.st['discussion'])
-        self.assertTrue(self.r.discussion_on())  # routing remains held after ending
-        self.assertEqual(held['status'], 'held')
+        self.assertFalse(self.r.discussion_on())
+        self.assertEqual(held['status'], 'dropped')
         self.assertEqual(self.r.mg['gate']['key'], 'wait-0-0')
         self.assertTrue(all(q['status'] == 'open' for q in self.r.st['questions']))
+
+    def test_end_during_work_closes_without_gate_or_manager_turn(self):
+        from orch.board import Board
+        self.r.mg.update(phase='parallel', gate=None)
+        self.r.st['questions'] = []
+        self.r.set_discussion(True)
+        self.r.mg['discussion_error'] = 'old error'
+        self.r.mg['discussion_saved'] = True
+        self.r.discussion_action({'action': 'end'})
+        with mock.patch.object(self.r, 'say') as say:
+            self.r.discussion_batch()
+        say.assert_not_called()
+        self.assertFalse(self.r.discussion_on())
+        self.assertFalse(self.r.mg.get('gate'))
+        self.assertEqual(self.r.mg['phase'], 'parallel')
+        self.assertFalse(self.r.mg.get('discussion_saved'))
+        self.assertFalse(self.r.mg.get('discussion_error'))
+        board = Board('m', lambda: self.r.rec.run_dir, self.r.mon)
+        self.assertFalse(board.discussion_on(self.r.rec.run_dir))
+        self.assertFalse(board.state()['discussion_applying'])
+
+    def test_board_pending_end_does_not_hold_new_chat_directions(self):
+        from orch.board import Board
+        self.r.set_discussion(True)
+        board = Board('m', lambda: self.r.rec.run_dir, self.r.mon)
+        board.control({'kind': 'discussion', 'action': 'end', 'on': False})
+        self.assertFalse(board.discussion_on(self.r.rec.run_dir))
+
+    def test_end_drops_queued_and_late_discussion_drafts(self):
+        from orch.board import Board
+        board = Board('m', lambda: self.r.rec.run_dir, self.r.mon)
+        self.r.set_discussion(True)
+        text = '<message to="Jordan">Do not send this draft.</message>'
+        board._pass_on(self.r.manager, text, 'before-end', discussion_draft=True)
+        self.r.discussion_action({'action': 'end'})
+        board._pass_on(self.r.manager, text, 'after-end', discussion_draft=True)
+        self.r.scan_inbox()
+        rows = [m for m in self.r.ledger.rows if m.get('source') in ('before-end', 'after-end')]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(m['status'] == 'dropped' for m in rows))
+        self.assertFalse(self.r.st.get('fwd'))
+        self.assertFalse(self.r.st.get('worker_messages'))
+
+    def test_processing_status_distinguishes_queued_running_and_stopped(self):
+        from orch.board import Board
+        board = Board('m', lambda: self.r.rec.run_dir, self.r.mon)
+        turn = {'turn_id': 't1', 'agent': 'boss', 'purpose': 'discussion_apply',
+                'status': 'running', 'started_at': '2026-11-22T07:18:12+00:00', 'model': 'test:model'}
+        model = {'run_id': 'run', 'status': 'running', 'discussion_applying': True,
+                 'managed': {'discussion_apply': {'status': 'queued'}}, 'turns': []}
+        with mock.patch.object(board, '_timeline', return_value=(model, [], [], '')):
+            self.assertEqual(board.state()['discussion_progress']['stage'], 'queued')
+            model['turns'] = [turn]
+            progress = board.state()['discussion_progress']
+            self.assertEqual(progress['stage'], 'running')
+            self.assertEqual(progress['turn_id'], 't1')
+            model['status'] = 'stopped'
+            self.assertEqual(board.state()['discussion_progress']['stage'], 'paused')
+            model['discussion_applying'] = False
+            self.assertNotIn('discussion_progress', board.state())
 
     def test_one_call_settles_all_answers_and_queues_gate(self):
         self.r.set_discussion(True)
@@ -243,7 +303,7 @@ class TestApplyDiscussionLive(unittest.TestCase):
             live.control({'kind': 'discussion', 'on': True}, 'start')
             live.until(lambda st: st.get('discussion'), 'discussion started')
             live.control({'kind': 'discussion', 'action': 'end', 'on': False}, 'end')
-            live.until(lambda st: st['managed'].get('discussion_saved'), 'ended without applying')
+            live.until(lambda st: not st.get('discussion'), 'ended without applying')
             live.control({'kind': 'discussion', 'action': 'apply', 'on': False, 'request': 'live-1'}, 'apply')
             status, rec = live.done()
             self.assertEqual(status, 'completed')

@@ -130,7 +130,9 @@ Goal: the manager reviews as the user would, from a limited view.
   gate (including a human-task wait), then sends consolidated directions. Unanswered questions and ambiguous gate
   decisions stay open. Gate handlers reuse this reply rather than requesting another summary.
   **End discussion** offers **Apply discussion**, **End only**, and **Cancel**. End only makes no manager turn,
-  leaves gates open, and holds directions until a later apply. Applying shows a processing state, suppresses gate
+  preserves existing gates without creating one, drops unsent discussion directions, and releases the discussion
+  hold so existing work can continue. The apply button disappears when no discussion is pending. Applying shows
+  queued, running (with live manager activity), or paused status, suppresses gate
   inputs, and waits for accepted manager chats to finish. Invalid resolutions release nothing; failures are shown
   for an explicit retry. Request IDs prevent duplicate applications.
 - Milestone fallback: the board can move a milestone back to open (display and checklist state). No extra prompt to
