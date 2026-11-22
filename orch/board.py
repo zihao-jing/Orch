@@ -23,6 +23,7 @@ without ``since`` it is the full payload as before. JSON and text replies are gz
 from __future__ import annotations
 
 import gzip
+import fcntl
 import hashlib
 import json
 import mimetypes
@@ -64,7 +65,7 @@ CHAT_TAIL = 60       # chat messages per conversation in the state payload; olde
 CHAT_CLIP = 1500     # characters of a chat message in the state payload; the rest with /api/message
 
 
-def _chat_rows(rd: Path) -> List[Dict[str, Any]]:
+def _chat_rows(rd: Path, recover: bool = True) -> List[Dict[str, Any]]:
     """chat.jsonl with the lines of each message merged by id, in the order the messages first appeared."""
     rows: Dict[Any, Dict[str, Any]] = {}
     for x in _lines(rd / "chat.jsonl"):
@@ -74,7 +75,70 @@ def _chat_rows(rd: Path) -> List[Dict[str, Any]]:
             continue
         if isinstance(c, dict):
             rows.setdefault(c.get("id"), {}).update(c)
+    if recover:
+        for cid, row in rows.items():
+            if row.get("status") != "running" or not row.get("chat_lease"):
+                continue
+            # A per-chat lease stays held even while queued for the agent lock.
+            # Another board may own it; age and agent activity cannot prove interruption.
+            with (rd / "locks" / f"{cid}.chat.lock").open("a") as lease:
+                try:
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                try:
+                    current = next((c for c in _chat_rows(rd, recover=False) if c.get("id") == cid), {})
+                    if current.get("status") == "running":
+                        current.update(_interrupt_chat(rd, cid, "The dashboard chat process stopped before saving its reply."))
+                    row.update(current)
+                finally:
+                    fcntl.flock(lease, fcntl.LOCK_UN)
     return list(rows.values())
+
+
+def _interrupt_chat(rd: Path, cid: str, reason: str) -> Dict[str, Any]:
+    events = []
+    for line in _lines(rd / "live" / f"{cid}.jsonl"):
+        try:
+            event = json.loads(line)
+            if isinstance(event, dict):
+                events.append(event)
+        except ValueError:
+            continue
+    partial = "".join(str(e.get("s") or "") for e in events if e.get("k") == "text")
+    row = {"id": cid, "status": "interrupt", "interrupt_reason": reason,
+           "interrupted_detected_at": now_iso(), "text": partial or reason}
+    if events:
+        row["last_activity_ts"] = events[-1].get("ts")
+    # Preserve the original chat timestamp; detection time is not the time it stopped.
+    _append(rd / "chat.jsonl", row)
+    return row
+
+
+def _start_chat(rd: Path, row: Dict[str, Any], work: Callable[[], None]) -> None:
+    """Hold a chat-specific lease from publication through final status, across boards."""
+    (rd / "locks").mkdir(exist_ok=True)
+    cid = row["id"]
+    lease = (rd / "locks" / f"{cid}.chat.lock").open("a")
+    fcntl.flock(lease, fcntl.LOCK_EX)
+
+    def run() -> None:
+        try:
+            work()
+        finally:
+            try:
+                current = next((c for c in _chat_rows(rd, recover=False) if c.get("id") == cid), {})
+                if current.get("status") == "running":
+                    _interrupt_chat(rd, cid, "The chat task exited before saving its reply.")
+            finally:
+                lease.close()
+
+    try:
+        _append(rd / "chat.jsonl", {**row, "chat_lease": True})
+        threading.Thread(target=run, daemon=True).start()
+    except BaseException:
+        lease.close()
+        raise
 
 
 def _chat_view(rows: List[Dict[str, Any]], mgr: str) -> Tuple[List[Dict[str, Any]], Dict[str, bool]]:
@@ -780,8 +844,6 @@ class Board:
         last = [json.loads(x) for x in _lines(rd / "chat.jsonl")]
         cid = f"chat-{len(last) + 1:03d}-{int(time.time())}"
         _append(rd / "chat.jsonl", {"id": cid + "-q", "role": "human", "text": message, "ts": now_iso(), "with": a.name})
-        _append(rd / "chat.jsonl", {"id": cid, "role": "agent", "who": a.name, "with": a.name, "status": "running",
-                                    "ts": now_iso()})
 
         def work() -> None:
             text, status, new_sid, cost = "", "error", None, None
@@ -817,7 +879,8 @@ class Board:
                                         "text": text, "ts": now_iso(), "session_id": new_sid, "cost": cost,
                                         **({"problems": problems} if problems else {})})
 
-        threading.Thread(target=work, daemon=True).start()
+        _start_chat(rd, {"id": cid, "role": "agent", "who": a.name, "with": a.name,
+                         "status": "running", "ts": now_iso()}, work)
         return {"id": cid}
 
     def chat(self, message: str, qid: Optional[str] = None, settle: bool = False,
@@ -876,7 +939,6 @@ class Board:
         tag = {"qid": qid, "settle": True} if settle else ({"qid": qid} if qid else {})
         discussion_chat = self.discussion_on(rd)
         _append(rd / "chat.jsonl", {"id": cid + "-q", "role": "human", "text": shown, "ts": now_iso(), **tag})
-        _append(rd / "chat.jsonl", {"id": cid, "role": "manager", "status": "running", "ts": now_iso(), **tag})
 
         def work() -> None:
             text, status, new_sid, cost = "", "error", sid, None
@@ -919,7 +981,7 @@ class Board:
             if pause:  # the manager stops the run from the chat
                 self.control({"kind": "pause", "message": pause})
 
-        threading.Thread(target=work, daemon=True).start()
+        _start_chat(rd, {"id": cid, "role": "manager", "status": "running", "ts": now_iso(), **tag}, work)
         return {"id": cid}
 
     def edit_golden(self, text: str, base: Optional[str]) -> Dict[str, Any]:

@@ -241,6 +241,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <span id="status"></span>
   <span class="mute mono" id="runid"></span>
   <span style="flex:1"></span>
+  <span class="mute mono" id="server-clock" style="font-size:12px" title="Remote machine time, displayed in UTC and synchronized with dashboard responses">Server time: syncing…</span>
   <span class="mute mono" id="ver" hidden style="font-size:12px"></span> <button class="sm" id="updbtn" hidden title="Take in the new commits from main and restart this run; it carries on where it stopped.">Update and restart</button>
   <select id="mon" style="display:none"></select>
   <button class="sm" id="chattoggle" title="Open the conversation with the manager">💬 Talk<span id="chatbadge"></span></button>
@@ -383,6 +384,22 @@ function gateSubmitted(body){
 // The poll asks only for what changed since the payload it holds (SNAP, version VER) and rebuilds the rest;
 // D is a fresh copy for render, so SNAP stays exactly what the server sent. One poll at a time.
 let SNAP = null, VER = '', loading = false, again = false;
+// HTTP Date comes from the server's system clock. Advance with a monotonic clock,
+// so the browser's timezone or an incorrect local system time cannot affect it.
+let serverClock = null;
+function syncServerClock(response){
+  const epoch = Date.parse(response.headers.get('Date'));
+  if (!Number.isFinite(epoch)) return;
+  serverClock = {epoch, at: performance.now()};
+  paintServerClock();
+}
+function paintServerClock(){
+  if (!serverClock) return;
+  const elapsed = performance.now() - serverClock.at;
+  if (elapsed > 90000){ $('server-clock').textContent = 'Server time: awaiting sync'; return; }
+  const stamp = new Date(serverClock.epoch + elapsed).toISOString().slice(0,19).replace('T', ' ');
+  $('server-clock').textContent = `Server: ${stamp} UTC`;
+}
 function applyState(j){
   if (!j.ver || !j.keys){ SNAP = j; VER = ''; return true; }  // a server from before deltas: the reply is the full payload
   if (j.base !== undefined && (j.base !== VER || !SNAP)) return false;  // not built on what we hold: start over
@@ -401,7 +418,7 @@ async function load(){
   loading = true;
   try {
     let j;
-    try { const r = await fetch('api/state?m=' + encodeURIComponent(M) + '&since=' + encodeURIComponent(VER), {cache:'no-store'}); j = await r.json(); }
+    try { const r = await fetch('api/state?m=' + encodeURIComponent(M) + '&since=' + encodeURIComponent(VER), {cache:'no-store'}); if (r.ok) syncServerClock(r); j = await r.json(); }
     catch(e){ return; }
     if (!applyState(j)){ VER = ''; SNAP = null; again = true; return; }
     D = structuredClone(SNAP);
@@ -831,7 +848,7 @@ async function loadMsg(id){
   renderTimeline(); renderSearch();
 }
 const ST_LABEL = {delivered:'✓ delivered', sent:'→ sent', held:'⏸ held', superseded:'↷ superseded', dropped:'⊘ dropped', running:'● running', open:'? open',
-  answered:'✓ answered', passed_up:'↑ passed up', night:'🌙 decided', failed:'⚠ not delivered', unseen:'? unseen', unknown:'⚠ unconfirmed', error:'✕ error', timeout:'✕ timeout'};
+  answered:'✓ answered', passed_up:'↑ passed up', night:'🌙 decided', failed:'⚠ not delivered', unseen:'? unseen', unknown:'⚠ unconfirmed', error:'✕ error', timeout:'✕ timeout', interrupt:'■ interrupt', interrupted:'■ interrupt'};
 function itemBody(it){
   if (it.status === 'running' && it.tid) return promptPanel({turn_id: it.tid}, 'Input to this turn' + (it.in_len != null ? ` · ${it.in_len.toLocaleString()} chars` : ''))
     + `<div data-live="${esc(it.tid)}"></div>`;
@@ -1336,7 +1353,7 @@ $('theme').addEventListener('click', () => { const r = document.documentElement,
 try { const t = localStorage.getItem('orch-theme'); if (t) document.documentElement.dataset.theme = t; } catch(e){}
 if (MONS.length > 1){ const s = $('mon'); s.style.display = ''; s.innerHTML = MONS.map(m => `<option${m===M?' selected':''}>${esc(m)}</option>`).join('');
   s.addEventListener('change', () => { location.search = '?m=' + encodeURIComponent(s.value); }); }
-load(); connect(); setInterval(load, 30000);
+load(); connect(); setInterval(load, 30000); setInterval(paintServerClock, 1000);
 })();
 </script>
 </body>
