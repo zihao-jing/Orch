@@ -220,6 +220,13 @@ From {{critic}}, on milestone {{n}} ("{{title}}"):
 
 Score it against the rubric and decide. Read the files it names where something looks wrong.
 """,
+    "manager_review_decision": "Please end your reply with `<decision>ACCEPT</decision>`, `<decision>REVISE</decision>` "
+                               "or `<decision>PAUSE</decision>` (PAUSE when you cannot decide until I act).",
+    # a milestone review the manager paused: the same report comes back to it after my message
+    "manager_review_resumed": "I ended the pause of your milestone review and said this: \"{{message}}\"\n\n"
+                              "What the pause was waiting for: {{waited}}",
+    "manager_review_wait_revise": "About the pause of your milestone review (what it waited for: {{waited}}): I'm "
+                                  "sending it back, it is not done.\n\n{{message}}",
     "manager_feedback": """\
 I looked at milestone {{n}} ("{{title}}") and it is not finished yet:
 

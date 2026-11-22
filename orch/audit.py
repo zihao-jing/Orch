@@ -56,11 +56,11 @@ def norm(text: str) -> str:
     return " ".join((text or "").split())
 
 
-def paragraphs(text: str) -> List[str]:
+def paragraphs(text: str, least: int = MIN_PARA) -> List[str]:
     out = []
     for block in re.split(r"\n\s*\n", text or ""):
         b = norm(block)
-        if len(b) >= MIN_PARA:
+        if b and len(b) >= least:
             out.append(b)
     return out
 
@@ -265,9 +265,13 @@ def questions(run_dir: Path, lo_ts: float, hi_ts: float) -> List[str]:
 # --------------------------------------------------------------------------- analysis
 
 
-def trace(turns: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """For each turn: its input paragraphs, each with its origin and whether it repeats the agent's previous input."""
+def trace(turns: List[Dict[str, Any]], sources: List[Dict[str, Any]],
+          delivered: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> List[Dict[str, Any]]:
+    """For each turn: its input paragraphs, each with its origin and whether it repeats the agent's previous input.
+    `delivered`: {turn id: ledger messages delivered in it}; their sender's turn is the origin of their text, however
+    short. Other paragraphs are traced by text, from MIN_PARA chars up."""
     prev_input: Dict[str, set] = {}
+    by_id = {t["turn_id"]: t for t in turns}
     outs = [(t, norm(R.strip(t.get("output") or "")), _ts(t.get("started_at")) or 0.0) for t in turns]
     srcs = [(s, norm(s["text"])) for s in sources]
     traced = []
@@ -276,15 +280,28 @@ def trace(turns: List[Dict[str, Any]], sources: List[Dict[str, Any]]) -> List[Di
         cand = [(f"{ROLE.get(o.get('role'), o.get('role'))}", o["turn_id"], txt)
                 for o, txt, ts in outs[max(0, i - SOURCE_WINDOW):i] if txt and ts <= start]
         cand += [(s["origin"], s["id"], txt) for s, txt in srcs if txt and (s["ts"] or 0) <= start]
+        led = []  # (origin, source turn, the message's paragraphs, its whole text)
+        for m in (delivered or {}).get(t["turn_id"], []):
+            o = by_id.get(m.get("source") or "")
+            body = R.strip(m.get("body") or "")
+            if o is not None and body.strip():
+                led.append((_agent_of(o), o["turn_id"], set(paragraphs(body, 1)), norm(body)))
         paras = []
         before = prev_input.get(t["agent"], set())
-        for p in paragraphs(R.strip(t.get("input") or "")):  # orch's reminders are by design, not content
+        for p in paragraphs(R.strip(t.get("input") or ""), 1):  # orch's reminders are by design, not content
             origin, src = "orch", ""
-            for o, sid, txt in reversed(cand):  # the most recent source that holds it
-                if p in txt:
-                    origin, src = o, sid
-                    break
-            paras.append({"text": p, "origin": origin, "source": src, "repeat": p in before})
+            # a short paragraph counts only as a whole paragraph of a message (not a heading that happens to match)
+            hit = next(((o, sid) for o, sid, ps, whole in led if p in ps or (len(p) >= MIN_PARA and p in whole)), None)
+            if hit:
+                origin, src = hit
+            elif len(p) < MIN_PARA:
+                continue
+            else:
+                for o, sid, txt in reversed(cand):  # the most recent source that holds it
+                    if p in txt:
+                        origin, src = o, sid
+                        break
+            paras.append({"text": p, "origin": origin, "source": src, "repeat": len(p) >= MIN_PARA and p in before})
         prev_input[t["agent"]] = {x["text"] for x in paras}
         traced.append({"turn": t, "paras": paras})
     return traced
@@ -333,9 +350,9 @@ def relay_coverage(tr: Dict[str, Any], turns_by_id: Dict[str, Dict[str, Any]]) -
             used.setdefault(p["source"], []).append(p["text"])
     for sid, got in used.items():
         text, withheld = passable(turns_by_id[sid], tr["turn"])
-        src = paragraphs(text)
-        total = sum(len(x) for x in src) or 1
         carried = set(got)
+        src = [x for x in paragraphs(text, 1) if len(x) >= MIN_PARA or x in carried]  # short ones: ledger-traced
+        total = sum(len(x) for x in src) or 1
         left = [x for x in src if x not in carried and not any(x in g or g in x for g in got)]
         out.append({"source": sid, "share": sum(len(x) for x in src if x not in left) / total,
                     "source_chars": total, "left_out": left[:3], "withheld": withheld})
@@ -382,6 +399,41 @@ def _agent_of(t: Dict[str, Any]) -> str:
     return ROLE.get(t.get("role"), t.get("role") or t.get("agent", "?"))
 
 
+# orch's re-asks in the same phase (managed.py, templates.py): stable prefixes, and why each is sent
+REASKS = (("Please end your reply with", "invalid decision"),
+          ("Nothing in your last reply reached", "no message for the critic"),
+          ("Your review ended without a verdict", "no verdict"))
+REASK_SCORE = re.compile(r"^Your overall score of \S+ is below the ")
+RETRY_MAX = 400  # chars: a re-ask is one short line from orch
+
+
+def retries(traced: List[Dict[str, Any]], redo: Dict[str, str]) -> Dict[str, Tuple[str, str]]:
+    """{turn id: (the turn it re-asks, why)} for turns where orch asked the same agent again right after its turn,
+    because the reply lacked something orch needs (a decision, a message for the critic, a verdict, a score at
+    min_score). Known re-ask texts match on their start; otherwise a manager turn with the same purpose as its
+    previous one in the same round and only a short message of orch's own counts too. Redos after a restart are not
+    retries."""
+    out: Dict[str, Tuple[str, str]] = {}
+    prev: Optional[Dict[str, Any]] = None
+    for x in traced:
+        t = x["turn"]
+        u, prev = prev, t
+        if u is None or u["agent"] != t["agent"] or t["turn_id"] in redo:
+            continue
+        inp = R.strip(t.get("input") or "").strip()
+        if not inp or len(inp) > RETRY_MAX or any(p["origin"] != "orch" for p in x["paras"]):
+            continue
+        why = next((w for pre, w in REASKS if inp.startswith(pre)), "")
+        if not why and REASK_SCORE.match(inp):
+            why = "score below min_score"
+        if not why and t.get("role") == "manager" and t.get("purpose") and t.get("purpose") == u.get("purpose") \
+                and t.get("round") == u.get("round"):
+            why = "asked again"
+        if why:
+            out[t["turn_id"]] = (u["turn_id"], why)
+    return out
+
+
 def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           prompts_seen: Optional[Dict[str, str]] = None) -> Tuple[str, Dict[str, Any]]:
     """The digest of rounds lo..hi (inclusive) and the numbers behind it. `prompts_seen`: {agent: hash} of the system
@@ -389,7 +441,11 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     run_dir = Path(run_dir)
     allt = load_turns(run_dir)
     by_id = {t["turn_id"]: t for t in allt}
-    traced = trace(allt, load_sources(run_dir))
+    delivered: Dict[str, List[Dict[str, Any]]] = {}  # the routing ledger: which messages each turn was given
+    for m in (read_json(run_dir / "state.json", {}) or {}).get("messages") or []:
+        if m.get("status") == "delivered" and m.get("turn"):
+            delivered.setdefault(m["turn"], []).append(m)
+    traced = trace(allt, load_sources(run_dir), delivered)
     win = [x for x in traced if lo <= int(x["turn"].get("round") or 0) <= hi]
     stats: Dict[str, Any] = {"rounds": [lo, hi], "turns": len(win), "flags": [], "origin": {}, "prompts": {}}
     if not win:
@@ -402,6 +458,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     roles = {t["agent"]: _agent_of(t) for t in allt}
     redo = redos(allt, resumes(run_dir))  # turns run again after a restart: not duplicates
     redone = {v: k for k, v in redo.items()}
+    retry = retries(traced, redo)  # orch asked the same agent again for something its reply lacked
     prev = None
     burst: List[Dict[str, Any]] = []
     for x in win:
@@ -422,6 +479,8 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
         rem = f" (↺ {', '.join(t['reminders'])})" if t.get("reminders") else ""  # reminders sent at its end
         mark = (f" · redo of {redo[t['turn_id']]} after a restart" if t["turn_id"] in redo else
                 f" · cut off by a restart, redone in {redone[t['turn_id']]}" if t["turn_id"] in redone else "")
+        if t["turn_id"] in retry:
+            mark += f" · retry of {retry[t['turn_id']][0]} ({retry[t['turn_id']][1]})"
         rows.append(f"| {t['turn_id']} | {_hms(t.get('started_at'))}–{_hms(t.get('ended_at'))} | "
                     f"{t.get('purpose', '')}{rem} | {t.get('status', '')}{mark} | {sess} | "
                     f"{turn_model(t) or '?'} | {len(inp)} | {rep} | "
@@ -433,9 +492,11 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
                                   f"{int(t.get('duration_s') or 0)} s", "excerpt": ""})
         # critic reviews can be complete in under TINY_REPLY chars, and compaction replies with nothing by design
         elif t.get("status") != "ok" or (len(out.strip()) < TINY_REPLY and t.get("purpose") not in ("verify", "compact")):
-            flags.append({"kind": "short or failed reply", "weight": 2, "turn": t["turn_id"],
+            again = (f"; it answers orch's retry of {retry[t['turn_id']][0]} ({retry[t['turn_id']][1]}), so a short "
+                     f"reply is expected") if t["turn_id"] in retry else ""
+            flags.append({"kind": "short or failed reply", "weight": 1 if again else 2, "turn": t["turn_id"],
                           "line": f"{t['turn_id']} ({t.get('purpose')}) replied {len(out.strip())} chars, status "
-                                  f"{t.get('status')}", "excerpt": f"Asked (end of message): {clip(asked[-EXCERPT:])}\n"
+                                  f"{t.get('status')}{again}", "excerpt": f"Asked (end of message): {clip(asked[-EXCERPT:])}\n"
                                                                    f"Reply: {clip(out) or '(empty)'}"})
         if rep >= REPEAT_MIN and rep >= REPEAT_SHARE * max(len(inp), 1) and t["turn_id"] not in redo:
             first = next(p for p in paras if p["repeat"])
@@ -464,8 +525,11 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
                 f"{rc['source']} {rc['share']:.0%} of {rc['source_chars']}"
                 + (" (withheld by design: " + ", ".join(f"{k} {v}" for k, v in rc["withheld"].items()) + ")"
                    if rc["withheld"] else "") for rc in rel))
-        # bursts: 3+ turns of one agent in a row within 10 minutes, mostly short (a redo replaces its cut-off turn)
-        if t["turn_id"] in redo and burst and burst[-1]["turn_id"] == redo[t["turn_id"]]:
+        # bursts: 3+ turns of one agent in a row within 10 minutes, mostly short (a redo replaces its cut-off turn;
+        # a retry belongs to the turn it re-asks)
+        if t["turn_id"] in retry and burst and burst[-1]["agent"] == t["agent"]:
+            pass
+        elif t["turn_id"] in redo and burst and burst[-1]["turn_id"] == redo[t["turn_id"]]:
             burst[-1] = t
         elif prev is not None and prev["agent"] == t["agent"] and \
                 (_ts(t.get("started_at")) or 0) - (_ts(prev.get("ended_at")) or 0) < 600:
@@ -520,6 +584,7 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
     stats["origin"] = origin
     stats["questions"] = qs
     stats["ledger"] = led_counts
+    stats["retries"] = {k: v for k, v in retry.items() if k in {x["turn"]["turn_id"] for x in win}}
 
     md = [f"# Audit digest: rounds {lo}–{hi}",
           f"{len(win)} turns, {win[0]['turn'].get('started_at', '')[:16]} to "
@@ -533,6 +598,9 @@ def build(run_dir: Path, lo: int, hi: int, findings: Iterable[str] = (),
           f"*redo of X after a restart* (status column): the run was restarted while turn X ran, so this turn runs X "
           f"again; its message repeats X's by design, or is just *continue* when X's message had already reached the "
           f"session (the agent still has it, so nothing is lost), and the pair is not a duplicate. "
+          f"*retry of X (why)* (status column): X's reply lacked something orch needs (a valid decision, a message "
+          f"for the critic, a verdict, a score at the agreed minimum), so orch asked the same agent once more in the "
+          f"same phase; its short message of orch's own and short reply are by design, not a wasted turn. "
           f"*$*: the backend's figure; *~* marks Claude Code's own estimate for a model on another provider, priced "
           f"at Claude rates, which is not what the provider charged — don't judge spend on it. Times are HH:MM:SS; "
           f"*in* is the message without orch's reminders.",

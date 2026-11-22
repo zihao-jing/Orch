@@ -1137,7 +1137,7 @@ def _message_log(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any
             status=t.get("status"), turn=t.get("turn_id"))
 
     keys = ('"route_problem"', '"tooling_mention"', '"session_note"', '"retry"', '"fallback"', '"billing_error"',
-            '"size_warning"', '"model_note"')
+            '"setup_error"', '"size_warning"', '"model_note"')
     for ln in _lines(rd / "events.jsonl"):  # warnings, session resets, retries and model switches (small system lines)
         if not any(k in ln for k in keys):
             continue
@@ -1160,7 +1160,8 @@ def _message_log(rd: Path, chat: List[Dict[str, Any]], turns: List[Dict[str, Any
             add(ev.get("ts"), "system", who(ev.get("agent")), who(ev.get("to")),
                 f"model changed ({ev.get('old')} → {ev.get('new')}); told in one line", label="model change")
             continue
-        if kind not in ("route_problem", "tooling_mention", "session_note", "billing_error", "size_warning"):
+        if kind not in ("route_problem", "tooling_mention", "session_note", "billing_error", "setup_error",
+                        "size_warning"):
             continue
         if kind == "session_note":
             what = {"compact": "session compacted", "model": "model changed"}.get(ev.get("change"), "new session")

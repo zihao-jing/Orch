@@ -2600,7 +2600,10 @@ class ManagedRunner(MonitorRunner):
         r2 = self.say(self.manager, self.mtpl("manager_no_message").strip(), "message")
         self.after_manager(r2, relay=False)
         msg = self.for_critic(r2.get("output") or "")
-        if not msg:
+        if msg:
+            self.drop_phase_messages(r["turn_id"], self.critic.name, "replaced by the manager's message when asked again",
+                                     by=r2["turn_id"])
+        else:
             self.rec.progress(f"⚠ {self.manager.called}: still no message for {self.critic.called}; it carries on")
             msg = self.mtpl("critic_no_message").strip()
         return msg
@@ -2926,9 +2929,9 @@ class ManagedRunner(MonitorRunner):
         self.discussion_carried(r)
         ms = parse_milestones(r["output"])
         if not ms:
-            r = self.say(self.manager, "I could not find the milestone list in your reply. Please give it again as a "
-                                       "numbered list, one milestone per line: \"1. Short title — what has to be true "
-                                       "when it is done\".", "plan")
+            r = self.reask(r, "I could not find the milestone list in your reply. Please give it again as a "
+                              "numbered list, one milestone per line: \"1. Short title — what has to be true "
+                              "when it is done\".", "plan")
             ms = parse_milestones(r["output"])
         if not ms:
             raise _Failed("the manager's plan has no numbered milestone list")
@@ -3900,6 +3903,9 @@ class ManagedRunner(MonitorRunner):
                 for f in [f for f in list(futs) if f.done()]:
                     self.par_after_turn(futs.pop(f), f.result())
                 self.par_poll_jobs()
+                if par.get("asks"):  # the critic's questions first: the manager answers each in a turn of its own
+                    self.par_answer(par["asks"][0])
+                    continue
                 if par["reviews"]:  # one review at a time, in the order the steps finished
                     self.par_review(par["reviews"][0])
                     continue
@@ -4256,13 +4262,27 @@ class ManagedRunner(MonitorRunner):
         self.write_work_board()
 
     def par_questions_up(self, r: Dict[str, Any]) -> None:
-        """A question the critic asks in a parallel section goes up as a note that wakes the manager; the work goes
-        on (no phase change)."""
+        """A question the critic asks in a parallel section waits for the manager's answer turn (par_answer, between
+        two reviews); the work goes on (no phase change)."""
         block = self.ask_block(r.get("output") or "", "verifier")
         if block:
-            self.new_question(self.critic, self.manager.name, block, r["turn_id"])
-            self.deliver(self.critic, self.manager, block, self.mtpl("relay_note_up", note=block).strip(),
-                         source=r["turn_id"], purpose=r.get("purpose") or "", wake=True, activate=True)
+            q = self.new_question(self.critic, self.manager.name, block, r["turn_id"])
+            self.par.setdefault("asks", []).append(q["id"])
+
+    def par_answer(self, qid: str) -> None:
+        """The manager answers a critic question of a parallel section in the answer step (answer_question, which
+        closes it); the answer goes to the critic as a message that starts its turn, the workers keep running."""
+        q = self.q(qid)
+        if q and q["status"] == "open":
+            r, answer = self.answer_question(q)
+            m = self.deliver(self.manager, self.critic, answer,
+                             self.mtpl("relay_answer_critic", question=self.short_question(q["text"]), answer=answer)
+                             .strip(), source=r["turn_id"], purpose="answer")
+            for x in self.ledger.rows:  # its phase messages: carried by that one
+                if x["from"] == self.manager.name and x["to"] == self.critic.name and x["status"] == "sent" \
+                        and (x.get("carrier") or {}).get("phase") in ("answer", "message"):
+                    self.ledger.mark(x, "superseded", reason="carried by the manager's answer", by=m["id"])
+        self.par["asks"].remove(qid)
 
     def par_review(self, name: str) -> None:
         """One review of one worker's step (main thread; one at a time)."""
@@ -4580,6 +4600,20 @@ class ManagedRunner(MonitorRunner):
         d = self.wait_gate({"kind": "wait", "milestone": mg.get("ms", 0), "turn": w.get("turn"),
                             "title": f"Waiting for you ({w.get('who') or 'a human task'})", "text": w.get("text", "")})
         msg = (d.get("message") or "").strip()
+        if w.get("back") == "mreview":  # a paused milestone review: the manager reviews the same report again
+            waited = truncate(w.get("text", ""), 600)
+            if d["decision"] == "revise":
+                msg = msg or "Not done; please decide again."
+                self.decide(f"Pause sent back: {msg}", "you", "wait")
+                self.forward(self.manager, self.mtpl("manager_review_wait_revise", message=msg, waited=waited).strip())
+            elif msg:
+                self.decide(msg, "you", "wait")
+                self.forward(self.manager, self.mtpl("manager_review_resumed", message=msg, waited=waited).strip())
+            if d.get("discussion_result"):
+                self.after_manager(d["discussion_result"])
+            mg.pop("wait", None)
+            mg["phase"] = "mreview"
+            return None
         if d["decision"] == "revise":  # B9: sent back with my notes: the manager decides again
             msg = msg or "Not done; please decide again."
             self.decide(f"Pause sent back: {msg}", "you", "wait")
@@ -4626,9 +4660,17 @@ class ManagedRunner(MonitorRunner):
         if not q:
             mg["phase"] = mg.get("after") or "work"
             return None
+        extra = self.mtpl("manager_question_before_report").strip() if mg.get("after") == "report" else ""
+        _r, answer = self.answer_question(q, extra)  # the critic passed the milestone and asked: the review is next
+        mg.update(answer_text=answer, phase="amend")
+        return None
+
+    def answer_question(self, q: Dict[str, Any], extra: str = "") -> Tuple[Dict[str, Any], str]:
+        """The manager answers a critic question in a turn of its own; the question closes by the turn's shape:
+        passed up when the manager asked me about it, answered otherwise. Returns (the turn, the message)."""
         prompt = self.mtpl("manager_question", question=q["text"], human_messages="")
-        if mg.get("after") == "report":  # the critic passed the milestone and asked: the review is the next turn
-            prompt = prompt.rstrip() + "\n\n" + self.mtpl("manager_question_before_report").strip()
+        if extra:
+            prompt = prompt.rstrip() + "\n\n" + extra
         r = self.say(self.manager, prompt, "answer")
         self.after_manager(r, parent=[q["id"]], relay=False)
         answer = self.critic_message(r, "answer")
@@ -4637,8 +4679,7 @@ class ManagedRunner(MonitorRunner):
         else:
             self.settle(q, self.manager.name, answer, r["turn_id"])
             self.decide(f"{self.short_question(q['text'])}: {answer}", self.manager.called, q["id"])
-        mg.update(answer_text=answer, phase="amend")
-        return None
+        return r, answer
 
     def ph_amend(self, mg: Dict[str, Any]) -> Optional[str]:
         """The critic takes the manager's answer in. When its review has not reached the worker yet, the worker gets
@@ -4713,20 +4754,26 @@ class ManagedRunner(MonitorRunner):
         sid = (self.st["sessions"].get(m.name) or {}).get("session_id")
         if sid and r.get("status") == "ok" and ms.get("rubric"):
             self.st.setdefault("rubric_seen", {})[m.name] = [sid] + key
+        paused = mg.pop("mreview_paused", "")
+        if paused:  # the review it paused: its message for the critic was held, this one replaces it
+            for x in self.ledger.rows:
+                if x.get("source") == paused and x["to"] == self.critic.name and x["status"] == "held":
+                    self.ledger.mark(x, "superseded", reason="replaced by the review after the pause", by_turn=r["turn_id"])
         out = r.get("output") or ""
         dec = T.value(out, "decision")
-        if dec not in ("ACCEPT", "REVISE"):
-            r = self.say(self.manager, "Please end your reply with `<decision>ACCEPT</decision>` or "
-                                       "`<decision>REVISE</decision>`.", "review")
+        if dec not in ("ACCEPT", "REVISE", "PAUSE"):
+            r = self.reask(r, self.mtpl("manager_review_decision").strip(), "review")
             out = r.get("output") or ""
             dec = T.value(out, "decision")
+        if dec == "PAUSE":
+            return self.mreview_pause(r)
         accept = dec == "ACCEPT"
         score, crit = parse_score(out), parse_criteria(out)
         if accept and c.min_score is not None and score is not None and score < c.min_score:
             accept = False
             self.rec.progress(f"manager accepted at {score}/5, below min_score {c.min_score} → REVISE")
-            r = self.say(self.manager, f"Your overall score of {score}/5 is below the {c.min_score}/5 we agreed on. "
-                                       f"What should {self.critic.called} do next?", "review")
+            r = self.reask(r, f"Your overall score of {score}/5 is below the {c.min_score}/5 we agreed on. "
+                              f"What should {self.critic.called} do next?", "review")
         text = self.after_manager(r, relay=False)
         summ = [b for x in (out, r.get("output") or "") for b in T.bodies(x, "summary")]
         self.st.setdefault("reviews", []).append(
@@ -4744,6 +4791,31 @@ class ManagedRunner(MonitorRunner):
                       guidance_at=now_iso())
         else:
             mg.update(guidance=self.critic_message(r, "review"), guidance_at=now_iso(), phase="guidance")
+        return None
+
+    def reask(self, r: Dict[str, Any], prompt: str, purpose: str) -> Dict[str, Any]:
+        """Ask the manager again and go by the new reply: the first reply's messages for the critic are replaced."""
+        r2 = self.say(self.manager, prompt, purpose)
+        self.drop_phase_messages(r["turn_id"], self.critic.name, "replaced by the manager's reply when asked again",
+                                 by=r2["turn_id"])
+        return r2
+
+    def mreview_pause(self, r: Dict[str, Any]) -> Optional[str]:
+        """The manager cannot decide the milestone until I act: the run waits, the milestone stays open, its message
+        for the critic is held (the review after the pause replaces it)."""
+        mg, out = self.mg, r.get("output") or ""
+        self.after_manager(r, relay=False)
+        mg.pop("pause_req", None)
+        self.st.setdefault("reviews", []).append(
+            {"milestone": mg["ms"], "turn": r["turn_id"], "score": parse_score(out), "criteria": parse_criteria(out),
+             "decision": "PAUSE", "round": self.st.get("round", 0), "at": now_iso()})
+        for x in self.ledger.rows:
+            if x.get("source") == r["turn_id"] and x["to"] == self.critic.name and x["status"] == "sent":
+                self.ledger.mark(x, "held", reason="the manager paused the milestone review")
+        mg["wait"] = {"who": "the manager", "text": manager_pause(out), "proposal": "", "turn": r["turn_id"],
+                      "back": "mreview"}
+        mg.update(phase="wait", mreview_paused=r["turn_id"])
+        self.rec.progress(f"⏸ the manager paused the review of milestone {mg['ms'] + 1} until a task of mine is done")
         return None
 
     def ph_guidance(self, mg: Dict[str, Any]) -> Optional[str]:

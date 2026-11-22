@@ -130,6 +130,72 @@ class TestShortReplyFlags(unittest.TestCase):
         self.assertEqual(self.flagged("verify", "Checked.", status="error"), ["r001-t01-x"])
 
 
+class TestLedgerOrigin(unittest.TestCase):
+    def test_a_short_delivered_message_is_traced_to_its_sender(self):
+        rd = Path(tempfile.mkdtemp()) / "run"
+        rd.mkdir()
+        short = "本轮查询修订到此结束。保留已交审的架构稿。"
+        self.assertLess(len(short), audit.MIN_PARA)
+        turn(rd, "r001-t01-crit", "crit", "verifier", "10:00:00", "10:01:00", "Plan the work please. " * 5,
+             f'<message to="wk">{short}</message>')
+        turn(rd, "r002-t01-wk", "wk", "worker", "10:02:00", "10:03:00", short + "\n", "Understood, holding. " * 20)
+        (rd / "state.json").write_text(json.dumps({"messages": [
+            {"id": "M1", "from": "crit", "to": "wk", "body": short, "text": short, "source": "r001-t01-crit",
+             "status": "delivered", "turn": "r002-t01-wk", "created_at": "2026-01-01T10:01:00",
+             "delivered_at": "2026-01-01T10:02:00", "how": "prompt"}]}))
+        md, _ = audit.build(rd, 2, 2)
+        self.assertIn(f"| {len(short)} | 0 | 419 | 0 | 0.00 | critic {len(short)} |", md)
+        self.assertIn(f"- r002-t01-wk ⇐ r001-t01-crit 100% of {len(short)}", md)
+        # without the ledger, short text is not traced (no guessing from a short match)
+        self.assertEqual(audit.trace(audit.load_turns(rd), [])[1]["paras"], [])
+
+
+class TestRetries(unittest.TestCase):
+    def setUp(self):
+        self.rd = Path(tempfile.mkdtemp()) / "run"
+        self.rd.mkdir()
+        rep = "The milestone report: everything checked against the spec, rows match. " * 4
+        turn(self.rd, "r001-t01-boss", "boss", "manager", "10:00:00", "10:01:00", rep, "Looks fine " * 40,
+             purpose="review")
+        turn(self.rd, "r001-t02-boss", "boss", "manager", "10:01:00", "10:01:10",
+             "Please end your reply with `<decision>ACCEPT</decision>`, `<decision>REVISE</decision>` or "
+             "`<decision>PAUSE</decision>`.", "<decision>REVISE</decision>", purpose="review")
+        turn(self.rd, "r001-t03-boss", "boss", "manager", "10:01:10", "10:01:20",
+             "Nothing in your last reply reached the critic: only `<message to=\"the critic\">…</message>` is "
+             "passed on.", "<message to=\"critic\">Redo the rows.</message>", purpose="message")
+        turn(self.rd, "r001-t04-boss", "boss", "manager", "10:01:20", "10:01:30",
+             "Your overall score of 2/5 is below the 4/5 we agreed on. What should the critic do next?", "Redo.",
+             purpose="review")
+        turn(self.rd, "r002-t01-boss", "boss", "manager", "10:30:00", "10:31:00", "A new task: " + rep,
+             "On it " * 60, purpose="review")
+        self.md, self.stats = audit.build(self.rd, 1, 2)
+
+    def test_reasks_are_marked_in_the_turn_table(self):
+        self.assertEqual(self.stats["retries"], {
+            "r001-t02-boss": ("r001-t01-boss", "invalid decision"),
+            "r001-t03-boss": ("r001-t02-boss", "no message for the critic"),
+            "r001-t04-boss": ("r001-t03-boss", "score below min_score")})
+        self.assertIn("| ok · retry of r001-t01-boss (invalid decision) |", self.md)
+        self.assertIn("*retry of X (why)*", self.md)
+
+    def test_retries_are_explained_in_flags_and_not_a_burst(self):
+        kinds = [f["kind"] for f in self.stats["flags"]]
+        self.assertNotIn("burst of turns", kinds)
+        short = [f for f in self.stats["flags"] if f["kind"] == "short or failed reply"]
+        self.assertTrue(short and all("it answers orch's retry of" in f["line"] for f in short))
+
+    def test_structural_rule_needs_a_short_orch_only_message_in_the_same_purpose(self):
+        tr = audit.trace(audit.load_turns(self.rd), [])
+        ids = {x["turn"]["turn_id"]: x["turn"] for x in tr}
+        ids["r001-t02-boss"]["input"] = "Something else orch asks, briefly."  # same purpose as r001-t01: review
+        ids["r001-t04-boss"]["input"] = "Something else orch asks, briefly."  # after a "message" turn
+        got = audit.retries(tr, {})
+        self.assertEqual(got["r001-t02-boss"], ("r001-t01-boss", "asked again"))
+        self.assertNotIn("r001-t04-boss", got)
+        self.assertNotIn("r002-t01-boss", got)  # a long message with a task is no retry
+        self.assertNotIn("r001-t02-boss", audit.retries(tr, {"r001-t02-boss": "r001-t01-boss"}))  # a redo
+
+
 class TestAuditorPrompt(unittest.TestCase):
     def test_the_prompt_states_the_design(self):
         p = " ".join((ROOT / "orch" / "prompts" / "auditor.md").read_text().lower().split())

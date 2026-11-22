@@ -128,6 +128,7 @@ EVENT_KINDS: Dict[str, Callable[[Dict[str, Any], Callable[[Any], str]], Tuple[st
     "backend_switched": lambda e, who: ("system", "backend switched" + (f": {e.get('reason')}" if e.get("reason") else "")),
     "compact_skipped": lambda e, who: ("system", "compact skipped" + (f": {e.get('reason')}" if e.get("reason") else "")),
     "billing_error": lambda e, who: ("warning", str(e.get("problem") or e.get("reason") or "billing or account problem")),
+    "setup_error": lambda e, who: ("warning", str(e.get("problem") or e.get("reason") or "setup problem")),
     "size_warning": lambda e, who: ("warning", str(e.get("problem") or "size out of range")),
     "route_problem": lambda e, who: ("warning", str(e.get("problem") or "a message could not be sent")),
     "tooling_mention": lambda e, who: ("warning", str(e.get("problem") or "mentions the tooling")),
