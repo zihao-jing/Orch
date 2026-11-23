@@ -818,6 +818,20 @@ class Board:
         return {"q": q, "hits": hits, "more": False}
 
     # ------------------------------------------------------------------ actions (all via the run folder)
+    def skip_retry(self, agent: str, wait_id: str) -> bool:
+        rd = self.run_dir
+        if not rd or not re.fullmatch(r"[0-9a-f]{32}", wait_id):
+            return False
+        state = read_json(rd / "state.json", {}) or {}
+        wait = (state.get("reliability") or {}).get(agent) or {}
+        if wait.get("wait_id") != wait_id or wait.get("state") != "retrying" or wait.get("until", 0) <= time.time():
+            return False
+        try:
+            (rd / f".retry-{wait_id}").unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
     def control(self, data: Dict[str, Any]) -> None:
         inbox = self.run_dir / "inbox"
         inbox.mkdir(exist_ok=True)
@@ -1613,6 +1627,9 @@ def _handler(boards: Dict[str, Board]):
                 b.control({"kind": "review"})
             elif u.path == "/api/review_comments":
                 b.control({"kind": "review_comments", "path": str(body.get("path") or "")})
+            elif u.path == "/api/skip_retry":
+                if not b.skip_retry(str(body.get("agent") or ""), str(body.get("wait_id") or "")):
+                    return self.js({"error": "That retry is no longer waiting."}, 409)
             elif u.path == "/api/job":
                 b.control({"kind": "job"})
             elif u.path == "/api/gate":

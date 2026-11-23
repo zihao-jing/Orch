@@ -331,7 +331,8 @@ workers: `<workers n="3" steps="2,3,4">why</workers>` (n counts the worker alrea
 
 * **Who decides.** The manager, up to `max_workers` (controller, default 3), as long as enough rounds are left and,
   when `parallel_turns` is set, n is within it. More goes to me as a gate. In night mode the manager's number stands up
-  to `workers_hard_cap` (default 6). A critic proposal reaches the manager as a note that wakes it.
+  to `workers_hard_cap` (default 6). A critic proposal reaches the manager as a note that wakes it. A larger
+  approved count adds workers to the current group without resetting existing assignments or sessions.
 * **The workers.** `writer-2` … `writer-N` are copies of the worker: same settings, own session, lane, job tag, state
   file and monitor (`monitor-2` …; without a monitor, a side session of the critic). Each sees only the critic, never
   each other; a prompt that names another worker is flagged on the board.
@@ -676,7 +677,9 @@ backend_options: {permission_mode: auto}   # options on top of the model's (on a
   (exit 0, no text or recorded completed tool work) gets the
   `retries` immediate corrections instead. A billing or account problem is not retried: the run stops and the
   board says why. Each retry and switch is in the turn record (`retries`, `fallbacks`), in `state.json`
-  (`reliability`) and on the board. `retry_waits` and `fallback_cooldown` can be set per agent too.
+  (`reliability`) and on the board. During a retry wait, choose **Use backup now** beside the agent in **Working now**
+  to skip its remaining same-model retries and switch to its next configured backup. Other agents are unaffected.
+  `retry_waits` and `fallback_cooldown` can be set per agent too.
 * Edits to the model list or to an agent file apply from the agent's next turn. `$VARS` in a model's `env` come
   from the shell, so keys need not be written into the file.
 * When a worker's model changes (a switch, or an edit), its critic is told once at its next turn that the person

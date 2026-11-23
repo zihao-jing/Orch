@@ -148,6 +148,10 @@ details.round>summary:before{content:"▸";color:var(--mute)}details.round[open]
 .qthread{max-height:340px;overflow-y:auto;margin:8px 0;padding:6px 4px 0;border-top:1px solid var(--grid)}
 .chat{display:flex;flex-direction:column;height:min(70vh,720px)}
 .chatlog{flex:1;overflow-y:auto;padding-right:4px}
+.chat-compose{position:relative;max-height:50%;align-items:stretch}
+#chatin{resize:none;padding-right:34px}
+#chat-resize{position:absolute;top:1px;right:1px;width:28px;height:28px;padding:0;border:0;background:transparent;color:var(--mute);cursor:ns-resize;touch-action:none;user-select:none}
+#chat-resize:hover,#chat-resize:focus-visible{color:var(--s1)}
 .cm{margin:8px 0;max-width:92%}.cm.me{margin-left:auto}
 .cm .b{border-radius:12px;padding:8px 11px;background:var(--surface);border:1px solid var(--ring)}
 .cm.me .b{background:var(--you-bg);border-color:transparent}
@@ -173,6 +177,7 @@ details.fold.flash{outline:2px solid var(--you);outline-offset:2px}
 .tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}.tabs button.on{background:var(--ink);color:var(--page);border-color:var(--ink)}
 /* B9b timeline: milestone → step → one block per level of communication → one line per message */
 .nowl{font-size:13px;line-height:1.6}.nowl .bad{color:var(--you)}
+.retry-line{display:flex;align-items:baseline;justify-content:space-between;gap:8px}.retry-line button{flex:none}
 .stats{font-size:12px;color:var(--ink2);margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 14px}
 .tlbar{display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .tlbar input[type=search]{flex:1 1 220px;min-width:0;font:inherit;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:6px 10px}
@@ -271,7 +276,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
    <div class="card chat">
     <div class="chat-top"><h2 id="chat-h">Talk to the manager</h2><select id="chatwho" class="sm" title="Who to talk to"></select><button class="sm" id="discuss" title="Discuss changes before applying them">💬 Discuss</button><button class="sm ok" id="applydiscussion">Apply discussion</button><button class="sm chat-x" id="chatclose" title="Close (Esc). The run goes on">×</button></div>
     <div class="chatlog" id="chatlog"></div>
-    <div class="row"><textarea id="chatin" rows="2" placeholder="Ask anything or give direction… (Enter to send, Shift+Enter for a new line)"></textarea></div>
+    <div class="row chat-compose"><textarea id="chatin" rows="2" placeholder="Ask anything or give direction… (Enter to send, Shift+Enter for a new line)"></textarea><button type="button" id="chat-resize" aria-label="Resize message input" aria-controls="chatin" title="Drag up to expand, down to shrink, or click to toggle">↕</button></div>
     <div class="row" style="justify-content:space-between;align-items:center"><span class="mute" style="font-size:12px" id="chat-hint"></span><button class="pri" id="chatsend">Send</button></div>
    </div>
   </aside>
@@ -285,6 +290,7 @@ const MONS = __MONITORS__;
 const qsM = new URLSearchParams(location.search).get('m');
 let M = MONS.includes(qsM) ? qsM : MONS[0];
 let D = null;
+const switchingWaits = new Map();
 const chatOlder = new Map(), chatMoreFlag = new Map(); let chatFirstId = '';  // older chat messages fetched on request
 const live = {};
 const $ = id => document.getElementById(id);
@@ -422,6 +428,9 @@ async function load(){
     catch(e){ return; }
     if (!applyState(j)){ VER = ''; SNAP = null; again = true; return; }
     D = structuredClone(SNAP);
+    for (const [agent, waitId] of switchingWaits){
+      if (D.reliability?.[agent]?.wait_id !== waitId) switchingWaits.delete(agent);
+    }
   } finally { loading = false; if (again){ again = false; soon(); } }
   for (const k in (D.live||{})){ const L = D.live[k]; if (!live[k] || (live[k].text||'').length < (L.text||'').length) live[k] = {text:L.text||'', tools:L.tools||[]}; }
   render(); paintBusy();
@@ -526,11 +535,16 @@ function renderNow(mg){  // the switches, and the status area: only the agents w
     if (!showModelSwitches && (x.state === 'switched' || x.state === 'backup')) return;
     // A previous turn's failure is history once a newer turn is running. Keep current retries and backups visible.
     if (x.state === 'failed' && x.at && (D.running||[]).some(t => t.agent === n && Date.parse(t.started_at) > Date.parse(x.at))) return;
-    const what = x.state === 'retrying' ? `${esc(x.model)} failed; retry ${x.retry}/${x.of} in ${x.wait_s}s`
+    const switching = !!x.wait_id && switchingWaits.get(n) === x.wait_id;
+    const what = switching ? `<span role="status">Switching to ${esc(x.next_model)}…</span>`
+      : x.state === 'retrying' ? `${esc(x.model)} failed; retry ${x.retry}/${x.of} in ${x.wait_s}s`
       : x.state === 'switched' ? `switched to backup ${esc(x.model)}`
       : x.state === 'backup' ? `on backup ${esc(x.model)}; ${esc(x.primary||'primary')} again after ${x.until ? new Date(x.until * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'the cooldown'}`
       : `${esc(x.model)}: ${esc(x.state)}`;
-    lines.push(`<div class="bad">⏳ <b>${esc(called(n))}</b>: ${what}${errorDetails(n + ':' + (x.at || ''), x.reason)}</div>`); });
+    const skip = switching ? '<button class="sm loading" disabled aria-busy="true">Switching…</button>'
+      : x.state === 'retrying' && x.wait_id && x.next_model && x.until * 1000 > Date.now()
+      ? `<button class="sm" data-skip-retry="${esc(x.wait_id)}" data-agent="${esc(n)}" title="Skip remaining retries and switch to ${esc(x.next_model)}">Use backup now</button>` : '';
+    lines.push(`<div class="bad"><div class="retry-line"><span>⏳ <b>${esc(called(n))}</b>: ${what}</span>${skip}</div>${errorDetails(n + ':' + (x.at || ''), x.reason)}</div>`); });
   Object.keys(D.terminal||{}).forEach(n => lines.push(`<div class="mute" title="orch holds this agent's turns and routes the messages it writes there">⌨ ${esc(called(n))} is open in a terminal</div>`));
   if (D.stop_reason && D.status === 'stopped') lines.push(`<div class="bad">⛔ ${esc(D.stop_reason)}</div>`);
   if (D.error && D.status === 'failed') lines.push(`<div class="bad">⛔ Run failed${errorDetails('run:' + D.run_id, D.error)}</div>`);
@@ -647,6 +661,19 @@ function ask({title, body = '', ok = 'OK', tone = 'pri', alternative = ''}){
 $('askdlg').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close('no'); });  // the backdrop
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.skipRetry){
+    const {agent, skipRetry: waitId} = b.dataset;
+    if (switchingWaits.get(agent) === waitId) return;
+    switchingWaits.set(agent, waitId);
+    renderNow(D.managed || {});
+    const result = await post('api/skip_retry', {agent, wait_id: waitId});
+    if (!result?.ok && switchingWaits.get(agent) === waitId){
+      switchingWaits.delete(agent);
+      renderNow(D.managed || {});
+      soon();
+    }
+    return;
+  }
   if (b.dataset.applydiscussion){ await applyDiscussion(b); }
   if (b.dataset.job){ await post('api/job', {}, b); }
   if (b.dataset.gate){ const msg = ($('gate-msg')||{}).value || '';
@@ -1319,6 +1346,30 @@ $('chatclose').addEventListener('click', () => setChat(false));
 document.querySelector('.side').addEventListener('mousedown', e => { if (e.target === e.currentTarget) setChat(false); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && chatOpen && !$('askdlg').open) setChat(false); });
 $('chatsend').addEventListener('click', sendChat);
+const resizeGrip = $('chat-resize'), composer = $('chatin').parentElement;
+let resizeDrag = null, didResize = false;
+function sizeComposer(height){
+  composer.style.height = Math.max(48, Math.min(composer.parentElement.clientHeight / 2, height)) + 'px';
+}
+resizeGrip.addEventListener('pointerdown', event => {
+  if (!event.isPrimary || event.button !== 0) return;
+  didResize = false;
+  resizeDrag = {id: event.pointerId, top: event.clientY, height: composer.offsetHeight};
+  resizeGrip.setPointerCapture(event.pointerId);
+});
+resizeGrip.addEventListener('pointermove', event => {
+  if (resizeDrag?.id !== event.pointerId) return;
+  const delta = resizeDrag.top - event.clientY;
+  if (Math.abs(delta) < 3 && !didResize) return;
+  didResize = true;
+  sizeComposer(resizeDrag.height + delta);
+});
+resizeGrip.addEventListener('lostpointercapture', () => { resizeDrag = null; });
+resizeGrip.addEventListener('click', event => {
+  if (event.detail && didResize) return;
+  if (composer.style.height) composer.style.height = '';
+  else sizeComposer(composer.offsetHeight * 3);
+});
 $('chatin').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); sendChat(); } });
 function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_pending; }
 function discussWanted(){ return D.discussion_pending == null ? !!D.discussion : !!D.discussion_pending; }

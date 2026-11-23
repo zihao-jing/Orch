@@ -25,6 +25,7 @@ import re
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1025,14 +1026,17 @@ class MonitorRunner:
                 if waited < len(waits):
                     secs = waits[waited]
                     waited += 1
-                    self.retry_wait(agent, record, v, waited, len(waits), secs, pe or reason or res.status)
+                    skipped = self.retry_wait(agent, record, v, waited, len(waits), secs, pe or reason or res.status,
+                                              chain[nxt_i].label if nxt_i < len(chain) else None)
                     if self.should_stop():
                         break
-                    if stalled and sid:
-                        urgent_send = (self.tpl("turn_continue").strip() or "continue") + "\n\n" + note
-                        record["input"] = urgent_send
-                    attempt += 1
-                    continue
+                    if not skipped:
+                        if stalled and sid:
+                            urgent_send = (self.tpl("turn_continue").strip() or "continue") + "\n\n" + note
+                            record["input"] = urgent_send
+                        attempt += 1
+                        continue
+                    reason = f"retry skipped from board: {pe or reason or res.status}"
             elif not stalled and not exe and fixes < v.retries:
                 fixes += 1
                 if pe:
@@ -1225,8 +1229,8 @@ class MonitorRunner:
         self.rec.save()
 
     def retry_wait(self, agent: AgentConfig, record: Dict[str, Any], v: Any, n: int, of: int, secs: float,
-                   reason: str) -> None:
-        """B8: wait, then run the turn again on the same model; recorded with the turn, in state and on the board."""
+                   reason: str, next_model: Optional[str]) -> bool:
+        """Return True if the board claimed this wait to switch directly to the next model."""
         rec = self.rec
         entry = {"at": now_iso(), "model": v.label, "retry": n, "of": of, "wait_s": secs, "reason": reason}
         record.setdefault("retries", []).append(entry)
@@ -1235,14 +1239,33 @@ class MonitorRunner:
         rec.progress(f"⏳ `{record['turn_id']}` **{agent.name}**: `{v.label}` failed ({reason}); retry {n}/{of} "
                      f"on the same model in {secs:g}s")
         self.log(f"{agent.name}: {v.label} failed ({reason}); retry {n}/{of} in {secs:g}s")
-        self.set_reliability(agent, model=v.label, state="retrying", retry=n, of=of, wait_s=secs, reason=reason,
-                             until=time.time() + secs)
-        self.pause(secs)
+        wait_id = uuid.uuid4().hex if next_model and secs > 0 else None
+        marker = rec.run_dir / f".retry-{wait_id}" if wait_id else None
+        if marker:
+            marker.touch(exist_ok=False)
+        skipped = False
+        try:
+            self.set_reliability(agent, model=v.label, state="retrying", retry=n, of=of, wait_s=secs, reason=reason,
+                                 until=time.time() + secs, wait_id=wait_id, next_model=next_model)
+            if marker:
+                self.pause(secs, marker)
+            else:
+                self.pause(secs)
+        finally:
+            if marker:
+                try:
+                    marker.unlink()
+                except FileNotFoundError:
+                    skipped = True
+            self.set_reliability(agent)
+        return skipped
 
-    def pause(self, secs: float) -> None:
+    def pause(self, secs: float, marker: Optional[Path] = None) -> None:
         """Sleep for `secs`; a stop request ends the wait. (Tests replace it with a fake clock.)"""
         end = time.monotonic() + max(0.0, float(secs))
         while time.monotonic() < end and not self.should_stop():
+            if marker and not marker.exists():
+                break
             time.sleep(min(0.5, max(0.0, end - time.monotonic())))
 
     def report_text(self, r: Optional[Dict[str, Any]]) -> str:

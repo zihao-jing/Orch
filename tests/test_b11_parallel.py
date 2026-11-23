@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from orch import parallel as PW  # noqa: E402
 from orch.backends import MockBackend, TurnResult  # noqa: E402
+from orch.managed import ManagedRunner  # noqa: E402
 from orch.recorder import Recorder, read_json  # noqa: E402
 from role_view_checks import assert_no_role_leaks  # noqa: E402
 from test_b6_b9 import Live  # noqa: E402
@@ -112,6 +113,32 @@ class TestParallelUnit(unittest.TestCase):
 
 
 class TestParallelRun(Base):
+    def test_manager_expands_running_pair_without_restarting_either_worker(self):
+        first, third = ASSIGN.rsplit('\n', 1)
+        cfg = self.cfg(mgr={"milestones": 1, "replies": {"incoming": ['<workers n="2">Approved.</workers>']}},
+                       critic={"replies": {"brief": [worker_instruction(PROPOSE)], "par_assign": [first, third],
+                                           "par_review": ["Checked. <verdict>PASS</verdict>"],
+                                           "verify": ["All done. <verdict>PASS</verdict>"]}})
+        poll = ManagedRunner.par_poll_jobs
+
+        def grow(runner):
+            slots = runner.par['slots']
+            if len(slots) == 2 and all(slot['status'] == PW.WORKING for slot in slots.values()):
+                before = copy.deepcopy(slots)
+                request = {'status': 'ok', 'output': '<workers n="3">Add a third worker.</workers>'}
+                runner.take_workers(runner.manager, request)
+                runner.take_workers(runner.manager, request)
+                self.assertEqual({name: slots[name] for name in before}, before)
+            poll(runner)
+
+        with mock.patch.object(ManagedRunner, 'par_poll_jobs', grow):
+            status, rec = run(cfg)
+        self.assertEqual(status, 'completed', rec.state.get('error'))
+        self.assertEqual(len([event for event in events(rec) if event['event'] == 'parallel_expanded']), 1)
+        work = [turn for turn in turns(rec) if turn['purpose'] == 'work']
+        self.assertEqual(sorted(turn['agent'] for turn in work), ['writer', 'writer-2', 'writer-3'])
+        self.assertIn('appendix C', next(turn['input'] for turn in work if turn['agent'] == 'writer-3'))
+
     def test_proposal_approval_concurrent_workers_reviews_and_completion(self):
         status, rec = run(self.cfg(monitor={"replies": {"check": ["the log grows <status>ok</status>"]}},
                                    worker_cfg={"check_every": EVERY}))

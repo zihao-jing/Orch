@@ -3641,9 +3641,9 @@ class ManagedRunner(MonitorRunner):
         with self.unlocked():
             lock.__enter__()
 
-    def pause(self, secs: float) -> None:
+    def pause(self, secs: float, marker: Optional[Path] = None) -> None:
         with self.unlocked():
-            super().pause(secs)
+            super().pause(secs, marker)
 
     @property
     def par(self) -> Dict[str, Any]:
@@ -3688,8 +3688,7 @@ class ManagedRunner(MonitorRunner):
         if not tag:
             return
         mg = self.mg
-        if self.par:
-            self.rec.progress(f"ⓘ {agent.called} asked for {tag['n']} people while several already work: not acted on")
+        if self.par and tag["n"] <= len(self.par["slots"]):
             return
         if len(self.workers) != 1:
             self.rec.progress(f"ⓘ {agent.called} proposed several workers; this run has {len(self.workers)} "
@@ -3721,7 +3720,9 @@ class ManagedRunner(MonitorRunner):
         self.mg["par_req"] = {"status": status, "n": k, "asked": n, "steps": list(steps), "reason": reason,
                               "by": proposed_by, "decided_by": by, "turn": turn, "why": why}
         self.rec.event("workers_decision", status=status, n=k, asked=n, by=by, why=why)
-        if status == "declined":
+        if self.par and status == "approved":
+            self.par_start(self.mg["par_req"])
+        elif status == "declined":
             self.rec.progress(f"👥 one worker stays ({why})")
             if proposed_by == self.critic.name:
                 self.forward(self.critic, self.mtpl("workers_declined").strip())
@@ -3736,9 +3737,10 @@ class ManagedRunner(MonitorRunner):
         req = mg.get("par_req") or {}
         n, c = int(req.get("n") or 2), self.mon.controller
         steps = ", ".join(map(str, req.get("steps") or [])) or "not named"
+        keep = "keep the current group" if self.par else "keep one worker"
         text = (f"{n} workers at the same time on steps {steps} (the manager may approve up to {c.max_workers} "
                 f"alone; night mode allows up to {c.workers_hard_cap}).\n\nWhy: {req.get('reason') or '-'}\n\n"
-                "Approve to start them; send it back to keep one worker.")
+                f"Approve to start them; send it back to {keep}.")
         d = self.wait_gate({"kind": "workers", "title": f"{n} workers at once", "text": text,
                             "milestone": mg.get("ms", 0)})
         if d.get("discussion_result"):
@@ -3748,9 +3750,9 @@ class ManagedRunner(MonitorRunner):
             req.update(status="approved", n=k, decided_by="night mode" if d.get("night") else "me")
             self.rec.progress(f"👥 {k} workers approved at the gate")
         else:
-            req.update(status="declined", n=1, decided_by="me")
+            req.update(status="declined", n=len(self.par["slots"]) if self.par else 1, decided_by="me")
             note = d.get("message") or ""
-            self.forward(self.manager, f"About {n} workers at once: I keep one worker." + (f" {note}" if note else ""))
+            self.forward(self.manager, f"About {n} workers at once: I {keep}." + (f" {note}" if note else ""))
             if req.get("by") == self.critic.name:
                 self.forward(self.critic, self.mtpl("workers_declined").strip())
         mg["par_req"] = req
@@ -3800,12 +3802,20 @@ class ManagedRunner(MonitorRunner):
         n = max(2, int(req.get("n") or 2))
         steps = [int(x) for x in req.get("steps") or []]
         req["status"] = "started"
-        par = {"active": True, "n": n, "steps": steps, "queue": list(steps), "reason": req.get("reason", ""),
-               "slots": {}, "reviews": [], "turns": 0, "worktrees": False, "ms": mg.get("ms", 0),
-               "assign_due": True, "started_at": now_iso()}
+        par = self.par or {"active": True, "steps": [], "queue": [], "reason": req.get("reason", ""),
+                           "slots": {}, "reviews": [], "turns": 0, "worktrees": False, "ms": mg.get("ms", 0),
+                           "started_at": now_iso()}
+        current = len(par["slots"])
+        if n <= current:
+            return
+        for step in steps:
+            if step not in par["steps"]:
+                par["steps"].append(step)
+                par["queue"].append(step)
+        par.update(n=n, assign_due=True)
         mg["par"] = par
         warned = False
-        for k in range(1, n + 1):
+        for k in range(current + 1, n + 1):
             wt = None
             if k > 1 and c.worker_worktrees:
                 wt = PW.worktree_add(base.working_dir or self.mon.working_dir, f"{base.name}-{k}", self.rec.run_dir.name)
@@ -3821,12 +3831,13 @@ class ManagedRunner(MonitorRunner):
             if wt:
                 par["worktrees"] = True
                 par["slots"][w.name].update(branch=wt["branch"], worktree=wt)
-        mg["feedback"] = {}  # the critic hands out the steps afresh
-        for m in self.ledger.waiting(base.name):  # what the phase was going to carry to the one worker is dropped
-            if "phase" in (m.get("carrier") or {}):
-                self.ledger.mark(m, "superseded", reason="the steps are handed out afresh to several people")
+        if not current:
+            mg["feedback"] = {}  # the critic hands out the steps afresh
+            for m in self.ledger.waiting(base.name):  # what the phase was going to carry to the one worker is dropped
+                if "phase" in (m.get("carrier") or {}):
+                    self.ledger.mark(m, "superseded", reason="the steps are handed out afresh to several people")
         self.par_agents_extra()
-        self.rec.event("parallel_start", n=n, steps=steps, workers=list(par["slots"]))
+        self.rec.event("parallel_expanded" if current else "parallel_start", n=n, steps=steps, workers=list(par["slots"]))
         self.rec.progress(f"👥 **{n} workers at once:** {', '.join(par['slots'])}"
                           + (f" on steps {', '.join(map(str, steps))}" if steps else ""))
         self.write_work_board()
@@ -3914,8 +3925,9 @@ class ManagedRunner(MonitorRunner):
         futs: Dict[Any, str] = {}
         self.__dict__.setdefault("_par_rounds", {})
         self.__dict__.setdefault("_par_procs", {})
-        ex = ThreadPoolExecutor(max_workers=max(1, len(par["slots"])), thread_name_prefix="worker")
-        checks = self.par_checks(len(par["slots"]))  # B5: each worker's monitor checks its turn or job, on its own
+        capacity = max(len(par["slots"]), self.mon.controller.workers_hard_cap)
+        ex = ThreadPoolExecutor(max_workers=capacity, thread_name_prefix="worker")
+        checks = self.par_checks(capacity)
         ok = False
         try:
             while True:
@@ -3928,6 +3940,15 @@ class ManagedRunner(MonitorRunner):
                         slot.update(status=PW.READY, instr="")
                 for f in [f for f in list(futs) if f.done()]:
                     self.par_after_turn(futs.pop(f), f.result())
+                if (mg.get("par_req") or {}).get("status") == "gate":
+                    if futs:
+                        with self.unlocked():
+                            wait(list(futs), timeout=0.2, return_when=FIRST_COMPLETED)
+                        continue
+                    mg["phase"] = "workers_gate"
+                    self.rec.save()
+                    ok = True
+                    return None
                 self.par_poll_jobs()
                 if par.get("asks"):  # the critic's questions first: the manager answers each in a turn of its own
                     self.par_answer(par["asks"][0])

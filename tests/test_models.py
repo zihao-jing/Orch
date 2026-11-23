@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +51,7 @@ class FakeClock:
     def __enter__(self):
         self.real = MonitorRunner.pause
         clock = self
-        MonitorRunner.pause = lambda self, secs: clock.waits.append(secs)
+        MonitorRunner.pause = lambda self, secs, marker=None: clock.waits.append(secs)
         return self
 
     def __exit__(self, *a):
@@ -186,6 +187,34 @@ class TestRetries(unittest.TestCase):
         from orch.board import Board
         lines = [c for c in Board("m", lambda: rec.run_dir).data().get("messages", []) if c.get("label") in ("retry", "model switch")]
         self.assertEqual(len(lines), 8)
+
+    def test_board_skips_only_the_selected_wait(self):
+        from orch.board import Board
+        cfg = self.cfg({"model": "opus", "backup": "glm", "backup2": "sonnet"},
+                       {"opus": [2], "glm": [1]}, retry_waits=[60, 120])
+        previous_ids = []
+        pause = MonitorRunner.pause
+
+        def click(runner, secs, marker=None):
+            board = Board("m", lambda: runner.rec.run_dir)
+            wait = board.data()["reliability"]["w1"]
+            wait_id = wait["wait_id"]
+            self.assertEqual(wait["next_model"], ["glm", "sonnet"][len(previous_ids)])
+            self.assertFalse(board.skip_retry("v1", wait_id))
+            for previous in previous_ids:
+                self.assertFalse(board.skip_retry("w1", previous))
+            self.assertTrue(board.skip_retry("w1", wait_id))
+            self.assertFalse(board.skip_retry("w1", wait_id))
+            previous_ids.append(wait_id)
+            pause(runner, secs, marker)
+
+        with patch.object(MonitorRunner, "pause", click):
+            status, rec = run(cfg)
+        self.assertEqual(status, "completed")
+        turn = next(t for t in turns(rec) if t.get("fallbacks"))
+        self.assertEqual([a["model"] for a in turn["attempts"]], ["opus", "glm", "sonnet"])
+        self.assertTrue(all("retry skipped from board" in f["reason"] for f in turn["fallbacks"]))
+        self.assertFalse(list(rec.run_dir.glob(".retry-*")))
 
     def test_waits_are_configurable_and_a_success_clears_the_state(self):
         cfg = self.cfg({"model": "opus"}, {"opus": [2]}, retry_waits=[7])
