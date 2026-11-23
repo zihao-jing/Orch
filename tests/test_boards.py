@@ -51,6 +51,20 @@ class TestBoardsUnit(unittest.TestCase):
         ck = B.merge_blocks(again, "- [x] STEP-A first\n- [ ] STEP-B second", "- [x] item one\n- [x] item two")
         self.assertEqual(B.plan_lines(B.parse_checklist(B.render_checklist(ck))).split("\n")[1], "- [ ] STEP-B second")
 
+    def test_editing_standing_rules_cannot_match_the_header_reminder(self):
+        board = B.parse_checklist("## Standing rules\n- [x] source files unchanged\n"
+                                  "## Step 1: labels\n- [x] labels checked\n"
+                                  "## Step 2: table\n- [x] totals checked\n")
+        text = B.render_checklist(board)
+        # Reproduce the critic's edit: the old header's example heading matched first,
+        # so replacing this section removed the closing comment and hid the entire checklist.
+        start, end = text.index("## Standing rules"), text.index("## Step 1")
+        edited = text[:start] + "## Standing rules\n- [x] protected files unchanged\n\n" + text[end:]
+        parsed = B.parse_checklist(edited)
+        self.assertEqual(parsed["standing"], [(True, "protected files unchanged")])
+        self.assertEqual(parsed["steps"], board["steps"])
+        self.assertEqual(B.plan_lines(parsed), "- [x] Step 1: labels\n- [x] Step 2: table")
+
     def test_golden_body_drops_the_title_and_comments(self):
         self.assertEqual(B.golden_body(B.GOLDEN_HEAD), "")
         self.assertEqual(B.golden_body(B.GOLDEN_HEAD + RULE + "\n"), "## Boundaries\n\n\n" + RULE)
