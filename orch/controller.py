@@ -476,7 +476,7 @@ class MonitorRunner:
                 agent = self.mon.agent(t["agent"])
             except Exception:
                 continue
-            sid = t.get("session_id") or self._live_session(t["turn_id"]) or self._claude_session(agent, t)
+            sid = t.get("session_id") or self._live_session(t["turn_id"]) or self._transcript_session(agent, t)
             t.update(status="interrupted", ended_at=now_iso(), session_id=sid)
             rec.write_turn(t)
             if t.get("backend", agent.backend) != agent.backend:
@@ -542,14 +542,15 @@ class MonitorRunner:
     def _reached_session(self, agent: AgentConfig, t: Dict[str, Any]) -> bool:
         """Did a cut-off turn's message reach its session? Then the session already holds it (Claude Code writes the
         prompt to the transcript before it starts work), and the turn is resumed with "continue", not sent again.
-        Evidence: the backend reported anything for the turn (the live log), or a Claude transcript starts with it."""
+        Evidence: the backend reported anything for the turn (the live log), or a compatible transcript starts
+        with it."""
         try:
             if any(ln.strip() for ln in (self.rec.run_dir / "live" / f"{t['turn_id']}.jsonl")
                    .read_text(encoding="utf-8").splitlines()):
                 return True
         except OSError:
             pass
-        return bool((t.get("output") or "").strip()) or bool(self._claude_session(agent, t))
+        return bool((t.get("output") or "").strip()) or bool(self._transcript_session(agent, t))
 
     def note_session(self, agent: str, reason: str, change: str = "reset", **info: Any) -> None:
         """A session reset (or another change to an agent's session) and why: kept on the session until its next
@@ -575,14 +576,15 @@ class MonitorRunner:
         return None
 
     @staticmethod
-    def _claude_session(agent: AgentConfig, t: Dict[str, Any]) -> Optional[str]:
-        """Find the Claude transcript whose first message is this turn's prompt."""
-        if agent.backend != "claude" or not t.get("input"):
+    def _transcript_session(agent: AgentConfig, t: Dict[str, Any]) -> Optional[str]:
+        """Find a Claude-compatible transcript whose first message is this turn's prompt."""
+        if agent.backend not in ("claude", "qoder") or not t.get("input"):
             return None
         import datetime as _dt
         import os as _os
         slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path(agent.working_dir).resolve()))
-        d = Path(_os.path.expanduser("~/.claude/projects")) / slug
+        config_dir = ".claude" if agent.backend == "claude" else ".qoder"
+        d = Path(_os.path.expanduser(f"~/{config_dir}/projects")) / slug
         try:
             since = _dt.datetime.fromisoformat(t["started_at"]).timestamp() - 5
         except (KeyError, ValueError, TypeError):

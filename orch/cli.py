@@ -195,6 +195,8 @@ def default_auditor(m: Any) -> Any:
     opts = {**c.backend_options, "effort": "low"}
     if c.backend == "claude":
         opts.update(disallowed_tools=NO_TOOLS, disable_hooks=True)
+    elif c.backend == "qoder":
+        opts.update(disallowed_tools=NO_TOOLS)
     home = Path(c.state_file).parent.parent / "auditor" / "state.md" if c.state_file else ""
     return AgentConfig(name="auditor", role="auditor", backend=c.backend, backend_options=opts, env=dict(c.env),
                        working_dir=c.working_dir or m.working_dir, timeout=900,

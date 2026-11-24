@@ -6,6 +6,7 @@ Sessions are continued by passing back the ``session_id`` a previous turn return
 Built-in backends
 -----------------
 claude   Claude Code CLI (``claude -p``), sessions via --session-id / --resume.
+qoder    Qoder CLI (``qodercli -p``), Claude-compatible events; sessions via --session-id / --resume.
 qwen     Qwen Code CLI (``qwen -p``), same event format as Claude Code; sessions via --session-id / --resume.
 opencode OpenCode CLI (``opencode run --format json``, live text and steering via a private ``opencode serve``).
 codex    OpenAI Codex CLI (``codex exec`` / ``codex exec resume``). Experimental.
@@ -72,7 +73,8 @@ class StopRequested(Exception):
 
 # a turn whose CLI could not be started at all: a setup problem (fix the environment), not a provider error
 MISSING_EXE = "executable not found: "
-DEFAULT_EXE = {"claude": "claude", "qwen": "qwen", "opencode": "opencode", "codex": "codex", "agy": "agy"}
+DEFAULT_EXE = {"claude": "claude", "qoder": "qodercli", "qwen": "qwen", "opencode": "opencode",
+               "codex": "codex", "agy": "agy"}
 
 
 def missing_executable(res: TurnResult) -> str:
@@ -345,6 +347,84 @@ class ClaudeBackend(Backend):
         r = TurnRequest(**{**req.__dict__, "prompt": f"{self.COMPACT} {extra}".strip(), "on_event": None,
                            "poll_messages": None, "on_message": None})
         return self.run(r, should_stop)
+
+
+class QoderBackend(ClaudeBackend):
+    """Qoder CLI in non-interactive mode (``qodercli -p``).
+
+    Qoder uses Claude Code's JSON and stream-JSON event schema, including session ids, usage, cost and compact
+    boundaries. Its command-line option names and permission values differ, so command construction lives here;
+    result parsing, live events, partial replies and ``/compact`` are inherited from :class:`ClaudeBackend`.
+
+    options: executable, model, effort, permission_mode
+             (default|plan|accept_edits|bypass_permissions|dont_ask|auto; Claude spellings are mapped),
+             allowed_tools, disallowed_tools, add_dirs, mcp_config, system_prompt_mode (append|replace),
+             thinking (auto|adaptive|enabled|disabled), thinking_budget, context_window, max_output_tokens,
+             max_turns, max_model_request_retries, agent, allowed_mcp_server_names, plugin_dirs, setting_sources,
+             settings, stream (default true), compact_instructions, extra_args.
+    """
+
+    name = "qoder"
+    PERMISSION_MODES = {"default": "default", "plan": "plan", "acceptEdits": "accept_edits",
+                        "bypassPermissions": "bypass_permissions", "dontAsk": "dont_ask", "auto": "auto"}
+
+    @staticmethod
+    def _repeat(cmd: List[str], flag: str, value: Any) -> None:
+        values = value if isinstance(value, list) else str(value or "").split(",")
+        for item in values:
+            if str(item).strip():
+                cmd += [flag, str(item).strip()]
+
+    def build_command(self, req: TurnRequest) -> Tuple[List[str], str]:
+        o = req.options
+        cmd = [str(o.get("executable", "qodercli")), "-p"]
+        if req.on_event is not None and o.get("stream", True):
+            cmd += ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+        else:
+            cmd += ["--output-format", "json"]
+        if req.session_id:
+            cmd += ["--resume", req.session_id]
+            sid = req.session_id
+        else:
+            sid = str(uuid.uuid4())
+            cmd += ["--session-id", sid]
+        if req.system_prompt:
+            flag = "--system-prompt" if o.get("system_prompt_mode") == "replace" else "--append-system-prompt"
+            cmd += [flag, req.system_prompt]
+        if o.get("model"):
+            cmd += ["--model", str(o["model"])]
+        if o.get("effort"):
+            cmd += ["--reasoning-effort", str(o["effort"])]
+        if o.get("permission_mode"):
+            mode = str(o["permission_mode"])
+            cmd += ["--permission-mode", self.PERMISSION_MODES.get(mode, mode)]
+        self._repeat(cmd, "--allowed-tools", o.get("allowed_tools"))
+        self._repeat(cmd, "--disallowed-tools", o.get("disallowed_tools"))
+        for directory in _opt_list(o.get("add_dirs")):
+            cmd += ["--add-dir", os.path.expanduser(directory)]
+        if o.get("mcp_config"):
+            value = o["mcp_config"]
+            cmd += ["--mcp-config", json.dumps(value) if isinstance(value, dict) else os.path.expanduser(str(value))]
+        thinking = o.get("thinking")
+        if thinking is not None:
+            cmd += ["--thinking", "enabled" if thinking is True else "disabled" if thinking is False else str(thinking)]
+        for key, flag in (("thinking_budget", "--thinking-budget"),
+                          ("context_window", "--context-window"),
+                          ("max_output_tokens", "--max-output-tokens"),
+                          ("max_turns", "--max-turns"),
+                          ("max_model_request_retries", "--max-model-request-retries")):
+            if o.get(key) is not None:
+                cmd += [flag, str(o[key])]
+        if o.get("agent"):
+            cmd += ["--agent", str(o["agent"])]
+        self._repeat(cmd, "--allowed-mcp-server-names", o.get("allowed_mcp_server_names"))
+        self._repeat(cmd, "--plugin-dir", o.get("plugin_dirs"))
+        self._repeat(cmd, "--setting-sources", o.get("setting_sources"))
+        if o.get("settings") is not None:
+            value = o["settings"]
+            cmd += ["--settings", json.dumps(value) if isinstance(value, dict) else os.path.expanduser(str(value))]
+        cmd += _opt_list(o.get("extra_args"))
+        return cmd, sid
 
 
 def _short_input(inp: Any) -> str:
@@ -1862,6 +1942,7 @@ def run_variants(agent: Any, req: TurnRequest, should_stop: Callable[[], bool],
 
 BACKENDS: Dict[str, Backend] = {
     "claude": ClaudeBackend(),
+    "qoder": QoderBackend(),
     "qwen": QwenBackend(),
     "opencode": OpenCodeBackend(),
     "codex": CodexBackend(),
