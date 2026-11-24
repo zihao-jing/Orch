@@ -1056,7 +1056,7 @@ function renderSteps(ms){
     `<section class="milestone-panel" id="ms-panel-${f}" aria-label="${label}"><h3>${label}</h3>${msPanelHTML(ms, f)}</section>`).join('') : '');
 }
 function orderedStepGroups(gs, ms){
-  return gs.filter(g => g.ms === ms).sort((a, b) => b.step - a.step);
+  return gs.filter(g => g.ms === ms).sort((a, b) => Number(b.key === D.tl_cur) - Number(a.key === D.tl_cur) || b.step - a.step);
 }
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
