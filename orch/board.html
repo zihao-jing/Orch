@@ -905,9 +905,19 @@ let hiddenB = new Set(), shutCard = new Set(), wantItem = null;
 try { hiddenB = new Set(JSON.parse(localStorage.getItem('orch-hidden-blocks') || '[]')); shutCard = new Set(JSON.parse(localStorage.getItem('orch-shut-cards') || '[]')); } catch(e){}
 const saveB = () => { try { localStorage.setItem('orch-hidden-blocks', JSON.stringify([...hiddenB])); localStorage.setItem('orch-shut-cards', JSON.stringify([...shutCard])); } catch(e){} };
 const enc = encodeURIComponent;
-function groupItems(g){
+function rawGroupItems(g){
   if (g.key === D.tl_cur) return {items: D.tl_items || [], more: D.tl_more || 0};
   const c = groupCache.get(g.key); return c && c.n === g.n ? c : null;
+}
+function groupItems(g){
+  const sources = g.sources || [g], got = sources.map(rawGroupItems);
+  if (got.some(x => !x)){
+    sources.forEach((source, i) => { if (!got[i]) loadGroup(source.key); });
+    return null;
+  }
+  const items = got.flatMap(x => x.items || []).map(it => g.step && !it.step ? {...it, step:g.step} : it)
+    .sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+  return {items, more: got.reduce((n, x) => n + (x.more || 0), 0)};
 }
 async function loadGroup(key, all){
   if (groupPending.has(key)) return; groupPending.add(key);
@@ -995,7 +1005,7 @@ function shownMs(){
 }
 function stepItems(b, g){  // the step's lines in this card, newest first, PAGE at a time
   const got = groupItems(g);
-  if (!got){ loadGroup(g.key); return '<div class="lmore">Loading…</div>'; }
+  if (!got) return '<div class="lmore">Loading…</div>';
   const rows = got.items.filter(it => it.block === b && (showOther || !OTHER.has(it.kind))).reverse();
   const k = b + '|' + g.key;
   let n = shown.get(k) || PAGE;
@@ -1018,7 +1028,8 @@ function cardHTML(b, title, gsel){
   const stepKey = b + '|' + has[0].ms;
   let limit = shownSteps.get(stepKey) || STEP_PAGE;
   const target = wantItem && findItem(wantItem);
-  const at = target && target.block === b ? has.findIndex(g => g.ms === target.ms && g.step === target.step) : -1;
+  const at = target && target.block === b ? has.findIndex(g => g.ms === target.ms &&
+    (g.step === target.step || (g.sources || []).some(source => source.step === target.step))) : -1;
   if (at >= limit){ limit = Math.ceil((at + 1) / STEP_PAGE) * STEP_PAGE; shownSteps.set(stepKey, limit); }
   let body = '';
   if (open && has.length === 1 && !has[0].step) body = stepItems(b, has[0]);
@@ -1026,7 +1037,7 @@ function cardHTML(b, title, gsel){
     const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
     const label = g.step ? (g.label || '').replace(new RegExp('^Step\\s+' + g.step + '\\b\\s*[:·—-]?\\s*', 'i'), '') : (g.label || '');
     return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : 'Planning'}</b><span class="lab">${esc(label)}</span>`
-      + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
+      + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.current || g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
       + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
   }).join('');
   const left = has.length - limit;
@@ -1056,7 +1067,20 @@ function renderSteps(ms){
     `<section class="milestone-panel" id="ms-panel-${f}" aria-label="${label}"><h3>${label}</h3>${msPanelHTML(ms, f)}</section>`).join('') : '');
 }
 function orderedStepGroups(gs, ms){
-  return gs.filter(g => g.ms === ms).sort((a, b) => Number(b.key === D.tl_cur) - Number(a.key === D.tl_cur) || b.step - a.step);
+  let rows = gs.filter(g => g.ms === ms), loose = rows.filter(g => ms >= 0 && !g.step);
+  const target = rows.find(g => g.step && g.key === D.tl_cur) || rows.filter(g => g.step).sort((a, b) => b.step - a.step)[0];
+  if (target && loose.length){
+    const sources = [target, ...loose], blocks = {};
+    sources.forEach(g => Object.entries(g.blocks || {}).forEach(([block, counts]) => {
+      const total = blocks[block] || (blocks[block] = [0, 0]); total[0] += counts[0]; total[1] += counts[1];
+    }));
+    const merged = {...target, sources, blocks,
+      n:sources.reduce((n, g) => n + (g.n || 0), 0), needs:sources.reduce((n, g) => n + (g.needs || 0), 0),
+      other:sources.reduce((n, g) => n + (g.other || 0), 0), last:sources.reduce((last, g) => last > g.last ? last : g.last, ''),
+      current:sources.some(g => g.key === D.tl_cur)};
+    rows = rows.filter(g => g.step && g !== target).concat(merged);
+  }
+  return rows.sort((a, b) => Number(!!b.current || b.key === D.tl_cur) - Number(!!a.current || a.key === D.tl_cur) || b.step - a.step);
 }
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
@@ -1104,12 +1128,15 @@ async function gotoItem(id){  // open the milestone and step that hold a message
   let it = findItem(id);
   if (!it){ try { const m = await getMsg(id); it = m.item; } catch(e){} }
   if (!it) return;
-  const key = it.ms + '|' + it.step;
+  const rawKey = it.ms + '|' + it.step;
+  const shown = orderedStepGroups(D.tl_groups || [], it.ms).find(g => g.key === rawKey ||
+    (g.sources || []).some(source => source.key === rawKey));
+  const key = shown ? shown.key : rawKey;
   selMs = it.ms === curMs() ? null : it.ms; openG.add(it.block + '|' + key); shutG.delete(it.block + '|' + key); openItems.add(id);
   if (OTHER.has(it.kind) && !showOther){ showOther = true; }
   hiddenB.delete(it.block); shutCard.delete(it.block); saveB(); wantItem = id;
-  const g = (D.tl_groups||[]).find(x => x.key === key);
-  if (g && !groupItems(g)) await loadGroup(key, true); else renderTimeline();
+  const g = (D.tl_groups||[]).find(x => x.key === rawKey);
+  if (g && !rawGroupItems(g)) await loadGroup(rawKey, true); else renderTimeline();
   const el = document.querySelector(`#timeline details.ln[data-id="${CSS.escape(id)}"]`); if (!el) return;
   el.scrollIntoView({block: 'center', behavior: 'smooth'}); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600);
 }
