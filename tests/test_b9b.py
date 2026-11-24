@@ -109,7 +109,7 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual((it['from'], it['to'], it['block'], it['status']), ('critic', 'boss', 'mc', 'held'))
         self.assertNotIn('lane', it)
 
-    def test_parallel_followup_without_assignment_does_not_take_other_workers_step(self):
+    def test_parallel_followup_without_assignment_uses_newest_step(self):
         turns = [
             dict(turn_id='plan', milestone=3, started_at=ts(0), ended_at=ts(1), plan=[37, 38]),
             dict(turn_id='assigned', agent='a', purpose='work', milestone=3, round=10,
@@ -123,8 +123,8 @@ class TimelineTest(unittest.TestCase):
         ]
         items = [dict(tid=t['turn_id'], ts=t['started_at'], ms=3, _turn=True) for t in turns[1:]]
         assign(items, turns)
-        self.assertEqual([it['step'] for it in items], [37, 38, 0, 0])
-        self.assertTrue(all(it.get('unassigned') for it in items[2:]))
+        self.assertEqual([it['step'] for it in items], [37, 38, 38, 38])
+        self.assertTrue(all('unassigned' not in it for it in items))
 
     def test_critic_messages_to_two_workers_keep_both_recipients(self):
         from orch.timeline import Builder

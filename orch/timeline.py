@@ -369,11 +369,6 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
         if type(step) is int and step > 0:
             explicit[t["turn_id"]] = step
             workers[(t.get("milestone"), t.get("round"), t.get("agent"))] = step
-        elif t.get("purpose") == "work" and t.get("par_worker"):
-            # A parallel follow-up after a step passed has no new assignment. Do not borrow
-            # the global checklist's next step (which can belong to a different worker).
-            explicit[t["turn_id"]] = 0
-            workers[(t.get("milestone"), t.get("round"), t.get("agent"))] = 0
     for t in turns:
         if t.get("purpose") == "par_review" and t.get("par_worker"):
             step = workers.get((t.get("milestone"), t.get("round"), t["par_worker"]))
@@ -435,8 +430,6 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
         it["ms"] = ms
         if it.get("tid") in explicit:
             it["step"] = explicit[it["tid"]]
-            if it["step"] == 0:
-                it["unassigned"] = True
             continue
         ps = plans.get(ms)
         if not ps:
@@ -468,8 +461,6 @@ def groups(items: List[Dict[str, Any]], labels: Dict[int, List[str]]) -> Tuple[L
             g = out[k] = {"key": k, "ms": it["ms"], "step": s, "label": label[:LINE_CHARS], "n": 0, "needs": 0,
                           "other": 0, "last": "", "blocks": {}}
         g["n"] += 1
-        if it.get("unassigned"):
-            g["unassigned"] = True
         b = g["blocks"].setdefault(it["block"], [0, 0])  # [messages, all lines] of each block in this step
         b[1] += 1
         b[0] += 0 if it["kind"] in OTHER_KINDS else 1

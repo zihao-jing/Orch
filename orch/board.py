@@ -678,7 +678,10 @@ class Board:
             it = turn_items.get(row.get("turn_id")) or {}
             if row.get("par_worker") or slot is not None:
                 step = row.get("par_step") if row.get("par_worker") else (slot or {}).get("step")
-                row["step_label"] = f"Step {step}" if type(step) is int and step > 0 else "Follow-up · no step assigned"
+                if not (type(step) is int and step > 0):
+                    step = it.get("step")
+                if type(step) is int and step > 0:
+                    row["step_label"] = f"Step {step}"
                 row["location"] = (slot or {}).get("out") or ""
             elif it.get("step"):
                 row["step_label"] = f"Step {it['step']}"

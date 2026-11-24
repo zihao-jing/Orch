@@ -3445,7 +3445,7 @@ class ManagedRunner(MonitorRunner):
             return "", ""
         slot = self.par_slot(w.name) if w is not None else None
         if slot is not None and not slot.get("step"):
-            return "no step assigned", ""
+            return "", ""
         if slot and slot.get("step"):
             s, title = PW.step_title(ck, slot["step"])
             items = "\n".join(f"- [{'x' if d else ' '}] {t}"

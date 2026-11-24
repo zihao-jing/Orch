@@ -22,10 +22,12 @@ class BackgroundBoardTest(unittest.TestCase):
                        'par_worker': 'worker', 'par_step': None},
                       {'turn_id': 't2', 'agent': 'worker-2', 'status': 'running',
                        'par_worker': 'worker-2', 'par_step': 38}]}
-        with mock.patch.object(board, '_timeline', return_value=(model, [], [], '')):
+        items = [{'id': 't:t1', 'tid': 't1', 'ms': 0, 'step': 38},
+                 {'id': 't:t2', 'tid': 't2', 'ms': 0, 'step': 38}]
+        with mock.patch.object(board, '_timeline', return_value=(model, items, [], '')):
             state = board.state()
         a, b = state['running']
-        self.assertEqual(a['step_label'], 'Follow-up · no step assigned')
+        self.assertEqual(a['step_label'], 'Step 38')
         self.assertEqual(a['location'], 'cases/')
         self.assertEqual(b['step_label'], 'Step 38')
         self.assertEqual(b['location'], 'pilots/architecture/')

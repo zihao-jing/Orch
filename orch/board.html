@@ -961,14 +961,13 @@ function lineHTML(it, where){  // one message: time, sender → recipient, statu
   const extra = (it.urgent ? '<span class="st running">⚡</span>' : '') + (it.verdict ? pill(it.verdict === 'PASS' ? 'p-good' : 'p-warn', it.verdict === 'PASS' ? '✓ pass' : '↻ needs work') : '')
     + (it.purpose && it.kind === 'msg' ? `<span class="mute" style="font-size:11px">${esc(it.purpose)}</span>` : '');
   const wh = where ? `<span class="ktag">${esc(groupName(it.ms, it.step))}</span>` : '';
-  const assignment = it.unassigned ? '<span class="ktag">No step assigned</span>' : '';
   const generated = it.id.startsWith('t:') || (it.id.startsWith('c:') && it.from !== 'you');
   const active = it.status === 'running' && (D.running||[]).find(t => t.turn_id === it.tid);
   const model = generated ? modelBadge((active && active.model) || it.model) : '';
   const whole = it.tid && it.id === 't:' + it.tid;  // a turn's reply: its round and how much went in and came out
   const rd = whole && it.round != null ? `<span class="rtag" title="round ${esc(it.round)}">R${esc(it.round)}</span>` : '';
   const sz = whole && it.in_len != null && it.kind === 'msg' ? `<span class="sz${it.in_len > SZ_BIG ? ' big' : ''}" title="characters in the input to this turn → in its reply">${kchars(it.in_len)} → ${kchars(it.len||0)}</span>` : '';
-  return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${rd}${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${model}${extra}${wh}${assignment}<span class="pv">${esc(it.line || '')}</span>${sz}</summary>`
+  return `<details class="${cls}" data-id="${esc(it.id)}"${open ? ' open' : ''}><summary><span class="tm">${tm(it.ts)}</span>${rd}${kt}<b>${esc(it.from === 'orch' ? 'orch' : called(it.from))}</b>${to}${st}${model}${extra}${wh}<span class="pv">${esc(it.line || '')}</span>${sz}</summary>`
     + (open ? `<div class="fb">${itemBody(it)}</div>` : '') + '</details>';
 }
 const SZ_BIG = 30000;  // an input above this is marked
@@ -1026,7 +1025,7 @@ function cardHTML(b, title, gsel){
   else if (open) body = has.slice(0, limit).map((g, i) => {
     const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
     const label = g.step ? (g.label || '').replace(new RegExp('^Step\\s+' + g.step + '\\b\\s*[:·—-]?\\s*', 'i'), '') : (g.label || '');
-    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : g.unassigned ? 'No step assigned' : 'Before the steps'}</b><span class="lab">${esc(label)}</span>`
+    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : 'Before the steps'}</b><span class="lab">${esc(label)}</span>`
       + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
       + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
   }).join('');
@@ -1056,16 +1055,15 @@ function renderSteps(ms){
   setHTML($('msinfo'), mss[ms] ? MS_PANELS.filter(([f]) => openInfo.has(ms + '|' + f)).map(([f, label]) =>
     `<section class="milestone-panel" id="ms-panel-${f}" aria-label="${label}"><h3>${label}</h3>${msPanelHTML(ms, f)}</section>`).join('') : '');
 }
-function orderedStepGroups(gs, ms, running){
-  const activeUnassigned = g => g.unassigned && running.some(t => t.milestone === g.ms && t.par_worker && !(t.par_step > 0));
-  return gs.filter(g => g.ms === ms).sort((a, b) => Number(!!activeUnassigned(b)) - Number(!!activeUnassigned(a)) || b.step - a.step);
+function orderedStepGroups(gs, ms){
+  return gs.filter(g => g.ms === ms).sort((a, b) => b.step - a.step);
 }
 function renderTimeline(){
   const el = $('timeline'); el.classList.toggle('hide-other', !showOther); $('other').checked = showOther;
   const gs = D.tl_groups || [], ms = shownMs();
   renderSteps(ms); renderFilter();
   if (!gs.length){ setHTML(el, '<div class="card"><div class="empty">No messages yet.</div></div>'); return; }
-  const gsel = orderedStepGroups(gs, ms, D.running || []);
+  const gsel = orderedStepGroups(gs, ms);
   const h = BLOCKS.map(([b, title]) => cardHTML(b, title, gsel)).join('');
   setHTML(el, h || '<div class="card"><div class="empty">No messages in this milestone yet.</div></div>');
 }
