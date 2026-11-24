@@ -1025,7 +1025,7 @@ function cardHTML(b, title, gsel){
   else if (open) body = has.slice(0, limit).map((g, i) => {
     const k = b + '|' + g.key, go = openG.has(k) || (i === 0 && !shutG.has(k)), c = g.blocks[b][0];
     const label = g.step ? (g.label || '').replace(new RegExp('^Step\\s+' + g.step + '\\b\\s*[:·—-]?\\s*', 'i'), '') : (g.label || '');
-    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : g.ms < 0 ? 'Planning' : 'Current step'}</b><span class="lab">${esc(label)}</span>`
+    return `<details class="stp" data-g="${esc(k)}"${go ? ' open' : ''}><summary><b>${g.step ? 'Step ' + g.step : 'Planning'}</b><span class="lab">${esc(label)}</span>`
       + `<span class="mute" style="font-size:12px">${c ? c + ' message' + (c === 1 ? '' : 's') : g.blocks[b][1] + ' system line' + (g.blocks[b][1] === 1 ? '' : 's')}</span>${g.key === D.tl_cur ? pill('p-run', 'now') : ''}</summary>`
       + (go ? `<div class="stb">${stepItems(b, g)}</div>` : '') + '</details>';
   }).join('');
