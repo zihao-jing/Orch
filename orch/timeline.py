@@ -364,16 +364,23 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
     by_id = {t["turn_id"]: t for t in turns}
     explicit: Dict[str, int] = {}
     workers: Dict[Tuple[Any, Any, Any], int] = {}
+    followups = set()
     for t in turns:
         step = t.get("par_step")
         if type(step) is int and step > 0:
             explicit[t["turn_id"]] = step
             workers[(t.get("milestone"), t.get("round"), t.get("agent"))] = step
+        elif t.get("purpose") == "work" and t.get("par_worker"):
+            followups.add(t["turn_id"])
+            workers[(t.get("milestone"), t.get("round"), t.get("agent"))] = 0
     for t in turns:
         if t.get("purpose") == "par_review" and t.get("par_worker"):
             step = workers.get((t.get("milestone"), t.get("round"), t["par_worker"]))
             if step is not None:
-                explicit.setdefault(t["turn_id"], step)
+                if step > 0:
+                    explicit.setdefault(t["turn_id"], step)
+                else:
+                    followups.add(t["turn_id"])
     for t in turns:
         if t.get("plan") and t.get("milestone") is not None and t.get("status") != "running":
             done, total = map(int, t["plan"])
@@ -397,6 +404,12 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
             plans.setdefault(t["milestone"], []).append((ts, 1, step))
     for ps in plans.values():
         ps.sort()
+    current_steps = {ms: ps[-1][2] for ms, ps in plans.items() if ps and ps[-1][2] > 0}
+    planned = set(current_steps)
+    for t in turns:
+        step, ms = t.get("par_step"), t.get("milestone")
+        if ms not in planned and type(step) is int and step > 0:
+            current_steps[ms] = max(current_steps.get(ms, 0), step)
     # Old check turns omitted milestone/step metadata. Project them onto the work they watched;
     # checks can share another worker's round number, so round alone is not sufficient.
     checks = {}
@@ -431,9 +444,12 @@ def assign(items: List[Dict[str, Any]], turns: List[Dict[str, Any]],
         if it.get("tid") in explicit:
             it["step"] = explicit[it["tid"]]
             continue
+        if it.get("tid") in followups:
+            it["step"] = current_steps.get(ms, 1 if ms >= 0 else 0)
+            continue
         ps = plans.get(ms)
         if not ps:
-            it["step"] = 0
+            it["step"] = current_steps.get(ms, 1 if ms >= 0 else 0)
             continue
         prev = None
         for p in ps:

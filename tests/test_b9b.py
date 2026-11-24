@@ -109,7 +109,7 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual((it['from'], it['to'], it['block'], it['status']), ('critic', 'boss', 'mc', 'held'))
         self.assertNotIn('lane', it)
 
-    def test_parallel_followup_without_assignment_uses_newest_step(self):
+    def test_parallel_followup_without_assignment_uses_current_step(self):
         turns = [
             dict(turn_id='plan', milestone=3, started_at=ts(0), ended_at=ts(1), plan=[37, 38]),
             dict(turn_id='assigned', agent='a', purpose='work', milestone=3, round=10,
