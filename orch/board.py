@@ -412,8 +412,12 @@ class Board:
                    "backend": a.get("backend"), "model": (a.get("backend_options") or {}).get("model")}
                   for a in cfg.get("agents") or []]
         known = {a["name"] for a in agents}
+        par = ((st.get("managed") or {}).get("par") or {})
+        slots = (par.get("slots") or {}) if par.get("active") else {}
         agents += [{"name": a["name"], "role": a["role"], "called": a.get("display_name") or a["name"],  # B11 copies
-                    "backend": a.get("backend"), "model": a.get("model"), "copy_of": a.get("copy_of")}
+                    "backend": a.get("backend"), "model": a.get("model"), "copy_of": a.get("copy_of"),
+                    "historical": a["name"] not in slots,
+                    "parallel_status": (slots.get(a["name"]) or {}).get("status")}
                    for a in st.get("agents_extra") or [] if isinstance(a, dict) and a.get("name") not in known]
         return {
             "monitor": st.get("monitor"), "run_id": st.get("run_id"), "status": st.get("status"),

@@ -57,3 +57,6 @@
   - Reply to me briefly.
   - Short replies, please.
   - Keep what you send me short.
+- Put long reports, audits and detailed evidence in a Markdown file; reply with the conclusion, any blocker and its path.
+  - If the complete report is long, save it in the project and send me only the result and its path.
+  - Keep detailed tables and evidence in files instead of pasting them into your reply.

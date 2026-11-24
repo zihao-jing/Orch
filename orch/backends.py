@@ -379,7 +379,7 @@ class QoderBackend(ClaudeBackend):
         o = req.options
         cmd = [str(o.get("executable", "qodercli")), "-p"]
         if req.on_event is not None and o.get("stream", True):
-            cmd += ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+            cmd += ["--output-format", "stream-json", "--include-partial-messages"]
         else:
             cmd += ["--output-format", "json"]
         if req.session_id:

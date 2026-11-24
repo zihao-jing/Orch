@@ -69,8 +69,8 @@ button.ok{background:var(--good);border-color:var(--good);color:#fff}button.sm{p
 select.sm{font:inherit;font-size:12px;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:2px 9px;max-width:45%;cursor:pointer}select.sm:hover{border-color:var(--axis)}
 button:disabled{opacity:.5;cursor:default}
 /* a button whose request is on its way: a spinner until the server answers and the board has refreshed */
-button.loading{opacity:.8;cursor:progress}
-button.loading::before{content:"";display:inline-block;width:.75em;height:.75em;margin-right:6px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+button[aria-busy=true]{opacity:.8;cursor:progress}
+button[aria-busy=true]::before{content:"";display:inline-block;width:.75em;height:.75em;margin-right:6px;vertical-align:-1px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 textarea,input[type=text]{font:inherit;width:100%;border-radius:8px;border:1px solid var(--ring);background:var(--surface);color:var(--ink);padding:8px 10px;resize:vertical}
 textarea:focus,input:focus{outline:2px solid var(--s1);outline-offset:-1px}
@@ -257,7 +257,7 @@ details.ln .fb{padding:4px 8px 8px 10px;margin:2px 0 6px 6px;border-left:2px sol
   <button class="sm" id="stop" title="Stop after the current turn">Stop run</button>
  </header>
  <div class="grid" id="grid">
-  <main>
+  <main><div id="action-notice" role="status"></div>
    <div id="needs"></div>
    <div class="card" id="now-card"><div class="row" style="justify-content:space-between;margin-bottom:10px"><h2 style="margin:0">Working now</h2><label class="mute" style="font-size:12px"><input type="checkbox" id="model-switches" checked> Model switches</label></div><div class="nowl" id="now"></div><div class="stats" id="stats"></div></div>
    <div class="card" id="tl-card"><div class="milestone-head"><h2>Milestones</h2><div class="tlbar" id="msfilter" role="group" aria-label="Milestone details"></div></div><div class="steps" id="steps"></div><div id="msinfo"></div>
@@ -334,20 +334,22 @@ function md(src){
 // a list, with sub-lists by indentation: "1. point" followed by "   - detail" nests the detail under the point
 function mdList(L, i){
   const ind = x => x.match(/^\s*/)[0].replace(/\t/g, '    ').length;
-  const base = ind(L[i]), ord = /^\s*\d/.test(L[i]), items = [];
+  const first = L[i].match(/^\s*(\d+)[.)]\s+/), base = ind(L[i]), ord = !!first, start = first ? +first[1] : 1, items = [];
   while (i < L.length && LI.test(L[i]) && ind(L[i]) === base && /^\s*\d/.test(L[i]) === ord){
     let t = L[i].replace(LI, ''), sub = ''; i++;
     while (i < L.length){
-      if (!L[i].trim()){  // a blank line ends the item unless more indented content follows
+      if (!L[i].trim()){  // blank-separated items stay in the same list; indented content stays in this item
         let j = i; while (j < L.length && !L[j].trim()) j++;
-        if (j < L.length && ind(L[j]) > base) { i = j; continue; } break; }
+        if (j < L.length && ind(L[j]) > base) { i = j; continue; }
+        if (j < L.length && LI.test(L[j]) && ind(L[j]) === base && /^\s*\d/.test(L[j]) === ord) { i = j; break; }
+        break; }
       if (LI.test(L[i])){ if (ind(L[i]) > base){ const r = mdList(L, i); sub += r[0]; i = r[1]; continue; } break; }
       if (ind(L[i]) > base){ t += (sub ? '' : ' ') + L[i++].trim(); continue; }
       break;
     }
     items.push([t, sub]);
   }
-  const html = (ord ? '<ol>' : '<ul>') + items.map(([t, sub]) => { const c = t.match(/^\[( |x|X)\]\s*(.*)/);
+  const html = (ord ? `<ol${start === 1 ? '' : ` start="${start}"`}>` : '<ul>') + items.map(([t, sub]) => { const c = t.match(/^\[( |x|X)\]\s*(.*)/);
     return c ? `<li class="cb">${c[1]===' '?'☐':'☑'} ${inline(c[2])}${sub}</li>` : `<li>${inline(t)}${sub}</li>`; }).join('') + (ord ? '</ol>' : '</ul>');
   return [html, i];
 }
@@ -364,8 +366,11 @@ const pill = (cls, txt) => `<span class="pill ${cls}">${esc(txt)}</span>`;
 const stPill = s => { const x = STATUS[s] || ['', s || '…']; return pill(x[0], x[1]); };
 function who(role){
   if (!D) return role; if (role === 'human') return 'you';
+  const agents = D.agents||[], exact = agents.find(x => x.name === role);
+  if (exact) return exact.called;
   const r = role === 'critic' ? 'verifier' : role;
-  const a = (D.agents||[]).filter(x => x.role === r); return a.length ? a.map(x=>x.called).join(' & ') : role;
+  const a = agents.filter(x => x.role === r && !x.copy_of);
+  return a.length ? a.map(x=>x.called).join(' & ') : role;
 }
 const byName = n => (D.agents||[]).find(a => a.name === n);
 const called = n => n === 'human' ? 'you' : ((byName(n)||{}).called || n);
@@ -389,7 +394,7 @@ function gateSubmitted(body){
 
 // The poll asks only for what changed since the payload it holds (SNAP, version VER) and rebuilds the rest;
 // D is a fresh copy for render, so SNAP stays exactly what the server sent. One poll at a time.
-let SNAP = null, VER = '', loading = false, again = false;
+let SNAP = null, VER = '', loading = false, again = false, pollNumber = 0;
 // HTTP Date comes from the server's system clock. Advance with a monotonic clock,
 // so the browser's timezone or an incorrect local system time cannot affect it.
 let serverClock = null;
@@ -422,19 +427,24 @@ function applyState(j){
 async function load(){
   if (loading){ again = true; return; }
   loading = true;
+  const poll = ++pollNumber;
   try {
     let j;
     try { const r = await fetch('api/state?m=' + encodeURIComponent(M) + '&since=' + encodeURIComponent(VER), {cache:'no-store'}); if (r.ok) syncServerClock(r); j = await r.json(); }
     catch(e){ return; }
     if (!applyState(j)){ VER = ''; SNAP = null; again = true; return; }
     D = structuredClone(SNAP);
+    for (const [key, action] of pendingActions){
+      if (action.after < poll && (action.run !== D.run_id || action.reflected())) finishAction(key);
+    }
     for (const [agent, waitId] of switchingWaits){
       if (D.reliability?.[agent]?.wait_id !== waitId) switchingWaits.delete(agent);
     }
   } finally { loading = false; if (again){ again = false; soon(); } }
   for (const k in (D.live||{})){ const L = D.live[k]; if (!live[k] || (live[k].text||'').length < (L.text||'').length) live[k] = {text:L.text||'', tools:L.tools||[]}; }
-  render(); paintBusy();
+  render();
   document.querySelectorAll('[data-live]').forEach(x => paintLive(x.dataset.live));
+  if ([...pendingActions.values()].some(action => action.after < poll) && !again){ clearTimeout(tmr); tmr = setTimeout(load, 1000); }
 }
 let tmr = null; const soon = () => { clearTimeout(tmr); tmr = setTimeout(load, 200); };
 let eventSource = null, reconnectTimer = null;
@@ -470,6 +480,7 @@ function render(){
   renderNeeds(mg); renderNow(mg); renderTimeline(); renderQs(); renderReviews(mg); renderDecisions(); renderAudit(); renderChat();
   Object.keys(live).forEach(paintLive);
   versionAtStop();
+  paintBusy();
 }
 
 const DOING = {discussion_apply:'applying discussion', plan:'drafting the milestone plan', kickoff:'starting the milestone', brief:'briefing', work:'working',
@@ -502,7 +513,8 @@ function workDetails(row, running){
 }
 function renderNow(mg){  // the switches, and the status area: only the agents working now, one line each
   const nb = $('night'), want = nightWanted();  // the switch as last set (the run applies it when the current turn ends)
-  nb.textContent = want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
+  const nightChanging = want !== !!D.night;
+  nb.textContent = nightChanging ? (want ? 'Turning night mode on…' : 'Turning night mode off…') : want ? '🌙 Night: on' : '🌙 Night: off'; nb.classList.toggle('ok', want);
   const qOpen = (D.questions||[]).some(q => q.status === 'open' && q.to === 'human');  // B9: no switch mid-question
   nb.disabled = qOpen && !(D.night_pending != null && D.night_pending !== !!D.night);
   nb.title = qOpen ? 'A question for you is open: night mode can switch once it is answered' : 'Night mode: the manager answers questions and passes gates by itself; its decisions are recorded for you to review';
@@ -642,7 +654,7 @@ function renderNeeds(mg){
 }
 // what follows a question that is meant for me, up to a divider or the part addressed to the critic
 function forMe(t){ return String(t||'').replace(TAGBLOCK, '').replace(/\n{3,}/g, '\n\n').trim(); }  // outside the tags
-async function qSend(qid, text, b){ if (!text) return; const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('api/chat', {qid, message: text, settle: true}, b); }  // my answer: the manager writes it up for the critic
+async function qSend(qid, text, b){ if (!text || pendingActions.has('question:' + qid)) return; b ||= document.querySelector(`[data-qs="${CSS.escape(qid)}"]`); const ta = $('qa-' + qid); if (ta) ta.value = ''; await post('api/chat', {qid, message: text, settle: true}, b); }
 document.addEventListener('keydown', e => { const t = e.target;
   if (t.id && t.id.startsWith('qa-') && e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); qSend(t.id.slice(3), t.value.trim()); } });
 // ask({title, body, ok, tone}): the board's confirm dialog; resolves true when confirmed. Esc, Cancel or a click
@@ -685,26 +697,68 @@ document.addEventListener('click', async e => {
   else if (b.dataset.reopen != null && b.dataset.reopen !== undefined){
     if (!(await ask({title: 'Reopen milestone ' + (+b.dataset.reopen + 1) + '?', body: 'Its checklist gets an open item. The manager is not prompted.', ok: 'Reopen'}))) return;
     await post('api/milestone', {ms: +b.dataset.reopen}, b); }
-  else if (b.dataset.chatfull){ b.disabled = true; try { await getMsg('c:' + b.dataset.chatfull); } catch(err){} $('needs')._sig = null; render(); }
+  else if (b.dataset.chatfull){ await readAction(b, () => getMsg('c:' + b.dataset.chatfull)); $('needs')._sig = null; render(); }
   else if (b.dataset.rc){ if (!(await ask({title: 'Send your comments?', body: 'The manager gets what you wrote in the review file.', ok: 'Send'}))) return;
     await post('api/review_comments', {path: b.dataset.rc}, b); }
 });
 // the buttons whose request is on its way, by key: a re-render rebuilds a button, so the key carries its state over
-const busyKeys = new Set();
-const btnKey = b => b.id || JSON.stringify(Object.assign({}, b.dataset));
-function paintBusy(){ if (!busyKeys.size) return;
-  document.querySelectorAll('button').forEach(b => { if (busyKeys.has(btnKey(b))){ b.classList.add('loading'); b.disabled = true; } }); }
-// b: the button that sent it; it shows a spinner and takes no second click until the server answers
+const pendingActions = new Map();
+function btnKey(b){
+  if (b.id === 'discuss' || b.id === 'applydiscussion' || b.dataset.applydiscussion) return 'discussion';
+  if (b.dataset.qo || b.dataset.qs) return 'question:' + (b.dataset.qo || b.dataset.qs);
+  if (b.dataset.gate) return 'gate';
+  return b.id || JSON.stringify(b.dataset);
+}
+function paintBusy(){
+  const selector = pendingActions.size ? 'button:not(.loading)' : '#night, #discuss, #applydiscussion, [data-applydiscussion], button[aria-disabled=true]';
+  document.querySelectorAll(selector).forEach(button => {
+    const key = btnKey(button), busy = pendingActions.has(key) || (key === 'discussion' && D?.discussion_applying);
+    if (busy || (key === 'night' && nightWanted() !== !!D.night)) button.setAttribute('aria-busy', 'true');
+    else button.removeAttribute('aria-busy');
+    if (busy) button.setAttribute('aria-disabled', 'true'); else button.removeAttribute('aria-disabled');
+  });
+}
+document.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (button && pendingActions.has(btnKey(button))){ event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
+function finishAction(key){ clearTimeout(pendingActions.get(key)?.timer); pendingActions.delete(key); }
+async function readAction(button, work){
+  const key = btnKey(button);
+  if (pendingActions.has(key)) return;
+  pendingActions.set(key, {after: Infinity}); paintBusy();
+  try { await work(); } catch(err){ $('action-notice').textContent = 'Could not load the requested content. Please try again.'; }
+  finally { finishAction(key); paintBusy(); }
+}
+function actionReflected(url, body, before, result){
+  if (url === 'api/night') return nightWanted() === body.on;
+  if (url === 'api/discussion'){
+    if (body.action === 'apply') return D.discussion_applying || !hasDiscussion(D.managed || {}) || !!D.managed?.discussion_error;
+    return discussWanted() === (body.action === 'start');
+  }
+  if (url === 'api/review') return D.managed?.review_req || D.review_files?.length !== before.review_files?.length;
+  if (url === 'api/milestone') return D.managed?.milestones?.[body.ms]?.reopened_at !== before.managed?.milestones?.[body.ms]?.reopened_at;
+  if (url === 'api/job') return !D.managed?.job || D.managed.job.since !== before.managed?.job?.since;
+  if (url === 'api/stop') return D.status !== before.status || D.stop_reason !== before.stop_reason;
+  if (url === 'api/chat' && result.id) return D.chat?.some(row => row.id === result.id);
+  return true;
+}
 async function post(url, body, b){
-  const key = b ? btnKey(b) : '', was = b ? b.disabled : false;
-  if (key){ busyKeys.add(key); paintBusy(); }
-  const done = () => { if (!key) return; busyKeys.delete(key);
-    document.querySelectorAll('button.loading').forEach(x => { if (btnKey(x) === key){ x.classList.remove('loading'); if (x === b) x.disabled = was; } }); };
+  const key = b && btnKey(b);
+  if (pendingActions.has(key)) return;
+  const before = D, action = {after: Infinity, run: D.run_id};
+  if (key){ pendingActions.set(key, action); $('action-notice').textContent = ''; paintBusy(); }
   try { const r = await fetch(url + '?m=' + encodeURIComponent(M), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); const j = await r.json();
-    done(); if (!r.ok || j.error) alert(j.error || 'The request was not accepted.');
-    else if (url === 'api/gate') gateSubmitted(body);
-    if (key) await load(); else soon(); return j; }  // the refresh then sets each button as the new state has it
-  catch(e){ done(); alert('Could not reach the board server.'); } }
+    if (!r.ok || j.error){ throw new Error(j.error || 'The request was not accepted.'); }
+    if (key){
+      action.reflected = () => actionReflected(url, body, before, j);
+      action.after = pollNumber;
+      action.timer = setTimeout(() => { finishAction(key); paintBusy(); $('action-notice').textContent = 'Request accepted. The board has not confirmed the change yet.'; soon(); }, 30000);
+    }
+    if (url === 'api/gate') gateSubmitted(body);
+    if (key) await load(); else soon(); return j;
+  } catch(err){ if (key){ finishAction(key); paintBusy(); } alert(err.message || 'Could not reach the board server.'); }
+}
 
 // the update check: the commit this orch runs from, and whether main has a newer one (orch/update.py)
 // Check quietly at safe points; show an action only for a newer main that can be applied.
@@ -745,8 +799,7 @@ async function checkVersion(){
 $('updbtn').addEventListener('click', async () => {
   if (!updateSafe() || !verOffer || verBusy) return;
   if (!confirm(`Update orch to ${verLatest || 'the newest version on main'} and restart this run? It carries on where it stopped; the board reconnects by itself.`)) return;
-  $('updbtn').hidden = true;
-  await post('api/update', {});
+  await post('api/update', {}, $('updbtn'));
   checkVersion(); });
 function versionAtStop(){  // once per quiet stop; invalidate an old offer as soon as work resumes
   const g = ((D.managed || {}).gate || {}).key || '', stop = updateSafe() ? D.run_id + '|' + D.status + '|' + g : '';
@@ -1048,7 +1101,7 @@ $('timeline').addEventListener('click', e => {
   const s = e.target.closest('[data-stepsmore]'); if (s){ const k = s.dataset.stepsmore; shownSteps.set(k, (shownSteps.get(k) || STEP_PAGE) + STEP_PAGE); renderTimeline(); return; }
   const m = e.target.closest('[data-pmore]'); if (m){ const k = m.dataset.pmore; shown.set(k, (shown.get(k) || PAGE) + PAGE); renderTimeline(); return; }
   const a = e.target.closest('[data-pall]'); if (a){ shown.set(a.dataset.pall, 1e9); renderTimeline(); return; }
-  const b = e.target.closest('[data-gall]'); if (b){ b.disabled = true; loadGroup(b.dataset.gall, true); } });
+  const b = e.target.closest('[data-gall]'); if (b) readAction(b, () => loadGroup(b.dataset.gall, true)); });
 async function gotoItem(id){  // open the milestone and step that hold a message, unfold it and show it
   let it = findItem(id);
   if (!it){ try { const m = await getMsg(id); it = m.item; } catch(e){} }
@@ -1197,7 +1250,7 @@ $('decs').addEventListener('toggle', e => { const d = e.target; if (!d.dataset |
   d.open ? openDecs.add(d.dataset.d) : openDecs.delete(d.dataset.d); if (d.open) renderDecisions(); }, true);
 function mgrName(){ const m = (D.agents||[]).find(a => a.role === 'manager'); return m ? m.name : 'manager'; }
 let chatWith = null;  // the agent name being talked to; null = the manager
-function talkable(){ return (D.agents||[]).filter(a => ['manager','verifier','worker'].includes(a.role)); }
+function talkable(){ return (D.agents||[]).filter(a => !a.historical && ['manager','verifier','worker'].includes(a.role)); }
 function renderChat(){
   const cl = $('chatlog'), atBottom = cl.scrollHeight - cl.scrollTop - cl.clientHeight < 40;
   const mg = mgrName(), sel = $('chatwho'), opts = talkable();
@@ -1320,17 +1373,18 @@ function relayLine(id){  // what became of the messages this reply passed on
       : (r.urgent ? `⚡ waiting for ${to}: urgent delivery` : `⏳ waiting for ${to}: it is answered as soon as it is idle`);
     return `<div class="w">${s}</div>`; }).join('');
 }
-async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat) return; ta.value = ''; $('chatlog')._stick = true;
+async function sendChat(){ const ta = $('chatin'), m = ta.value.trim(); if (!m || !D || !D.can_chat || pendingActions.has('chatsend')) return; ta.value = ''; $('chatlog')._stick = true;
   const body = {message: m}; if (chatWith && chatWith !== mgrName()) body.agent = chatWith; await post('api/chat', body, $('chatsend')); }
 $('chatwho').addEventListener('change', e => { chatWith = e.target.value; const cl = $('chatlog'); cl._first = undefined; render(); });
 // keep the stick-to-bottom flag in step with where the reader actually is, so streamed replies
 // don't pull the list down while the reader is scrolled up (e.g. selecting text above)
 $('chatlog').addEventListener('scroll', e => { const cl = e.currentTarget;
   cl._stick = cl.scrollHeight - cl.scrollTop - cl.clientHeight < 40; });
-$('chatlog').addEventListener('click', async e => { const b = e.target.closest('[data-chatmore]'); if (!b) return; b.disabled = true;
-  try { const r = await fetch('api/chat?m=' + encodeURIComponent(M) + '&with=' + encodeURIComponent(chatWith) + '&before=' + encodeURIComponent(chatFirstId), {cache:'no-store'});
-        const j = await r.json(); chatOlder.set(chatWith, [...(j.rows||[]), ...(chatOlder.get(chatWith)||[])]); chatMoreFlag.set(chatWith, !!j.more); }
-  catch(err){ b.disabled = false; return; }
+$('chatlog').addEventListener('click', async e => { const b = e.target.closest('[data-chatmore]'); if (!b) return;
+  const agent = chatWith;
+  await readAction(b, async () => { const r = await fetch('api/chat?m=' + encodeURIComponent(M) + '&with=' + encodeURIComponent(agent) + '&before=' + encodeURIComponent(chatFirstId), {cache:'no-store'});
+    if (!r.ok) throw new Error();
+    const j = await r.json(); chatOlder.set(agent, [...(j.rows||[]), ...(chatOlder.get(agent)||[])]); chatMoreFlag.set(agent, !!j.more); });
   render(); });
 let chatOpen, replies = 0, seen = null;
 function seenReplies(n){ replies = n; if (seen === null || chatOpen) seen = n; badge(); }  // replies already there on load count as read
@@ -1375,10 +1429,9 @@ function nightWanted(){ return D.night_pending == null ? !!D.night : !!D.night_p
 function discussWanted(){ return D.discussion_pending == null ? !!D.discussion : !!D.discussion_pending; }
 function hasDiscussion(mg){ return discussWanted() || !!D.discussion_applying || !!mg.discussion_saved || !!mg.discussion_error; }
 async function applyDiscussion(b){
-  if (D.discussion_applying || !D.discussion_supported) return;
-  D.discussion_applying = true; render();
-  const result = await post('api/discussion', {action: 'apply', request: crypto.randomUUID(), gate: ((D.managed||{}).gate||{}).key || null}, b);
-  if (!result || result.error){ D.discussion_applying = false; render(); }
+  if (D.discussion_applying || !D.discussion_supported || pendingActions.has('discussion')) return;
+  const request = crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+  await post('api/discussion', {action: 'apply', request, gate: ((D.managed||{}).gate||{}).key || null}, b);
 }
 $('applydiscussion').addEventListener('click', e => applyDiscussion(e.currentTarget));
 $('discuss').addEventListener('click', async () => {

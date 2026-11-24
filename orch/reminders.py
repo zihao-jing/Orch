@@ -58,7 +58,11 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
                       "`<message to=\"you\">…</message>`. Write to {{worker}} as \"I\", one decision per `<question>`.",
         },
     },
-    "report_length": {"to": ["worker"], "every": 3, "text": "Keep the report short; put details in files."},
+    "report_length": {
+        "to": ["worker"], "every": 3,
+        "text": "Keep the reply to the conclusion, any blocker and a file path. Put long reports, tables and evidence "
+                "in a Markdown file.",
+    },
     # board chat with the manager (replaces the fixed manager_direct_voice block on every chat message)
     "chat_voice": {
         "to": ["manager"], "every": 3, "only": ["chat"],
