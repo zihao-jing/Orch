@@ -21,7 +21,7 @@ VALUES = {
     "worker": "worker-1", "agent": "worker-1", "by": "critic", "monitor": "monitor", "sender": "critic",
     "jobs": ["train.py"], "available": ["worker-1"], "label": "<message>", "problem": "unclosed", "why": "billing",
     "assignment": "Check the labels", "question": "Done?", "to": "worker-9", "turns_dir": "/run/rounds", "since": T0,
-    "reason": "new", "state_file": "/run/state.md", "latest": "r003-t01-manager", "goal": "Build it.", "milestone": "m1",
+    "state_file": "/run/state.md", "latest": "r003-t01-manager", "goal": "Build it.", "milestone": "m1",
     "title": "Data", "text": "The data is clean.", "checklist_path": "/run/c.md", "last_title": "Setup", "attempt": 1,
     "attempts": 3, "rubric": ["Correct"], "checklist": ["- [x] Labels checked"], "decide_again": "",
     "answers": [{"kind": "question", "question": "A or B?", "answer": "A"}], "unsent": [], "path": "/run/golden.md",
@@ -36,7 +36,8 @@ TO_WORKER = ("job_wakeup", "job_lost", "retry_continue", "restart_continue", "me
 TO_CRITIC = ("worker_final", "worker_intermediate", "worker_to_critic", "worker_failed", "direct_message_notice",
              "label_returned", "unknown_worker", "handover_request_critic", "checklist_unreadable", "nobody_watches",
              "job_no_progress", "jobs_stopped", "monitor_report", "discussion_apply", "rem_worker_line", "rem_workers",
-             "rem_labels", "rem_unwatched", "rem_golden_use", "rem_golden_path", "rem_discussion") + TO_WORKER
+             "rem_labels", "rem_unwatched", "rem_golden_use", "rem_golden_path", "rem_discussion", "rem_discussion_over",
+             "rem_checklist") + TO_WORKER
 BOARD = GoldenBoard("/run/golden.md", "d1", chars=100)
 
 
@@ -89,7 +90,7 @@ class TestTexts(unittest.TestCase):
                 self.assertIn("The body.", out, key)
 
     def test_PRM_1_each_text_uses_the_values_that_carry_content(self):
-        free = {"reason", "agent", "attempts", "state_file", "turns_dir", "latest", "since", "available", "milestone",
+        free = {"agent", "attempts", "state_file", "turns_dir", "latest", "since", "available", "milestone",
                 "decide_again", "unsent", "request", "open_report", "idle_since", "new_session", "jobs", "workers",
                 "last_title", "score"}
         for key in TextKey:
@@ -377,6 +378,15 @@ class TestReminders(unittest.TestCase):
         self.assertEqual(keys(snap, message("x2", "manager"))[0], [])
         snap.night = False
         self.assertEqual(keys(snap, message("x3", "manager"))[0], ["rem_night_over"])
+
+    def test_edited_notes_are_told_once_per_edit(self):
+        snap = seen_all(snapshot(agent("manager", state_file="/run/state.md", state_edited="s1")))
+        got, given = keys(snap, message("x1", "manager"))
+        self.assertEqual((got, given), (["rem_state_edited"], {"state": "s1"}))
+        give(snap, "manager", **given)
+        self.assertEqual(keys(snap, message("x2", "manager")), ([], {}))
+        snap.agents["manager"].state_edited = ""
+        self.assertEqual(keys(snap, message("x3", "manager")), ([], {"state": ""}))
 
     def test_WRK_11_PRM_4_worker_is_reminded_rarely(self):
         snap = snapshot()

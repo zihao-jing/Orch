@@ -27,11 +27,6 @@ CHANCES: Dict[TextKey, float] = {
     TextKey.REM_WRITING: 0.25,
 }
 
-# CONTRACT: lines that have no TextKey yet; worded in texts.py like the others
-REM_CHECKLIST = "rem_checklist"  # to the critic: where its checklist file is
-REM_DISCUSSION_OVER = "rem_discussion_over"  # it ended without being applied
-REM_NIGHT_OVER = "rem_night_over"
-
 # messages that ask for nothing but a text to pass on
 NONE_FOR = (TextKey.HANDOVER_WRITE,)
 
@@ -103,7 +98,7 @@ def _critic(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: Di
         out.append(TextRef(TextKey.REM_UNWATCHED, {"workers": unwatched}))
     path = snap.checklist.path or (snap.milestone.checklist_path if snap.milestone else "")
     if path and seen.get("checklist") != path:
-        out.append(TextRef(REM_CHECKLIST, {"path": path}))
+        out.append(TextRef(TextKey.REM_CHECKLIST, {"path": path}))
         given["checklist"] = path
     if not snap.golden.words:  # the critic is not pointed to a board that names what it must not know
         _golden(snap, due, seen, out, given)
@@ -122,6 +117,11 @@ def _manager(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: D
     _golden(snap, due, seen, out, given)
     if g.path and due[TextKey.REM_GOLDEN_KEEP]:
         out.append(TextRef(TextKey.REM_GOLDEN_KEEP, {"path": g.path}))
+    me = snap.agents[message.recipient]  # only the manager keeps notes
+    if me.state_edited != seen.get("state", ""):
+        given["state"] = me.state_edited  # "" again once it wrote them anew, so a later edit is told
+        if me.state_edited:
+            out.append(TextRef(TextKey.REM_STATE_EDITED, {"path": me.state_file}))
     over = g.chars > snap.settings.golden_limit > 0
     if over and seen.get("golden_size") != "over":
         out.append(TextRef(TextKey.REM_GOLDEN_SIZE, {"path": g.path, "chars": g.chars,
@@ -133,7 +133,7 @@ def _manager(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: D
         out.append(TextRef(TextKey.REM_NIGHT))
         given["night"] = "on"
     elif not snap.night and seen.get("night") == "on":
-        out.append(TextRef(REM_NIGHT_OVER))
+        out.append(TextRef(TextKey.REM_NIGHT_OVER))
         given["night"] = ""
 
 
@@ -163,7 +163,7 @@ def _discussion(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen
             given["discussion"] = mark
         return True
     if seen.get("discussion"):
-        out.append(TextRef(REM_DISCUSSION_OVER))
+        out.append(TextRef(TextKey.REM_DISCUSSION_OVER))
         given["discussion"] = ""
     return False
 
