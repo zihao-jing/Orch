@@ -17,7 +17,7 @@ Checked 2026-11-25 on macOS, `qodercli 1.1.97` (`qoder` and `qodercli` are the s
 | 2 | Failure, several jobs | Failed job: `task_notification.status:"failed"`, summary `... failed with exit code 3`. Three jobs at once: three `task_started`, one wake turn per job, in end order. | verified |
 | 2 | Self wakeup | Yes. Each ended job starts its own turn (`init`, synthetic user echo with `<task-notification>`, text, `result`). Works with stdin idle and from a message sent by another process. | verified |
 | 2 | End of turn | One `result` line per turn (`subtype:"success"` or `error_during_execution`). No field says "job still running"; intermediate vs final must come from the job list (`background_tasks_changed.tasks` empty or not, or started minus notified). | verified |
-| 3 | 12-minute job | A `run_in_background` job started 20:09:31 with `sleep 720` was stopped by the CLI after exactly 600000 ms (20:19:35): `task_updated.patch.status:"failed"`, `task_notification.status:"failed"`, summary `Background command "..." timed out after 600000 ms. The command was stopped.` The 12-minute job therefore cannot run as one job. `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` set to 15000 did not shorten a 40 s background job (it completed), so those variables do not govern background jobs (whether a longer limit can be set was not found). | verified |
+| 3 | 12-minute job; can the cap be raised? | Default cap for a background job is 600000 ms (job stopped, status `failed`, summary `timed out after 600000 ms`). The Bash tool's own `timeout` argument raises it (documented: default 600000, max 7200000): a `sleep 780` job with `"timeout":1200000` ended normally (`completed`, output `LIMITOK`), with or without `BASH_*_TIMEOUT_MS` in the environment. The two environment variables alone did nothing for background jobs (7200000 each: still stopped at 600 s). | verified |
 | 4 | Launcher exits | Agent, job and wake all continue; a new process wrote to the FIFO and read the output file from a saved offset. Killing only the CLI: SIGTERM kills the job (status `killed`), SIGKILL leaves the job running as an orphan with no record. | verified |
 | 5 | Unknown session id | No JSON. Stderr text `Error resuming session: Invalid session identifier "<id>".`, exit code 42, process ends before reading stdin. Same error for a real id from another cwd (sessions are per cwd). | verified |
 | 5 | Model switch in one session | Same session id, history kept, both ways: at resume (`--resume <id> --model Fast`) and live (send `/model <name>` as a user message). Live switch writes the model into the global `~/.qoder/settings.json`. | verified |
@@ -142,7 +142,24 @@ Result at +600 s exactly:
 
 So the documented-in-code limit is a hard 10-minute cap (the code reads `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS`; strings also say a foreground command that exceeds its timeout is "moved to background"). The CLI killed the process; the wake turn followed
 and the agent saw an empty output file. A control run with both variables at 15000 ms and a 40 s job: job completed normally, so the variables did not apply to background jobs in this build. Whether the model's own `timeout` argument can raise the cap was not tested.
-Adapter consequence: a worker needing more than 10 minutes must restart or chain jobs; Orch should treat `failed` with `timed out after 600000 ms` as a timeout, not a crash (JOB-7).
+#### Follow-up: raising the cap (three open sessions at the same time, job `sleep 780; echo LIMITOK; exit 0`, started 20:22)
+
+| Run | Environment | Tool input sent by the model | Result |
+|---|---|---|---|
+| a | `BASH_DEFAULT_TIMEOUT_MS=7200000 BASH_MAX_TIMEOUT_MS=7200000` | `{"command":"sleep 780; echo LIMITOK; exit 0","description":"...","run_in_background":true}` (no timeout) | Stopped at 600 s (20:22:13 to 20:32:13): `task_updated.patch.status:"failed"`, summary `Background command "..." timed out after 600000 ms. The command was stopped.` No `LIMITOK`. |
+| b | same as a | `{"command":"sleep 780; echo LIMITOK; exit 0","description":"Sleep 13 minutes then print LIMITOK","run_in_background":true,"timeout":1200000}` | Ended normally after about 780 s (`end_time` 20:35:14): status `completed`, output file `LIMITOK`. |
+| c | none | `{"command":"sleep 780; echo LIMITOK; exit 0","description":"...","timeout":1200000,"run_in_background":true}` | Same as b: `completed` at 20:35:14, output `LIMITOK`. |
+
+Documentation found in the CLI (embedded code, quoted):
+
+- Bash tool description given to the model: "For a non-PTY command started in the background, a positive `timeout` sets the time limit in milliseconds (default ${S1}, max ${D1}). A command moved to the background after starting in the foreground gets the default limit from that point. Bash attempts to stop the command at the limit and reports the outcome in a task notification." with constants `Ek=120000` (foreground default), `_k=600000` (foreground max), `S1=600000` (background default), `D1=7200000` (background max, 2 hours).
+- `timeout` parameter schema: "Time limit in milliseconds for non-PTY Bash (foreground default 120000, max 600000). A command started in the background uses a positive timeout (default 600000, max 7200000)."
+- `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` are read only by the foreground limit function (they replace `Ek` and `_k`; the cap is `max(env max, default)`); the background limit is `min(timeout, D1)` if a positive `timeout` was given, else `S1`. This matches run a. `--help` has no timeout or background option.
+- A foreground command that exceeds the cap or runs long is moved to the background and then gets the default 600 s limit from that point (so a long foreground command also dies at 10 minutes unless it was started in the background with a `timeout`).
+
+So the adapter must make the worker pass `timeout` (up to 7200000 ms, i.e. 2 hours) in every long background Bash call; the prompt should say so, and Orch can check the `tool_use` input for `run_in_background:true` with a `timeout` large enough. Longer than 2 hours needs chaining.
+
+Adapter consequence (default settings): a worker needing more than 10 minutes must restart or chain jobs; Orch should treat `failed` with `timed out after 600000 ms` as a timeout, not a crash (JOB-7).
 
 ### Launcher gone, new process, kill (Q4)
 
@@ -261,6 +278,7 @@ Option names differ as in `QoderBackend.build_command` (`--permission-mode bypas
 
 - Sending `/model Efficient` (Q5, live switch) changed the user's global `~/.qoder/settings.json` key `model` to `{"name":"efficient"}` (file mtime 20:04). I did not know the earlier value and did not change it back. The other keys (`enabledPlugins`, `security`, `permissions`) were not touched by me. An adapter must not use `/model`
   for live switching unless that persistence is acceptable; `--model` at resume is the safe path.
+- Status at the end of the follow-up: `~/.qoder/settings.json` was not read or changed again by me; the `model.name` value written by `/model` is still there and the user decides about it. No `/model` or other config-writing command was sent in the follow-up.
 - Qoder also wrote its usual session files under `~/.qoder/projects/...` for each probe folder.
 - All processes started by this probe were recorded by pid and stopped at the end.
 
