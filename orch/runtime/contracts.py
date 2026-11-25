@@ -353,6 +353,8 @@ class TextKey(_Str):
     CHECKLIST_COMPLETE = "checklist_complete"  # MS-4: review, or first answer the critic; full or short (PRM-9): H, by
     #                                            SessionRef.given
     REVIEW_RUBRIC_MISSING = "review_rubric_missing"
+    REVIEW_SCORE_LOW = "review_score_low"  # MS-6: an ACCEPT below Settings.pass_score is not accepted; the manager is asked
+    #                                        what the critic should do next
     GATE_ANSWERS = "gate_answers"  # all answers in one message (GATE-4); `unsent`: what was held and not sent;
     #                                `decide_again`: MS-8, 9
     MILESTONE_CHANGE_REQUEST = "milestone_change_request"  # MS-10
@@ -446,6 +448,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.SILENCE_CHECK: ("attempt", "attempts"),
     TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
     TextKey.REVIEW_RUBRIC_MISSING: ("milestone",),
+    TextKey.REVIEW_SCORE_LOW: ("milestone", "score", "pass_score"),
     TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer}]; unsent:
     #                                      [{to, body}]; decide_again: milestone title or ""
     TextKey.MILESTONE_CHANGE_REQUEST: ("milestones",),  # [{id, title, text, status}]
