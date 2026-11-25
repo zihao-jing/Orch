@@ -110,8 +110,8 @@ Nothing here is implemented yet.
 - **LAB-5 Broken label.** Return it to the sender once to fix. If it fails again, pass it on marked as broken (a broken
   critic message goes to the manager).
 - **LAB-6 Direction of a worker reply.** A reply started by the critic, a job, Orch or other work goes to the critic,
-  also when the user wrote during it. A reply started only by the user's message goes to the user, with a *Send to
-  critic* button.
+  also when the user wrote during it. Only if the user's messages alone started and joined it does it go to the user,
+  with a *Send to critic* button.
 
 ## 2.3 Workers and registry (WRK)
 
@@ -423,72 +423,21 @@ Kept from today: `config.py`, `recorder.py` (turn files), `report.py`, `timeline
 
 ## 3.4 Contracts
 
-Package A0 turns this into `contracts.py` and may add fields; after wave 0 it changes only through the coordinator.
+`orch/runtime/contracts.py` (package A0) is the exact interface: data, enums, events, actions with their emitters, user
+commands with their handlers, the adapter protocol, the dashboard API and the text keys. Its docstrings are rules: each
+says what the store does, what the engine does and who may write a field. After wave 0 it changes only through the
+coordinator.
 
-```python
-MessageStatus = waiting | delivered | answered | failed
-AgentStatus   = idle | writing | waiting_job | failed | closed
-Lifecycle     = open | closed | deleted
-Trigger       = critic | manager | worker | user_chat | job | orch | gate_answer   # what started a turn
-ErrorClass    = transient | billing | missing_cli | session_lost | other
-Ending        = intermediate | final
-
-Choice(backend, provider, model, effort, model_id, options, env)     # .session_key
-SessionRef(session_id, session_key, choice, cwd, last_used)
-ProcRef(pid, started, endpoint, output_file, read_pos)
-Job(id, agent, label, started, state: running|ended|lost, exit_code, ended, woke, fallback_sent)
-Message(id, sender, recipient, body, created, status, needs_answer, hold: reason|None,
-        trigger, reply_turn, attempts, sent_at, delivered_at, answered_at, error)
-Agent(id, role, display, lifecycle, status, choice, actual_model, sessions: {key: SessionRef}, proc, jobs,
-      assignment, writing_since, last_output, tool_running, idle_since, stopped_by_user, switch: Switch|None)
-Gate(id, kind: question|pause|plan|milestone|milestone_change|operational, options, text, opened, answer, source_turn)
-Switch(agent, target: Choice, forced, step, old: SessionRef, new: SessionRef|None)
-Snapshot(agents, messages, gates, jobs, milestones, checklist, paused, finished, discussion, terminals, rounds, now)
-
-# what adapters report; `pos` makes replay after a restart harmless
-AgentEvent = Received(message_id) | TurnStarted | Text | ToolStart | ToolEnd | JobStarted | JobEnded
-           | TurnEnded(text, status, error: ErrorClass|None) | SessionChanged | ModelReported | ProcessExited
-# reported by the engine itself: SmokeResult(choice, ok, why), Tick(now)
-
-class Adapter(Protocol):
-    caps: Caps                                   # sends_while_writing, reconnects, job_record, shares_terminal, compacts
-    def start(self, spec, session: SessionRef | None) -> ProcRef
-    def reconnect(self, proc: ProcRef) -> bool
-    def send(self, message_id: str, text: str) -> None
-    def arrived(self, message_id: str) -> bool | None      # None: cannot tell
-    def events(self) -> Iterator[AgentEvent]               # resumes at proc.read_pos
-    def jobs(self) -> list[Job]
-    def interrupt(self) -> None
-    def detach(self) -> None                               # Orch closes; the CLI stays
-    def stop(self) -> None
-    def compact(self) -> bool
-    def terminal_command(self) -> list[str]
-    def catalog(self) -> list[ModelInfo]                    # models with their effort levels, where the CLI lists them
-
-# what pure modules return and the engine performs
-Action = Send(message) | Hold(message, reason) | Reject(message, why) | ReturnToSender(turn, problem) | ToUser(text)
-       | OpenGate | CloseGate | SetPaused | Retry(agent, after) | StartSwitch | AdvanceSwitch | RestartSession
-       | SmokeTest(choice) | SaveChoice(agent, choice) | WakeWorker(job) | MarkLost(job)
-       | AskManagerToCheck | NotifyReviewReady | Tell(agent, notice) | CountRound
-
-class Module(Protocol):
-    def decide(self, snap: Snapshot, event: AgentEvent | UserCommand | Tick) -> list[Action]
-```
-
-Message texts are never written inside a logic module: an action carries a text key and its values, and the engine renders
-it with `texts.py` (H). A0 defines the first list of keys; a package that needs another asks the coordinator.
-
-`UserCommand` covers every dashboard and CLI action: chat, gate answer, worker add/close/reopen/delete, choose model,
-force switch, stop agents, discussion start/apply/end, terminal open/close, change milestones, send to critic, audit
-notes. Dashboard API: `GET /api/state` returns the snapshot as JSON; `POST /api/command` takes one `UserCommand`.
+A logic module is `decide(snapshot, event, prior) -> list of actions`: pure, with deterministic ids, so a replay gives
+the same actions. `prior` holds the actions of the modules before it. The engine alone performs actions.
 
 ## 3.5 Order of one event
 
-1. The adapter reports an event; the store saves it with its position.
-2. The engine builds a snapshot and asks, in this order: recovery, labels and routing, gates, discussion, milestones,
-   supervisor. Later ones see the actions before them, and a hold from an earlier one is final.
-3. Actions are saved as intents, performed, and marked done. On restart, intents without a done mark are checked
-   (`arrived`) before they are performed again.
+1. The adapter (or the dashboard, a timer, the engine) reports an event; events of an agent carry a replay position.
+2. The store applies it; the engine builds a snapshot and asks, in this order: recovery, models, workers, routing, gates,
+   terminal, discussion, milestones, golden, supervisor. Holds apply before anything is transmitted.
+3. State, intents and "event handled" are saved in one write. Then actions are performed: a message is saved as being
+   sent before it is sent. After a restart, messages in doubt are checked (`arrived`) before they are sent again.
 4. A tick every few seconds drives timers. All times come from an injected clock.
 
 ## 3.6 Rules that keep packages compatible
