@@ -134,6 +134,7 @@ class ClaudeAdapter(BaseAdapter):
     exe = "claude"
     caps = Caps(sends_while_writing=True, reconnects=True, job_record=True, wakes_itself=True, receipts=True,
                 shares_terminal=False, compacts=True, stops_jobs=False)
+    term_grace = 8.0  # seconds the CLI has to end after SIGTERM
     roundtrip = True  # the message id comes back in the uuid
     echoes = True  # the CLI replays the messages it takes in
     stream_jobs = True  # task_* events tell about jobs
@@ -200,8 +201,8 @@ class ClaudeAdapter(BaseAdapter):
         if o.get("permission_mode"):  # only what the agent's own configuration asks for
             cmd += ["--permission-mode", str(o["permission_mode"])]
         if o.get("allowed_tools"):
-            cmd += ["--allowedTools", self._join(o["allowed_tools"])]
-        cmd += ["--disallowedTools", self._join(list(NO_BACKGROUND) + self._list(o.get("disallowed_tools")))]
+            cmd += ["--allowedTools", self._csv(o["allowed_tools"])]
+        cmd += ["--disallowedTools", self._csv(list(NO_BACKGROUND) + self._list(o.get("disallowed_tools")))]
         for d in self._list(o.get("add_dirs")):
             cmd += ["--add-dir", os.path.expanduser(d)]
         if o.get("mcp_config"):
@@ -213,7 +214,7 @@ class ClaudeAdapter(BaseAdapter):
         return [] if not v else [x.strip() for x in v.split(",") if x.strip()] if isinstance(v, str) else [str(x) for x in v]
 
     @classmethod
-    def _join(cls, v: Any) -> str:
+    def _csv(cls, v: Any) -> str:
         return ",".join(cls._list(v))
 
     def _env(self, spec: AgentSpec) -> Dict[str, str]:
@@ -319,7 +320,7 @@ class ClaudeAdapter(BaseAdapter):
             os.kill(pid, signal.SIGTERM)
         except OSError:
             return
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + self.term_grace
         while time.monotonic() < deadline:
             if self._gone(pid):
                 return
