@@ -131,7 +131,7 @@ class _Timers:
         self.start = snap.orch_started
 
     def base(self, *times: float) -> float:
-        return max(self.start, *times)
+        return max([self.start] + [t for t in times if t])
 
     def run(self) -> List[Action]:
         self.unanswered()
@@ -232,7 +232,7 @@ class _Timers:
             minutes = int((self.now - w.last_output) // 60) if w.last_output else 0
             m = self.out.add(Send, mon.id, TextKey.MONITOR_CHECK, {
                 "worker": w.id, "status": w.status, "minutes": minutes, "assignment": w.assignment.line if w.assignment
-                else "", "live_file": f"{s.run.run_dir}/live/{w.id}.jsonl", "items": items}, Trigger.MONITOR)
+                else "", "live_file": f"{s.run.run_dir}/live/{w.id}.jsonl", "items": items}, trigger=Trigger.MONITOR)
             self.out.actions.append(SetWatch(replace(watch, asked=m.id, checked_at=self.now)))
             return
 
