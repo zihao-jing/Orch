@@ -620,7 +620,7 @@ Up to 8 at once:
 | 7 | – | H, then G | Q, O |
 | 8 | – | I, J, K | S |
 
-Models (proposed, not yet agreed):
+Models (agreed by the user on 2026-11-25):
 
 | Model | Packages |
 |---|---|
