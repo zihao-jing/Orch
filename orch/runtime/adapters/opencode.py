@@ -7,7 +7,7 @@ There is no event replay, so nothing here depends on a live event stream. Every 
 message records (user, synthetic, assistant, idle, compaction), read in time order from a saved position, and its `uid`
 comes from the record id. A restart, a reconnect and a live poll therefore give the same events, and the store drops
 repeats. A message is received when the POST returns (the receipt) and taken when its user record appears (delivered).
-`pos` is "<created ms of the last record>:<1 if a turn was open after it>".
+`pos` is "<created ms>:<1 if a turn was open after it>:<id>" of the last record read.
 
 Ids: a message id "x<12 hex>" is sent as "msg_x<12 hex>" (the client chooses the id; a repeat is not a second message).
 Jobs: the job list covers the whole database and still shows jobs a dead server left, so jobs are filtered by session
@@ -115,8 +115,9 @@ class OpenCodeAdapter(BaseAdapter):
 
     def _reset_reading(self, pos: str) -> None:
         self._pos = pos
-        self._open = pos.endswith(":1")
-        self._seen: set = set()
+        bits = pos.split(":")
+        self._open = len(bits) > 1 and bits[1] == "1"
+        self._seen: set = {bits[2]} if len(bits) > 2 and bits[2] else set()  # the record the position stands at
         self._asst: Dict[str, Dict[str, Any]] = {}
         self._tools: Dict[str, bool] = {}
         self._announced: set = set()
@@ -261,7 +262,7 @@ class OpenCodeAdapter(BaseAdapter):
         self.sid = sid
         if not keep:
             self._pos = self._boundary()
-            self._open = self._pos.endswith(":1")
+            self._open = self._pos.split(":")[1] == "1"
         self._write_info(sid=sid)
         self._queue.append(self._ev(SessionChanged, f"start:{self.pid}", session_id=sid, change=changed))
         return self._proc()
@@ -313,7 +314,7 @@ class OpenCodeAdapter(BaseAdapter):
             if (r.get("type") == "idle") if active else True:
                 pick = r
                 break
-        return f"{_created(pick)}:0" if pick else "0:0"
+        return f"{_created(pick)}:0:{pick.get('id') or ''}" if pick else "0:0:"
 
     def reconnect(self, proc: ProcRef) -> bool:
         self.dir = Path(proc.output_file).parent
@@ -414,7 +415,7 @@ class OpenCodeAdapter(BaseAdapter):
         for rec in recs:
             start = self._pos
             made = self._record(rec)
-            self._pos = f"{_created(rec)}:{int(self._open)}"
+            self._pos = f"{_created(rec)}:{int(self._open)}:{rec.get('id') or ''}"
             at = _created(rec) / 1000.0
             for i, (cls, uid, kw) in enumerate(made):
                 pos = "" if cls is Text else (start if i < len(made) - 1 else self._pos)
