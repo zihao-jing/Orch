@@ -427,8 +427,9 @@ class OpenCodeAdapter(BaseAdapter):
         recs: List[Dict[str, Any]] = []
         cursor = ""
         for _ in range(limit_pages):
-            status, data = self._call("GET", f"/api/session/{self.sid}/message?limit=50&order=desc" +
-                                      (f"&cursor={quote(cursor)}" if cursor else ""))
+            # a cursor carries its own direction: the server refuses it together with `order`
+            status, data = self._call("GET", f"/api/session/{self.sid}/message?limit=50" +
+                                      (f"&cursor={quote(cursor)}" if cursor else "&order=desc"))
             if status == 404:
                 return None
             if status != 200:
