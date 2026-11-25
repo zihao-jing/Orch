@@ -620,6 +620,16 @@ Up to 8 at once:
 | 7 | – | H, then G | Q, O |
 | 8 | – | I, J, K | S |
 
+Models (proposed, not yet agreed):
+
+| Model | Packages |
+|---|---|
+| Opus | A0, B, F1, F2, H, L; reviews of every package |
+| Sonnet | P1–P4, C, D, E, G, I, J, K, X1–X3, M, R, N, Q, S |
+| Haiku | P5, X4, O |
+
+A package whose review fails twice moves to the next stronger model.
+
 F1 and F2 should have one author, as should C, D and E: their rules touch. J and K may be split. A reviewer who wrote none
 of it checks each package against its requirement ids before merging.
 
@@ -680,11 +690,10 @@ to `docs/probes/<cli>.md`. Known so far: section "CLI support" in `assets/ORCH-I
 
 # 6. Assumptions and open points
 
-Assumptions made to close gaps. Each follows the agreed rules as closely as possible; the user may change any.
+Assumptions made to close gaps. Except for 1, the user has not confirmed them one by one and may change any.
 
-1. **Operational gates and answers** (narrows the agreed "all gates"). An operational gate (such as a failed model) does not hold
-   back the user's answers to the manager; only answer gates do. Otherwise a model outage would block them for hours. All gates still count for
-   ending a pause.
+1. **Operational gates and answers** (agreed by the user on 2026-11-25): once all answer gates are closed, the answers go
+   to the manager, even if an operational gate is still open. A pause still ends only when every gate is closed.
 2. **Night mode** stays as today: a question is recorded with the manager's own recommendation, opens no waiting gate,
    and holds nothing back.
 3. **Milestone start** keeps today's `fresh_session` option (compact, new, never), done only when the agent is idle with
@@ -697,7 +706,7 @@ Assumptions made to close gaps. Each follows the agreed rules as closely as poss
    new ones, milestones given ids. No run is migrated while running.
 
 Approved by the user on 2026-11-25: the live probes P1–P5, and local commits on an integration branch (`redesign`)
-without a push. Assumption 1 is still to be decided.
+without a push. Assumption 1 is agreed.
 
 ---
 
