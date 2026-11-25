@@ -344,6 +344,8 @@ class CodexAdapter(BaseAdapter):
                 return pid, _WS(self._sock_path)
             except OSError as e:
                 if self._popen.poll() is not None or time.monotonic() > end:
+                    if self._popen.poll() is None:
+                        self._kill(pid)  # never leave a server we could not use
                     raise AdapterError(f"codex app-server did not start: {e} {self._log_tail()}")
                 time.sleep(0.1)
 
