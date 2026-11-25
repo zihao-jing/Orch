@@ -274,7 +274,7 @@ class TestJobs(unittest.TestCase):
         snap.jobs["worker-1/j1"].stopped_by_user = True  # the user pressed stop: no wake
         self.assertEqual(find(run_tick(snap), WakeWorker), [])
 
-    def test_JOB_6_and_8_a_job_without_progress_is_reported_once(self):
+    def test_JOB_6_JOB_8_a_job_without_progress_is_reported_once(self):
         snap = snapshot(job("worker-1/j1", state="running", started=T0 - 4000, last_progress=T0 - 3700))
         snap.orch_started = T0 - 5000
         acts = run_tick(snap)

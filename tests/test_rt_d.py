@@ -25,7 +25,7 @@ class TestOpening(unittest.TestCase):
         assert_none(self, acts, HoldDecision)
         self.assertEqual(len(acts), 1)
 
-    def test_GATE_6_and_9_pause_always_opens_a_gate(self):
+    def test_GATE_6_GATE_9_pause_always_opens_a_gate(self):
         s, ev = manager_reply(snapshot(), "<pause>Need the user.</pause>")
         g = assert_has(self, decide(G, s, ev), OpenGate, gate__kind=GateKind.PAUSE).gate
         self.assertEqual(g.text, "Need the user.")
