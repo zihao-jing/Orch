@@ -10,11 +10,11 @@ import hashlib
 import random
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from . import reminders
-from .contracts import (USER, AgentStatus, ErrorClass, FailCause, Health, Message, Milestone, MilestoneStatus, Problem,
-                        Refusal, Rendered, Role, Snapshot, TextKey, TextRef)
+from .contracts import (USER, AgentStatus, ErrorClass, FailCause, Health, Message, MilestoneStatus, Problem,
+                        Refusal, Rendered, Role, Snapshot, SwitchReason, TextKey, TextRef)
 from .reminders import PROMPTS, given_to, writing_rules
 
 K = TextKey
@@ -40,7 +40,8 @@ WHY = {
     FailCause.NO_ANSWER: "it did not answer", FailCause.FROZEN: "it stopped responding",
     ErrorClass.TRANSIENT: "its provider kept failing", ErrorClass.BILLING: "a billing problem",
     ErrorClass.MISSING_CLI: "its program is missing", ErrorClass.SESSION_LOST: "its conversation could not be continued",
-    ErrorClass.OTHER: "an unknown error",
+    ErrorClass.OTHER: "an unknown error", SwitchReason.USER: "chosen by hand", SwitchReason.BACKUP: "its model failed",
+    SwitchReason.RETURN: "its usual model works again",
 }
 HEALTH = {Health.HEALTHY: "healthy", Health.QUIET: "quiet", Health.OFF_TRACK: "off track", Health.STOPPED: "stopped"}
 PROBLEM = {
@@ -105,6 +106,8 @@ class _Text:
             return self.name(str(v or ""))
         if name in PHRASES and not isinstance(v, (list, dict)):
             return _phrase(name, v)
+        if name == "assignment":
+            return str(v or "").rstrip(" .")
         if name == "choice" and isinstance(v, dict):
             v = v.get("label")
         if isinstance(v, (list, tuple)):
@@ -226,11 +229,10 @@ def _session_fresh(t: _Text) -> str:
 
 
 def _handover_request(t: _Text, read: str, extra: str = "") -> str:
-    """CONTRACT: for both keys `agent` is the one that changes."""
-    return t.fill("{agent} changes to another model and starts a new conversation that knows nothing so far ({why}). "
+    return t.fill("{agent} changes to another model ({why}) and starts a new conversation that knows nothing so far. "
                   + extra + f"Read the current progress first ({read}), then write {{agent}} a short instruction to go on "
-                  "with: where the work stands, what comes next, what holds. Replace your last message to it if it has "
-                  "not answered that.")
+                  "with: where the work stands, what comes next, what holds. It replaces your last message to it if that "
+                  "is still unanswered, so carry over what matters.")
 
 
 def _handover_critic(t: _Text) -> str:
@@ -241,7 +243,7 @@ def _handover_critic(t: _Text) -> str:
 def _manager_takeover(t: _Text) -> str:
     notes = t.snap.manager.state_file if t.snap.manager else ""
     return ("You take over this work in a new conversation. To learn the goal, how we work and where things stand, read "
-            f"your predecessor's turns in `{t.get('turns_dir')}`, the newest first ({t.get('latest')}), as far back as "
+            f"your predecessor's turns in `{_own_turns(t)}`, the newest first ({t.get('latest')}), as far back as "
             "you need; the first ones hold my goal and the plan."
             + (f" Its notes are in `{notes}`." if notes else "") + " Then go on from where it stopped.")
 
@@ -337,6 +339,18 @@ def _monitor_check(t: _Text) -> str:
     return "\n\n".join(out)
 
 
+def _monitor_report(t: _Text) -> str:
+    first, _, rest = t.body.partition("\n")
+    if first.strip(" .:").lower().replace("-", " ") in HEALTH.values():  # its first line is the status itself
+        t.body = rest.strip()
+    return t.fill("Progress check on {worker}, {minutes} minutes into its run: {health}.\n\n{body}")
+
+
+def _detail(t: _Text) -> str:
+    """The provider's words, if there are any."""
+    return "" if str(t.get("why")) in ("", "billing", "missing_cli") else t.fill(" ({why})")
+
+
 def _discussion_apply(t: _Text) -> str:
     out = ("I am applying our discussion now. Write what we agreed on, one complete message for each recipient; it "
            "replaces everything you drafted in the discussion. If nothing changes for someone, write them nothing.")
@@ -352,7 +366,7 @@ def _worker_line(t: _Text) -> str:
         status += t.jobs(" (", ")")
     elif status == STATUS[AgentStatus.IDLE] and t.get("idle_since"):
         status += f" for {duration(t.snap.now - float(t.get('idle_since')))}"
-    work = f"assigned: {t.get('assignment')}" if t.get("assignment") else "nothing assigned yet"
+    work = f"assigned: {t.value('assignment')}" if t.get("assignment") else "nothing assigned yet"
     report = "; its last report still waits for your reply" if t.get("open_report") else ""
     return f"{t.get('worker')}: {status}; {work}{report}"
 
@@ -405,7 +419,7 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.JOB_NO_PROGRESS: "{worker}'s job `{job}` has shown no progress for {minutes} minutes. Check whether it still makes "
                        "sense.",
     K.JOBS_STOPPED: "I stopped {worker}'s background work: {jobs}. No result will come from it.",
-    K.MONITOR_REPORT: "Progress check on {worker}, {minutes} minutes into its run: {health}.\n\n{body}",
+    K.MONITOR_REPORT: _monitor_report,
     # labels and workers, to whoever wrote them
     K.LABEL_RETURNED: "Part of your reply went nowhere, because a label could not be read ({label}: {problem}). Write just "
                       "that part again; the rest was passed on.",
@@ -418,8 +432,8 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.RETRY_CONTINUE: "Your last turn was cut off by an error. Go on from where you stopped.",
     K.RESTART_CONTINUE: "Your program was restarted in the middle of your turn. Check where things stand and go on from "
                         "where you stopped; don't restart a job that still runs.",
-    K.MESSAGE_AGAIN: "Your last turn was stopped before it was done. Here is what it was about; check what is already done "
-                     "before you go on:\n\n{body}",
+    K.MESSAGE_AGAIN: lambda t: "Your last turn was stopped before it was done. Check what is already done, then go on"
+                               + t.fill(" with this:\n\n{body}" if t.body else "."),
     K.SESSION_RETURN: _session_return,
     K.SESSION_FRESH: _session_fresh,
     K.HANDOVER_WRITE: "Your work continues in a new conversation that knows nothing of this one. Write the handover it "
@@ -467,7 +481,7 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.REM_MESSAGE_CRITIC: 'Only <message to="critic">…</message> reaches {critic}; write it as its user, about the work '
                           "alone.",
     K.REM_OPEN_GATES: "Still waiting for me: {gates}. Don't ask again.",
-    K.REM_DISCUSSION: "We are in a discussion: until I apply it, everything you write reaches only me.",
+    K.REM_DISCUSSION: "We are in a discussion: what you write to others is only a draft until I apply it.",
     reminders.REM_DISCUSSION_OVER: "Our discussion is over and I did not apply it: what you drafted for others was not sent.",
     K.REM_NIGHT: "It is night mode and I am away: decide everything yourself and keep the work moving. Write each question "
                  "anyway, with your choice and why; I look at it later. Pause only if nothing at all can go on without me.",
@@ -485,8 +499,10 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                     "work is paused.",
     K.GATE_FROZEN: "{agent} gave no output for {minutes} minutes, and restarting it did not help.",
     K.GATE_ROUND_LIMIT: "The limit of {rounds} rounds is reached.",
-    K.GATE_BILLING: "{agent} stopped because of a billing problem: {why}. The other agents go on.",
-    K.GATE_MISSING_CLI: "{agent} cannot start because its program is missing: {why}. The other agents go on.",
+    K.GATE_BILLING: lambda t: t.fill("{agent} stopped because of a billing problem") + _detail(t)
+                    + ". The other agents go on.",
+    K.GATE_MISSING_CLI: lambda t: t.fill("{agent} cannot start because its program is missing") + _detail(t)
+                        + ". The other agents go on.",
     K.GATE_ALL_FAILED: "No model set for {agent} works ({choices}): {why}. They are tested every 30 minutes; this closes by "
                        "itself when one works.",
     K.GATE_AGENT_FAILED: "{agent} has failed: {why}.",
@@ -539,7 +555,8 @@ def render(snap: Snapshot, message: Message) -> Rendered:
         return Rendered(text)
     refs, shown = reminders.lines(snap, message, random.Random(message.id))
     given.update(shown)
-    return Rendered(f"{text}\n\n{block}" if (block := reminder(snap, agent.id, refs)) else text, given)
+    block = reminder(snap, agent.id, refs)
+    return Rendered(f"{text}\n\n{block}" if block else text, given)
 
 
 def reminder(snap: Snapshot, agent: str, refs: List[TextRef]) -> str:
