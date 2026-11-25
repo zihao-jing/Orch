@@ -11,7 +11,7 @@ ADAPTERS = {
     "qwen": ("claude", "QwenAdapter"),
     "codex": ("codex", "CodexAdapter"),
     "opencode": ("opencode", "OpenCodeAdapter"),
-    "agy": ("oneshot", "AgyAdapter"),
+    "agy": ("agy", "AgyAdapter"),
     "command": ("oneshot", "CommandAdapter"),
     "mock": ("mock", "MockAdapter"),
 }

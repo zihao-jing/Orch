@@ -76,8 +76,8 @@ class BaseAdapter:
     def stop_job(self, job_id: str) -> bool:
         return False
 
-    def interrupt(self) -> None:
-        pass
+    def interrupt(self) -> bool:
+        return False
 
     def detach(self) -> None:
         pass

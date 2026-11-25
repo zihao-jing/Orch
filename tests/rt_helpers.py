@@ -87,6 +87,8 @@ def message(id: str, recipient: str = "critic", sender: str = ORCH, body: str = 
     trig = {"user": "user_chat", "orch": "orch"}.get(sender, sender.split("-")[0])
     kw.setdefault("trigger", C.Trigger(trig))
     kw.setdefault("created", T0 - 10)
+    if kw["status"] == C.MessageStatus.ANSWERED:
+        kw.setdefault("taken_at", kw["created"])
     if kw["status"] != C.MessageStatus.WAITING:
         kw.setdefault("sent_at", kw["created"])
         kw.setdefault("delivered_at", kw["created"])
@@ -120,7 +122,7 @@ _SINGLE = {C.Checklist: "checklist", C.GoldenBoard: "golden", C.Settings: "setti
 
 def snapshot(*records: Any, workers: int = 1, now: float = T0, **kw: Any) -> Snapshot:
     """Manager, critic and `workers` workers, all idle, plus the given records, each put where it belongs (an Agent
-    replaces the one with its id). Without a Milestone in `records`, m1 is the current one."""
+    replaces the one with its id). Without a Milestone in `records`, m1 is the current one; milestones=[]: none."""
     s = C.Snapshot(now=now, orch_started=now - 3600, **kw)
     for a in [agent("manager"), agent("critic")] + [agent(f"worker-{i + 1}") for i in range(workers)]:
         s.agents.setdefault(a.id, a)
@@ -138,7 +140,7 @@ def snapshot(*records: Any, workers: int = 1, now: float = T0, **kw: Any) -> Sna
             setattr(s, _SINGLE[t], rec)
         else:
             raise TypeError(f"no place for {t.__name__}")
-    if not s.milestones:
+    if not s.milestones and "milestones" not in kw:
         s.milestones.append(milestone())
     for i, m in enumerate(s.messages.values()):
         m.seq = m.seq or i + 1
@@ -152,7 +154,7 @@ def tick(snap: Snapshot) -> Tick:
 def event(kind: Type[Any], snap: Snapshot, agent_id: str = "", **kw: Any) -> Any:
     """Any event or command at the snapshot's time, with an identity."""
     if issubclass(kind, C.AgentEvent):
-        kw = {"stream": f"{agent_id}-1", "pos": 7, **kw}
+        kw = {"stream": f"{agent_id}-1", "pos": "7", **kw}
     if issubclass(kind, C.UserCommand):
         kw.setdefault("id", "c1")
     return kind(agent_id, snap.now, **_enums(kind, kw))
@@ -162,33 +164,41 @@ def turn_ended(snap: Snapshot, agent_id: str, text: str = "", reply: Optional[Re
                triggers: Sequence[Union[str, Trigger]] = ("orch",), error: Optional[str] = None, detail: str = "",
                started_by: Iterable[str] = (), **turn_kw: Any) -> Tuple[Snapshot, TurnEnded]:
     """(snapshot, event) just after a turn of the agent ended, with the facts applied as the store does: the Turn, its
-    parsed reply (untagged text unless `reply` is given), ending and status by the running jobs. started_by: messages
-    of the snapshot; they give the triggers and keys."""
+    parsed reply (untagged text unless `reply` is given), ending and status by the jobs; ended ok: retry and failure
+    cleared, the session confirmed. started_by, joined=, jobs=: ids; with the messages they give triggers and keys."""
     s = copy.deepcopy(snap)
-    msgs = [s.messages[i] for i in started_by]
+    started_by, woke = list(started_by), list(turn_kw.get("jobs", ()))
+    msgs = [s.messages[i] for i in started_by + list(turn_kw.get("joined", ()))]
     for m in msgs:
-        m.status, m.answered_at = C.MessageStatus.ANSWERED, snap.now - 30
+        m.status, m.taken_at, m.answered_at = C.MessageStatus.ANSWERED, snap.now - 30, snap.now - 30
+    for i in woke:
+        s.jobs[i].woke = True
+    trig = [m.trigger for m in msgs] + [C.Trigger.JOB] * bool(woke) or [C.Trigger(x) for x in triggers]
     err = C.ErrorClass(error) if error else None
     if reply is None:
         reply = C.Reply(text=text, untagged=text)
     reply = replace(reply, text=reply.text or text or reply.untagged)
-    jobs = s.running_jobs(agent_id)
     s.turns[agent_id] = t = turn(
-        agent_id, ended=s.now, text=reply.text, started_by=list(started_by), error=err, detail=detail,
-        triggers=[m.trigger for m in msgs] or [C.Trigger(x) for x in triggers], keys=[m.key for m in msgs if m.key])
+        agent_id, ended=s.now, text=reply.text, started_by=started_by, error=err, detail=detail,
+        triggers=list(dict.fromkeys(trig)), keys=[m.key for m in msgs if m.key])
     t.status = C.TurnStatus.ERROR if err else C.TurnStatus.OK
     t.reply = None if err else reply
-    t.ending = C.Ending.INTERMEDIATE if jobs else C.Ending.FINAL
+    t.ending = C.Ending.INTERMEDIATE if s.open_jobs(agent_id) else C.Ending.FINAL
     for k, v in _enums(C.Turn, turn_kw).items():
         setattr(t, k, v)
     a = s.agents[agent_id]
-    a.status = C.AgentStatus.WAITING_JOB if jobs else C.AgentStatus.IDLE
+    if t.status == C.TurnStatus.OK:
+        a.retry, a.failed_why, a.frozen_restart = None, "", 0.0
+        if a.session:
+            a.session.confirmed = True
+    a.status = s.status_of(agent_id)
     a.idle_since, a.writing_since, a.last_output, a.tools = s.now, 0.0, s.now, []
-    return s, C.TurnEnded(agent_id, s.now, f"{agent_id}-1", 9, text=t.text, status=t.status, error=err, detail=detail)
+    return s, C.TurnEnded(agent_id, s.now, f"{agent_id}-1", "9", text=t.text, status=t.status, error=err, detail=detail)
 
 
 def decide(module: Any, snap: Snapshot, ev: Any, prior: Sequence[Action] = ()) -> List[Action]:
-    """module.decide, with the checks every module must pass (purity, replay, emitters, text keys and values)."""
+    """module.decide, with the checks every module must pass (purity, replay, emitters, text keys and values, the
+    meaning of Tell and ToUser)."""
     before = copy.deepcopy(snap)
     actions = module.decide(snap, ev, tuple(prior))
     assert snap == before, "the module changed the snapshot"
@@ -200,6 +210,14 @@ def decide(module: Any, snap: Snapshot, ev: Any, prior: Sequence[Action] = ()) -
         for ref in _refs(a):
             missing = set(C.TEXT_VALUES[ref.key]) - set(ref.values)
             assert not missing, f"{ref.key}: no value for {sorted(missing)}"
+            unknown = set(ref.values) - set(C.TEXT_VALUES[ref.key]) - {"body"}
+            assert not unknown, f"{ref.key}: unknown values {sorted(unknown)}"
+        if isinstance(a, C.Send):
+            m, user = a.message, a.message.recipient == C.USER
+            assert user or not isinstance(a, C.ToUser), f"ToUser to {m.recipient!r}"
+            assert not (user and isinstance(a, C.Tell)), "Tell to the user"
+            assert user or m.recipient, "a message without a recipient"
+            assert not (m.needs_answer and (user or isinstance(a, C.Tell))), f"{m.id}: needs_answer must be False"
     ids = [a.message.id for a in actions if isinstance(a, C.Send)]
     assert len(set(ids)) == len(ids) and all(ids), f"message ids are empty or not unique: {ids}"
     return actions

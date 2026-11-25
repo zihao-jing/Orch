@@ -18,29 +18,29 @@ from orch.runtime.adapters.base import AdapterError, BaseAdapter, classify_error
 # id -> names in contracts (Class, Class.field, Enum.MEMBER); "prompt": wording only, texts.system_prompt / texts.render
 COVERAGE = {
     "MSG-1": "Send Caps.sends_while_writing", "MSG-2": "HoldReason Hold HoldAgent HOLD_OWNERS",
-    "MSG-3": "Message MessageStatus", "MSG-4": "Message.needs_answer Tell ToUser",
+    "MSG-3": "Message MessageStatus Received.taken", "MSG-4": "Message.needs_answer Tell ToUser",
     "MSG-5": "Resend Message.checked_at Message.attempts FailAgent Settings.unanswered_after",
-    "MSG-6": "Intent new_id Message.rendered Adapter.arrived", "MSG-7": "Message.seq TextKey.WORKER_FINAL Message.text",
+    "MSG-6": "Intent new_id Message.rendered Message.sendable Adapter.arrived Discarded", "MSG-7": "Message.seq TextKey.WORKER_FINAL Message.text",
     "MSG-8": "Reject TextKey.UNKNOWN_WORKER TextKey.NO_WORKERS", "MSG-9": "Chat Tell TextKey.DIRECT_MESSAGE_NOTICE",
     "MSG-10": "Reply.text",
     "LAB-1": "Reply.messages Reply.silent Problem.REMOVED", "LAB-2": "Reply.untagged", "LAB-3": "Reply Decision",
     "LAB-4": "Reply.silent DropReason.SILENT",
     "LAB-5": "Reply.broken ReturnToSender Turn.keys TextKey.LABEL_BROKEN_PASSED",
-    "LAB-6": "Turn.triggers Turn.joined SendToCritic TextKey.WORKER_TO_CRITIC",
+    "LAB-6": "Turn.triggers Turn.joined Message.continues SendToCritic TextKey.WORKER_TO_CRITIC",
     "WRK-1": "Agent Assignment Agent.assignment", "WRK-2": "WorkerAdd WorkerClose WorkerReopen WorkerDelete AddWorker",
     "WRK-3": "SetLifecycle Lifecycle.DELETED", "WRK-4": "DropReason.WORKER_CLOSED",
     "WRK-5": "WorkerClose.jobs JobsChoice CommandReply.choices StopJob", "WRK-6": "TextKey.REM_WORKER_LINE",
     "WRK-7": "prompt", "WRK-8": "TextKey.WORKER_FINAL", "WRK-9": "TextKey.REM_WORKERS", "WRK-10": "prompt",
     "WRK-11": "TextKey.REM_ASK_AND_END",
-    "JOB-1": "prompt", "JOB-2": "Ending Turn.ending AgentStatus.WAITING_JOB JobsChecked",
+    "JOB-1": "prompt", "JOB-2": "Ending Turn.ending Job.open AgentStatus.WAITING_JOB JobsChecked",
     "JOB-3": "TextKey.WORKER_INTERMEDIATE", "JOB-4": "Trigger.JOB Turn.jobs Job.woke",
-    "JOB-5": "WakeWorker Job.fallback_sent Settings.wakeup_after JobEnded.noticed",
+    "JOB-5": "WakeWorker.job_ids Job.fallback_sent Settings.wakeup_after JobNoticed Caps.wakes_itself",
     "JOB-6": "JobsChecked ReportJob Job.last_progress", "JOB-7": "MarkLost Job.stopped_by_user TextKey.JOB_LOST",
-    "JOB-8": "TextKey.CHECKLIST_COMPLETE TextKey.REVIEW_FULL",
+    "JOB-8": "TextKey.CHECKLIST_COMPLETE",
     "MS-1": "Checklist ChecklistStep", "MS-2": "Checklist.error Milestone.asked_to_fix TextKey.CHECKLIST_UNREADABLE",
     "MS-3": "Checklist.steps", "MS-4": "NotifyReviewReady Milestone.notified", "MS-5": "NotifyReviewReady",
     "MS-6": "Milestone.rubric Milestone.score Reply.decision GateKind.MILESTONE", "MS-7": "prompt",
-    "MS-8": "Decision.PAUSE OpenGate TextKey.REVIEW_DECIDE_AGAIN", "MS-9": "HoldDecision HoldReason.GATES",
+    "MS-8": "Decision.PAUSE OpenGate TextKey.GATE_ANSWERS", "MS-9": "HoldDecision HoldReason.GATES",
     "MS-10": "ChangeMilestones TextKey.MILESTONE_CHANGE_REQUEST Turn.keys",
     "MS-11": "GateKind.MILESTONE_CHANGE Gate.old Gate.new Discussion.milestone_change",
     "MS-12": "Milestone.id MilestoneStatus.DROPPED SetMilestones", "MS-13": "CloseGate.withdrawn TextKey.NOTE_REVIEW_WITHDRAWN",
@@ -54,21 +54,21 @@ COVERAGE = {
     "GATE-3": "GateAnswer TextKey.GATE_ANSWERS Trigger.GATE_ANSWER", "GATE-4": "Message.gates Gate.sent_in CloseGate",
     "GATE-5": "TextKey.REM_OPEN_GATES", "GATE-6": "Snapshot.paused GateKind.PAUSE", "GATE-7": "Reply.pauses",
     "GATE-8": "Problem.REMOVED", "GATE-9": "OpenGate Snapshot.paused",
-    "DISC-1": "DiscussionStart SetDiscussion HoldReason.DRAFT Snapshot.drafting", "DISC-2": "prompt",
-    "DISC-3": "DiscussionApply TextKey.DISCUSSION_APPLY DiscussionPhase.APPLYING",
+    "DISC-1": "DiscussionStart SetDiscussion HoldReason.DRAFT Snapshot.drafting Turn.draft", "DISC-2": "prompt",
+    "DISC-3": "DiscussionApply TextKey.DISCUSSION_APPLY DiscussionPhase.APPLYING Message.when_idle",
     "DISC-4": "DiscussionEnd DropReason.DRAFT_ENDED", "DISC-5": "HoldReason.DRAFT ToUser", "DISC-6": "Chat Turn.triggers",
     "TERM-1": "TerminalOpen Adapter.terminal_command", "TERM-2": "TerminalRead Discussion.by_terminal Adapter.transcript",
     "TERM-3": "Terminal", "TERM-4": "HoldReason.TERMINAL Caps.shares_terminal Terminal.shared",
-    "TERM-5": "TerminalOpen.stop_job TextKey.ASK_JOB_TERMINAL", "TERM-6": "TerminalTakeBack Snapshot.waiting_for",
+    "TERM-5": "TerminalOpen.stop_job TextKey.ASK_JOB_TERMINAL StopJob", "TERM-6": "TerminalTakeBack Snapshot.waiting_for",
     "MOD-1": "ChooseModel Choice.public Snapshot.catalog", "MOD-2": "ModelInfo.efforts Adapter.catalog",
     "MOD-3": "SaveChoice Choice.name", "MOD-4": "ConfirmMigration", "MOD-5": "ModelReported Agent.actual_model",
-    "MOD-6": "Switch SwitchStep.PENDING ForceSwitch TextKey.ASK_FORCE_SWITCH Switch.unfinished",
+    "MOD-6": "Switch SwitchStep.PENDING Snapshot.settled ForceSwitch TextKey.ASK_FORCE_SWITCH Switch.unfinished",
     "MOD-7": "SmokeTest SmokeResult SwitchStep.TESTING",
     "SES-1": "Choice.session_key SessionRef", "SES-2": "SessionChange.DIFFERENT SessionChange.LOST ErrorClass.SESSION_LOST",
     "SES-3": "Switch.tried_new", "SES-4": "Agent.sessions TextKey.SESSION_RETURN",
     "SES-5": "Switch.handover_by TextKey.HANDOVER_REQUEST_CRITIC TextKey.MANAGER_TAKEOVER GateCause.HANDOVER",
     "SES-6": "Switch.handover_message DropReason.REPLACED Message.session_id Resend",
-    "REC-1": "Retry RetryState Settings.retry_waits MarkFailed", "REC-2": "ErrorClass.BILLING GateCause.MISSING_CLI",
+    "REC-1": "Retry RetryState.turn Settings.retry_waits MarkFailed ProcessExited.reported", "REC-2": "ErrorClass.BILLING GateCause.MISSING_CLI",
     "REC-3": "TextKey.WORKER_FAILED GateCause.AGENT_FAILED", "REC-4": "Snapshot.running_jobs Retry",
     "REC-5": "SwitchReason.RETURN Settings.return_after", "REC-6": "SmokeTest Agent.last_smoke GateCause.ALL_FAILED CloseGate",
     "REC-7": "ProcRef SessionRef AdvanceSwitch DropReason.MERGED", "REC-8": "SessionRef.choice RestartSession Switch.old",
@@ -77,7 +77,7 @@ COVERAGE = {
     "UI-4": "AuditNotes", "UI-5": "prompt", "UI-6": "prompt",
     "PRM-1": "TextKey", "PRM-2": "prompt", "PRM-3": "Rendered", "PRM-4": "Rendered SessionRef.given Agent.open_report",
     "PRM-5": "GoldenBoard SetGolden SessionRef.given SessionChange.COMPACTED", "PRM-6": "prompt", "PRM-7": "prompt",
-    "PRM-8": "TextKey.MONITOR_CHECK", "PRM-9": "TextKey.REVIEW_SHORT SessionRef.given",
+    "PRM-8": "TextKey.MONITOR_CHECK", "PRM-9": "TextKey.CHECKLIST_COMPLETE SessionRef.given",
     "AUD-1": "prompt", "AUD-2": "Message Job Gate", "AUD-3": "AuditNotes", "AUD-4": "RunInfo.version",
 }
 
@@ -146,8 +146,8 @@ class TestContracts(unittest.TestCase):
         self.assertIs(back.agents["worker-1"].status, C.AgentStatus.FAILED)
 
     def test_stored_form_of_every_event_command_and_action(self):
-        for c in subclasses(C.Event) + subclasses(C.Action):
-            x = c()
+        for c in [x for x in subclasses(C.Event) + subclasses(C.Action) if x is not C.UserCommand]:
+            x = c(id="c1") if issubclass(c, C.UserCommand) else c()
             base = C.Action if issubclass(c, C.Action) else C.Event
             self.assertEqual(C.from_dict(base, json.loads(json.dumps(C.to_dict(x)))), x)
         i = C.Intent("k#0", C.OpenGate(gate("g1")), C.IntentState.DONE)
@@ -160,13 +160,36 @@ class TestContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             C.from_dict(C.UserCommand, {"type": "Send"})
 
+    def test_commands_are_checked(self):
+        good = {"type": "StopAgents", "id": "c1", "agents": ["critic"], "at": 5}
+        self.assertEqual(C.from_dict(C.UserCommand, good).agents, ("critic",))
+        self.assertEqual(C.from_dict(C.UserCommand, {"type": "WorkerClose", "id": "c", "jobs": None}).jobs, None)
+        for bad in ({**good, "id": ""}, {**good, "agents": "critic"}, {**good, "agents": [1]}, {**good, "at": "x"},
+                    {**good, "agent": 3}, {"type": "WorkerClose", "id": "c", "jobs": "maybe"}, {"id": "c"}, [], None,
+                    {"type": "SetNight", "id": "c", "on": "yes"}, {"type": "GateAnswer", "id": "c", "option": True},
+                    {"type": "JobStop", "id": "c"}):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                C.from_dict(C.UserCommand, bad)
+
+    def test_redact(self):
+        for text in ("Invalid key sk-abcdef1234567890", 'api_key="abcdef123456"', "Authorization: Bearer abcdef123456",
+                     "bad http://u:abcdef123456@host/v1", "GET https://h/v1?key=abcdef123456 failed"):
+            self.assertNotIn("abcdef12", C.redact(text))
+        for text in ("API Error: 529 overloaded", "session 7be3e7e5-9f82-4e07-aea9-819df103e5a6 not found", "see https://h/v1"):
+            self.assertEqual(C.redact(text), text)
+
     def test_session_key_and_secrets(self):
         ch = C.Choice("claude", "", "opus", env={"ANTHROPIC_BASE_URL": "http://x", "ANTHROPIC_API_KEY": "secret"},
                       options={"key": "secret"})
         self.assertEqual(ch.session_key, "claude|ANTHROPIC_BASE_URL=http://x")  # as Variant.session_key
-        self.assertEqual(C.Choice("opencode", "zai").session_key, "opencode|zai")
-        self.assertNotIn("API_KEY", json.dumps(C.to_dict(ch)))
-        self.assertEqual(C.from_dict(C.Choice, C.to_dict(ch)).session_key, ch.session_key)
+        self.assertEqual(C.Choice("opencode", "zai").session_key, "opencode")
+        back = C.from_dict(C.Choice, C.to_dict(ch))
+        self.assertNotIn("secret", json.dumps(C.to_dict(ch)))
+        self.assertEqual((back.session_key, back.options), (ch.session_key, {}))
+        self.assertTrue(ch.same(back) and not ch.same(dataclasses.replace(ch, effort="low")))
+        odd = C.Choice("claude", env={"ANTHROPIC_BASE_URL": "http://me:secret@x/v1?t=secret"})
+        self.assertEqual(odd.session_key, "claude|ANTHROPIC_BASE_URL=http://x/v1")
+        self.assertNotIn("secret", json.dumps(C.to_dict(odd)))
         s = snapshot(agent("worker-1", choice=ch, switch=C.Switch("worker-1", ch), holds=[]), message("m1", rendered="long"))
         shown = json.dumps(C.public_state(s))
         for word in ("secret", "http://x", "long", "session_key"):
@@ -178,10 +201,11 @@ class TestContracts(unittest.TestCase):
         self.assertEqual(f"{C.Role.CRITIC}", "critic")
 
     def test_ids_depend_only_on_module_event_and_number(self):
-        ev = C.TurnEnded("critic", 5.0, "s", 9)
+        ev = C.TurnEnded("critic", 5.0, "s", "9")
+        self.assertRegex(C.new_id("routing", ev), "^x[0-9a-f]{12}$")
         self.assertEqual(C.new_id("routing", ev), C.new_id("routing", C.from_dict(C.Event, C.to_dict(ev))))
         self.assertEqual(len({C.new_id("routing", ev), C.new_id("gates", ev), C.new_id("routing", ev, 1),
-                              C.new_id("routing", dataclasses.replace(ev, pos=10))}), 4)
+                              C.new_id("routing", dataclasses.replace(ev, pos="10"))}), 4)
         self.assertEqual(C.Chat("manager", 1.0, "c7").key, C.Chat("manager", 2.0, "c7").key)
 
     def test_drafting(self):
@@ -190,6 +214,28 @@ class TestContracts(unittest.TestCase):
         s.turns["critic"].started_by = ["m2"]
         self.assertFalse(s.drafting("critic"))
         self.assertFalse(s.drafting("manager"))
+        s.turns["manager"] = turn("manager", draft=True)  # its discussion ended while it wrote
+        self.assertTrue(s.drafting("manager"))
+
+    def test_status_and_settled(self):
+        s = snapshot(turn("worker-1"))
+        self.assertEqual((s.status_of("worker-1"), s.settled("worker-1")), ("writing", False))
+        s.turns["worker-1"].status = C.TurnStatus.OK
+        self.assertEqual((s.status_of("worker-1"), s.settled("worker-1")), ("idle", True))
+        s.jobs["worker-1/j1"] = j = job()
+        self.assertEqual((s.status_of("worker-1"), s.settled("worker-1")), ("waiting_job", False))
+        j.state = C.JobState.ENDED
+        self.assertEqual((s.status_of("worker-1"), s.settled("worker-1")), ("idle", False))
+        for kw in ({"woke": True}, {"stopped_by_user": True}):
+            self.assertTrue(snapshot(job(state="ended", **kw)).settled("worker-1"))
+        s = snapshot(message("m1", "worker-1"), agent("critic", failed_why="x"), agent("worker-2", lifecycle="closed"))
+        self.assertFalse(s.settled("worker-1"))
+        self.assertEqual((s.status_of("critic"), s.status_of("worker-2")), ("failed", "closed"))
+
+    def test_sendable(self):
+        self.assertTrue(message("m", status="waiting").sendable)
+        for kw in ({"sent_at": 5.0}, {"holds": [C.HoldReason.DRAFT]}, {"drop": C.DropReason.SILENT}, {"status": "delivered"}):
+            self.assertFalse(message("m", **{"status": "waiting", **kw}).sendable)
 
     def test_message_open(self):
         self.assertTrue(message("m").open)
@@ -212,14 +258,37 @@ class TestMock(unittest.TestCase):
         self.cli.script("Hello.", CliReply(error=C.ErrorClass.TRANSIENT, detail="API Error"))
         self.ad.send("m1", "Hi")
         self.ad.send("m2", "Also")  # joins the running turn
-        self.assertEqual(self.names(), ["Received", "TurnStarted", "Text", "Received", "TurnEnded"])
+        self.assertEqual(self.names(), ["Received", "TurnStarted", "Text", "Received", "Received", "TurnEnded"])
+        self.assertEqual([e.taken for e in self.last if isinstance(e, C.Received)], [False, False, True])
         self.assertEqual(self.last[-1].text, "Hello.")
-        self.assertEqual([e.pos for e in self.last], [2, 3, 4, 5, 6])
+        self.assertEqual([e.pos for e in self.last], ["2", "3", "4", "5", "6", "7"])
         self.ad.send("m3", "Next")
         self.names()
         self.assertEqual((self.last[-1].error, self.last[-1].detail), (C.ErrorClass.TRANSIENT, "API Error"))
         self.assertTrue(self.ad.arrived("m2"))
         self.assertFalse(self.ad.arrived("m9"))
+
+    def test_message_in_the_queue(self):
+        self.cli.script(CliReply("One.", takes=False), "Two.", CliReply("Three.", takes=False))
+        self.ad.send("m1", "Hi")
+        self.ad.send("m2", "Also")
+        self.assertEqual(self.names(), ["Received", "TurnStarted", "Text", "Received", "TurnEnded",
+                                        "TurnStarted", "Text", "TurnEnded"])
+        self.assertEqual([e.message_ids for e in self.last if isinstance(e, C.TurnStarted)], [("m1",), ("m2",)])
+        self.ad.send("m3", "x")
+        self.ad.send("m4", "lost with the CLI")
+        self.names(0)
+        self.cli.exit()
+        self.names(0)
+        self.assertEqual((self.ad.arrived("m3"), self.ad.arrived("m4")), (True, False))
+
+    def test_job_ends_inside_a_turn_and_empty_result(self):
+        self.cli.script(CliReply("Both.", after=20, jobs=["a"]))
+        self.ad.send("m1", "Go")
+        self.cli.job_end("a", 0, after=5, noticed=True)
+        self.assertEqual(self.names(30), ["Received", "TurnStarted", "JobStarted", "Text", "JobEnded", "JobNoticed", "TurnEnded"])
+        self.cli.empty_result()
+        self.assertEqual((self.names(), self.last[0].text), (["Text"], ""))
 
     def test_job_wakes_or_not(self):
         self.cli.script(CliReply("Started.", jobs=["a", "b"]))
@@ -252,7 +321,7 @@ class TestMock(unittest.TestCase):
         self.assertEqual(self.names(), [])
         with self.assertRaises(AdapterError):
             self.ad.send("m2", "x")
-        proc.read_pos = 2  # saved up to the message's receipt
+        proc.read_pos = "2"  # saved up to the message's receipt
         again = MockAdapter(self.clock, self.cli)
         self.assertTrue(again.reconnect(proc))
         self.assertEqual([e.key for e in again.events()], keys[1:])
@@ -263,15 +332,34 @@ class TestMock(unittest.TestCase):
             MockAdapter(self.clock, self.cli).start(C.AgentSpec("worker-1"), None)
         self.cli.script(CliReply(exit=9))
         self.ad.send("m1", "Go")
-        self.assertEqual(self.names()[-1], "ProcessExited")
-        self.assertEqual(self.last[-1].exit_code, 9)
-        self.assertFalse(MockAdapter(self.clock, self.cli).reconnect(proc))
+        self.assertEqual(self.names()[-2:], ["TurnEnded", "ProcessExited"])
+        self.assertEqual((self.last[-2].error, self.last[-1].exit_code, self.last[-1].reported), ("transient", 9, True))
+        late = MockAdapter(self.clock, self.cli)
+        self.assertFalse(late.reconnect(proc))  # gone, but what it wrote is still read
+        self.assertEqual([e.key for e in late.events()][-4:], [e.key for e in self.last][-4:])
         self.ad.start(C.AgentSpec("worker-1"), C.SessionRef("worker-1-s1"))
         self.assertEqual(self.names(), ["SessionChanged"])
         self.assertEqual((self.last[0].change, self.last[0].session_id), ("resumed", "worker-1-s1"))
         self.ad.stop()
         self.names()
         self.assertTrue(self.last[-1].asked)
+
+    def test_stop_and_start_drop_nothing(self):
+        self.ad.send("m1", "Go")
+        self.clock.advance(10)
+        self.ad.send("m2", "Again")
+        self.ad.stop()
+        self.ad.start(C.AgentSpec("worker-1"), C.SessionRef("worker-1-s1"))
+        turn_ = ["Received", "TurnStarted", "Text", "TurnEnded"]
+        self.assertEqual(self.names(), turn_ * 2 + ["ProcessExited", "SessionChanged"])
+        self.assertEqual((self.last[7].status, self.last[8].asked, self.last[8].reported), ("stopped", True, False))
+        self.assertEqual(len({e.key for e in self.last}), len(self.last))
+
+    def test_left_over_cli(self):
+        self.ad.detach()  # Orch died before it saved the ProcRef
+        new = MockAdapter(self.clock, self.cli)
+        new.start(C.AgentSpec("worker-1"), None)
+        self.assertEqual([(type(e).__name__, e.uid) for e in new.events()], [("SessionChanged", "start:2")])
 
     def test_session_loss(self):
         for script, change in ((self.cli.lose_session, "lost"), (self.cli.other_session, "different")):
@@ -287,7 +375,7 @@ class TestMock(unittest.TestCase):
         self.assertEqual((self.names(), self.ad.arrived("m1")), ([], False))
         self.ad.send("m2", "Go")
         self.assertEqual(self.names(5000), ["Received", "TurnStarted", "ToolStart", "Text"])
-        self.ad.interrupt()
+        self.assertTrue(self.ad.interrupt())
         self.names(0)
         self.assertEqual(self.last[-1].status, C.TurnStatus.STOPPED)
         self.cli.refuse_sends(1, C.ErrorClass.BILLING)
@@ -348,6 +436,11 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual((s.turns["worker-1"].ending, s.agents["worker-1"].status), ("intermediate", "waiting_job"))
         self.assertEqual((s.turns["worker-1"].triggers, s.messages["m1"].status), (["critic"], "answered"))
         self.assertEqual(s0.messages["m1"].status, "delivered")
+        s, ev = turn_ended(snapshot(job("worker-1/j1", state="ended"), message("m1", "worker-1", "user"),
+                                    message("m2", "worker-1", "critic"), milestones=[]),
+                           "worker-1", "Ok.", started_by=["m1"], joined=["m2"], jobs=["worker-1/j1"])
+        t = s.turns["worker-1"]
+        self.assertEqual((t.triggers, t.ending, s.milestones), (["user_chat", "critic", "job"], "final", []))
         s, ev = turn_ended(snapshot(), "worker-1", error="billing", detail="no credit")
         self.assertIsNone(s.turns["worker-1"].reply)
         self.assertEqual(ev.error, C.ErrorClass.BILLING)
@@ -364,7 +457,11 @@ class TestHelpers(unittest.TestCase):
 
         s = snapshot()
         for out in (C.CountRound(), C.Send(C.Message("", recipient="critic")),
-                    C.Send(C.Message("m1", text=C.TextRef(C.TextKey.JOB_LOST)))):
+                    C.Send(C.Message("m1", recipient="critic", text=C.TextRef(C.TextKey.JOB_LOST))),
+                    C.Send(C.Message("m1", recipient="critic", text=C.TextRef(C.TextKey.JOB_LOST, {"jobs": [], "x": 1}))),
+                    C.Tell(C.Message("m1", recipient="critic")), C.Send(C.Message("m1")),
+                    C.ToUser(C.Message("m1", recipient="critic", needs_answer=False)),
+                    C.ToUser(C.Message("m1", recipient=C.USER))):
             with self.assertRaises(AssertionError):
                 decide(Bad(out), s, tick(s))
         self.assertEqual(len(decide(Bad(C.CloseGate("g1")), s, tick(s))), 1)

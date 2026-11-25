@@ -14,7 +14,9 @@ of `MockAdapter`s, one after the other, can join it, as after an Orch restart. E
     list(ad.events())     # SessionChanged, Received, TurnStarted, JobStarted, Text, TurnEnded, JobEnded, TurnStarted...
 
 Also: Reply(error=...), Reply(ends=False) (frozen), Reply(receipt=False, starts=False) (swallowed), Reply(exit=1) (dies),
-cli.exit(), cli.lose_session(), cli.other_session(), cli.refuse_sends(), cli.duplicate(), cli.emit() for any event.
+Reply(takes=False) (a message sent during it becomes the next turn), cli.job_end(noticed=True) (told to the running turn),
+cli.empty_result(), cli.exit(), cli.lose_session(), cli.other_session(), cli.refuse_sends(), cli.duplicate(), and
+cli.emit() for any event. For an Orch that died, detach() the old adapter and join with a new one.
 """
 from __future__ import annotations
 
@@ -22,9 +24,10 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Deque, Dict, Iterator, List, Optional, Tuple, Type, Union
 
-from ..contracts import (AgentEvent, AgentSpec, Caps, Clock, ErrorClass, Job, JobEnded, JobStarted, JobState, ModelInfo,
-                         ModelReported, ProcRef, ProcessExited, Received, Said, SessionChange, SessionChanged,
-                         SessionRef, Text, ToolEnd, ToolStart, TurnEnded, TurnStarted, TurnStatus, USER)
+from ..contracts import (AgentEvent, AgentSpec, Caps, Clock, ErrorClass, Job, JobEnded, JobNoticed, JobStarted,
+                         JobState, ModelInfo, ModelReported, ProcRef, ProcessExited, Received, Said, SessionChange,
+                         SessionChanged, SessionRef, Text, ToolEnd, ToolStart, TurnEnded, TurnStarted, TurnStatus,
+                         USER)
 from .base import AdapterError, BaseAdapter, job_id
 
 ALL_CAPS = Caps(sends_while_writing=True, reconnects=True, job_record=True, wakes_itself=True, receipts=True,
@@ -52,6 +55,7 @@ class Reply:
     receipt: bool = True  # False: never reports Received, and arrived() is False
     starts: bool = True  # False: the message is taken in but no turn starts
     ends: bool = True  # False: the turn never ends
+    takes: bool = True  # False: a message sent while it runs is queued and becomes its own later turn
     tools: List[str] = field(default_factory=list)  # tool calls started (and, if the turn ends, ended)
     jobs: List[str] = field(default_factory=list)  # ids of jobs it starts
     error: Optional[ErrorClass] = None
@@ -70,16 +74,21 @@ class MockCLI:
         self.pid = 0
         self.starts: List[Tuple[AgentSpec, Optional[SessionRef]]] = []  # every start, for assertions
         self.sent: List[Tuple[str, str]] = []  # (message id, text) the CLI's input took
-        self.received: List[str] = []  # ids in the session
+        self.received: List[str] = []  # ids it has: in the queue or the session
+        self.queue: List[str] = []  # ids received, waiting for the turn to end
         self.said: List[Said] = []
         self.session_id = ""
         self.sessions = 0
         self.jobs: Dict[str, Job] = {}
-        self.log: List[AgentEvent] = []  # this process's output; pos = index + 1
+        self.log: List[AgentEvent] = []  # all output of all its processes; pos = index + 1
+        self.owner: Any = None  # the adapter that joined it
+        self.interrupts = True  # False: interrupt() is not supported
         self.replies: Deque[Reply] = deque()
         self._pending: List[Tuple[float, int, Union[AgentEvent, Callable[[], None]]]] = []
         self._n = 0
-        self._busy = False
+        self._busy = False  # a turn runs or is about to start
+        self._open = False  # its TurnStarted was reported, its TurnEnded not
+        self._current = Reply()
         self._next_change: Optional[SessionChange] = None
         self._refuse: List[ErrorClass] = []
         self._again = 0
@@ -101,9 +110,9 @@ class MockCLI:
         return jid
 
     def job_end(self, name: str, exit_code: Optional[int] = 0, after: float = 0.0, wake: Union[Reply, str, None] = None,
-                lost: bool = False, report: bool = True, forget: bool = False) -> None:
-        """The job ends; `wake`: the turn the CLI then starts by itself (None: none). report=False: jobs() shows it
-        ended, no event says so. forget=True: it also disappears from jobs()."""
+                lost: bool = False, report: bool = True, forget: bool = False, noticed: bool = False) -> None:
+        """The job ends; `wake`: the turn the CLI then starts by itself (None: none). noticed=True: the running turn is
+        told. report=False: jobs() shows it ended, no event says so. forget=True: it also disappears from jobs()."""
         jid = job_id(self.agent, name)
 
         def end() -> None:
@@ -117,8 +126,14 @@ class MockCLI:
         self._at(after, end)
         if report:
             self.emit(JobEnded, after, job_id=jid, exit_code=exit_code, lost=lost)
+        if noticed:
+            self.emit(JobNoticed, after, job_id=jid)
         if wake is not None:
             self._at(after, lambda: self._turn(Reply(wake) if isinstance(wake, str) else wake, ()))
+
+    def empty_result(self, after: float = 0.0) -> None:
+        """The CLI prints a result without a turn: to Orch only progress."""
+        self.emit(Text, after, text="")
 
     def exit(self, code: int = 1, after: float = 0.0, detail: str = "") -> None:
         """The process dies; its jobs are gone from jobs()."""
@@ -163,20 +178,31 @@ class MockCLI:
                 finally:
                     self._due = None
                 continue
-            if not self.alive and not isinstance(what, ProcessExited):
-                continue
-            if isinstance(what, JobStarted) and what.job:
-                self.jobs[what.job.id] = what.job
-            elif isinstance(what, Received):
-                self.received.append(what.message_id)
-            elif isinstance(what, TurnEnded):
-                self._busy = False
-                self.said.append(Said(self.agent, what.text, at))
-            stream = what.stream or f"{self.agent}-{self.pid}"
-            self.log.append(replace(what, at=what.at or at, stream=stream, pos=len(self.log) + 1))
+            if self.alive:
+                self._record(what, at)
+
+    def _record(self, ev: AgentEvent, at: float) -> None:
+        if isinstance(ev, JobStarted) and ev.job:
+            self.jobs[ev.job.id] = ev.job
+        elif isinstance(ev, Received) and ev.message_id not in self.received:
+            self.received.append(ev.message_id)
+        elif isinstance(ev, TurnStarted):
+            self._open = True
+        elif isinstance(ev, TurnEnded):
+            self._busy = self._open = False
+            self.said.append(Said(self.agent, ev.text, at))
+        stream = ev.stream or f"{self.agent}-{self.pid}"
+        self.log.append(replace(ev, at=ev.at or at, stream=stream, pos=str(len(self.log) + 1)))
+        if isinstance(ev, TurnEnded) and self.queue:
+            due, self._due = self._due, at
+            self._turn(self._reply(), (self.queue.pop(0),))
+            self._due = due
+
+    def _reply(self) -> Reply:
+        return self.replies.popleft() if self.replies else self.default
 
     def _turn(self, r: Reply, ids: Tuple[str, ...]) -> None:
-        self._busy = True
+        self._busy, self._current = True, r
         t = r.start_after
         self.emit(TurnStarted, t, message_ids=ids)
         if r.model:
@@ -199,17 +225,25 @@ class MockCLI:
     def _die(self, code: int, detail: str, asked: bool) -> None:
         if not self.alive:
             return
-        self.alive = self._busy = False
+        now, was_open = self._now(), self._open
+        self.received = [i for i in self.received if i not in self.queue]
+        self.queue.clear()
         self._pending.clear()
+        if was_open:
+            self._record(TurnEnded(self.agent, status=TurnStatus.STOPPED if asked else TurnStatus.ERROR, detail=detail,
+                                   error=None if asked else ErrorClass.TRANSIENT, session_id=self.session_id), now)
+        self.alive = self._busy = False
         self.jobs.clear()
-        self.emit(ProcessExited, exit_code=code, detail=detail, asked=asked)
+        self._record(ProcessExited(self.agent, exit_code=code, detail=detail, asked=asked,
+                                   reported=was_open and not asked), now)
 
     def _start(self, spec: AgentSpec, session: Optional[SessionRef]) -> ProcRef:
         self.flush()
-        if self.alive:
+        if self.alive and self.owner is not None:
             raise AdapterError("a CLI is already open for this agent", ErrorClass.OTHER)  # REC-8
+        self._die(0, "", True)  # left by an earlier start
         self.starts.append((spec, session))
-        self.alive, self._busy, self.log, self._pending = True, False, [], []
+        self.alive, self._busy, self._pending = True, False, []
         self.pid += 1
         change = SessionChange.NEW if session is None else (self._next_change or SessionChange.RESUMED)
         if change in (SessionChange.NEW, SessionChange.DIFFERENT):
@@ -219,8 +253,10 @@ class MockCLI:
             self.session_id = session.session_id
         if session is not None:
             self._next_change = None
-        self.emit(SessionChanged, session_id=self.session_id, change=change)
-        return ProcRef(pid=self.pid, started=self.clock.now(), stream=f"{self.agent}-{self.pid}")
+        proc = ProcRef(pid=self.pid, started=self.clock.now(), stream=f"{self.agent}-{self.pid}",
+                       read_pos=str(len(self.log)))
+        self.emit(SessionChanged, session_id=self.session_id, change=change, uid=f"start:{self.pid}")
+        return proc
 
     def _send(self, message_id: str, text: str) -> None:
         self.flush()
@@ -233,10 +269,13 @@ class MockCLI:
         self.sent.append((message_id, text))
         self.said.append(Said(USER, text, self.clock.now()))
         if self._busy:
-            if self.caps.receipts:
-                self.emit(Received, message_id=message_id)
+            self.emit(Received, message_id=message_id)
+            if self._current.takes:
+                self.emit(Received, message_id=message_id, taken=True)
+            else:
+                self.queue.append(message_id)
             return
-        r = self.replies.popleft() if self.replies else self.default
+        r = self._reply()
         if r.receipt and self.caps.receipts:
             self.emit(Received, r.start_after, message_id=message_id)
         elif r.receipt:
@@ -252,19 +291,22 @@ class MockAdapter(BaseAdapter):
         super().__init__(clock)
         self.cli = cli or MockCLI(clock)
         self.caps = self.cli.caps
-        self.pos = 0  # events up to here were read
+        self.pos: Optional[int] = None  # events up to here were read
         self.joined = False
 
     def start(self, spec: AgentSpec, session: Optional[SessionRef]) -> ProcRef:
         proc = self.cli._start(spec, session)
-        self.spec, self.proc, self.pos, self.joined = spec, proc, 0, True
+        if self.pos is None:
+            self.pos = int(proc.read_pos)
+        self.spec, self.proc, self.joined, self.cli.owner = spec, proc, True, self
         return proc
 
     def reconnect(self, proc: ProcRef) -> bool:
         self.cli.flush()
+        self.proc, self.pos, self.joined = proc, int(proc.read_pos or 0), True
         if not self.cli.alive or self.cli.pid != proc.pid:
             return False
-        self.proc, self.pos, self.joined = proc, proc.read_pos, True
+        self.cli.owner = self
         return True
 
     def send(self, message_id: str, text: str) -> None:
@@ -277,7 +319,7 @@ class MockAdapter(BaseAdapter):
         return message_id in self.cli.received if self.cli.caps.receipts else None
 
     def events(self) -> Iterator[AgentEvent]:
-        if not self.joined:
+        if not self.joined or self.pos is None:
             return
         self.cli.flush()
         again, self.cli._again = self.cli._again, 0
@@ -298,14 +340,19 @@ class MockAdapter(BaseAdapter):
         self.cli.job_end(job_id.split("/", 1)[1], exit_code=143)
         return True
 
-    def interrupt(self) -> None:
+    def interrupt(self) -> bool:
         self.cli.flush()
+        if not self.cli.interrupts:
+            return False
         if self.cli._busy:
             self.cli._pending = [p for p in self.cli._pending if not isinstance(p[2], (TurnEnded, Text, ToolEnd))]
             self.cli.emit(TurnEnded, status=TurnStatus.STOPPED)
+        return True
 
     def detach(self) -> None:
         self.joined = False
+        if self.cli.owner is self:
+            self.cli.owner = None
 
     def stop(self) -> None:
         self.cli.flush()

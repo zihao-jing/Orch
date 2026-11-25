@@ -10,11 +10,14 @@ How one event is handled (3.5)
      with an "Engine:" line, and marks the event handled. A crash before this save: the event is decided again.
   4. The engine performs the "Engine:" lines, first all others, then the transmissions, and marks each intent done.
      On restart, unfinished intents are performed again, a transmission only after `Adapter.arrived` (MSG-6).
+     After a start the engine first drains the missed events of every agent; it transmits nothing before the actions
+     of OrchStarted are done.
 
 Ids: a module makes the ids of what it creates with `new_id(module, event, n)`, n counting its own ones for that event.
 They depend only on the event, so deciding an event twice gives the same ids; the store ignores the creation of an id it
-knows (and raises if the content differs). That is how "nothing is sent twice" works, so never use random ids or a
-counter of your own. Ticks have no replay: state decides.
+knows (and raises if the content differs). The form is fixed ("x" and 12 lower-case hex digits), for every message,
+so an adapter may put it into a UUID and read it back. That is how "nothing is sent twice" works, so never use random
+ids or a counter of your own. Ticks have no replay: state decides.
 
 Holds
   - `Hold(message_id, reason)` keeps ONE message: also one that an earlier module's Send in `prior` creates. Holds and
@@ -27,6 +30,28 @@ Holds
   A Send to a `waiting` message whose id exists does not create it again; it only adds its `bypass`.
   Messages to one agent are transmitted in `seq` order; a held message does not block later ones, a held agent does.
 
+Sending (MSG-6)
+  - A message may go when it is `sendable` (waiting, no hold, sent_at 0) and its agent is not held. The store saves
+    `rendered`, `sent_at` and attempts BEFORE Adapter.send(); SendFailed sets sent_at back to 0.
+  - delivered = the CLI has it (Received). taken = its text entered the conversation: Received(taken=True) into the
+    running turn, or a TurnStarted. answered = the turn that took it went on (next output) or started.
+  - In doubt: after an Orch restart, when the CLI exited, or when its session or process was replaced, every message to
+    it that is waiting with sent_at set, or delivered but neither taken nor answered (the CLI's queue dies with it;
+    the store makes it waiting again, sent_at kept; notices too). The engine asks arrived() on the new process: True:
+    it reports Received(taken=True); False: sent_at 0, so it goes again; None: it stays and MSG-5 decides.
+
+Timers: never from before this Orch began. Frozen (SIL-4) counts from max(last_output, orch_started). Unanswered (MSG-5)
+counts from max(sent_at, checked_at, recipient.idle_since, orch_started) and stands still while the recipient writes, is
+held or retrying. The job fallback (JOB-5, also JOB_LOST) counts from max(job.ended, idle_since), never while writing.
+
+Failures: exactly one report each. Open turn: TurnEnded(error), then ProcessExited(reported=True) if the CLI is gone.
+No open turn: SessionChanged(LOST or DIFFERENT). Otherwise ProcessExited. asked=True, or a turn ended by our own
+stop() or interrupt(), is STOPPED and no failure.
+
+Routing handles every ended turn except those of the monitor and auditor and those answering HANDOVER_WRITE (in
+Turn.keys); MONITOR_REPORT is the supervisor's. A worker's reply goes to the user only if
+set(turn.triggers) == {USER_CHAT} (LAB-6), else to the critic.
+
 Who writes what: only the store changes records, and only through facts and actions. The mark after a field names
 whose events or actions change it: [fact] = adapter or engine events, [engine] = the engine itself, else the module.
 "[create]" = given by whoever creates the record, then fixed. No mark on a record = the record's docstring says it.
@@ -37,6 +62,7 @@ Turn files keep today's fields and role names (`verifier`); only here the role i
 from __future__ import annotations
 
 import hashlib
+import re
 import typing
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from enum import Enum
@@ -117,7 +143,7 @@ class Trigger(_Str):
     WORKER = "worker"
     MONITOR = "monitor"
     USER_CHAT = "user_chat"
-    JOB = "job"  # no message: the CLI woke itself (JOB-4)
+    JOB = "job"  # a job's end (JOB-4, 5)
     ORCH = "orch"
     GATE_ANSWER = "gate_answer"
 
@@ -126,12 +152,13 @@ class ErrorClass(_Str):
     TRANSIENT = "transient"  # API error, overload, rate or usage limit, network, crash: retried (REC-1)
     BILLING = "billing"
     MISSING_CLI = "missing_cli"
-    SESSION_LOST = "session_lost"  # the CLI rejects the session or its history (SES-2)
+    SESSION_LOST = "session_lost"  # a turn failed because the CLI refuses the session or its history (SES-2), also a
+    #                                prompt too long that compact() could not help
     OTHER = "other"  # unknown: treated as transient
 
 
 class Ending(_Str):
-    INTERMEDIATE = "intermediate"  # a job is running (JOB-2)
+    INTERMEDIATE = "intermediate"  # the agent has an open job (Job.open): running, or ended and not woken (JOB-2)
     FINAL = "final"
 
 
@@ -150,12 +177,12 @@ class JobState(_Str):
 
 class HoldReason(_Str):
     """Why a message waits (MSG-2). Message holds and agent holds; owners in HOLD_OWNERS."""
-    QUESTION = "question"  # message: its reply holds a question (GATE-2)
+    QUESTION = "question"  # message: its reply holds a question (GATE-2); never set when snap.night
     GATES = "gates"  # message: belongs to a held ACCEPT/REVISE, answer gates are open (MS-9)
     DRAFT = "draft"  # message: written in a discussion (DISC-1)
     TERMINAL = "terminal"  # agent: a terminal is open on it (TERM-4)
     SWITCH = "switch"  # agent: it is being switched (MOD-6)
-    TURN = "turn"  # agent: its program takes no input while running
+    TURN = "turn"  # agent: its program takes no input while running, or is compacting; also a message with when_idle
     SEND_FAILED = "send_failed"  # agent: a send failed, or it has failed with no choice left
     STOPPED = "stopped"  # agent: the user stopped it
 
@@ -232,20 +259,22 @@ class SwitchReason(_Str):
 class SwitchStep(_Str):
     """Steps of a switch; each is saved before its effect, so a restart repeats the last one (REC-7). Recovery writes
     every step with AdvanceSwitch; the effect is the engine's."""
-    PENDING = "pending"  # waits until the agent is idle with no job ("switch pending"); no effect
+    PENDING = "pending"  # waits until Snapshot.settled (asked again before OPENING, unless forced); no effect
     TESTING = "testing"  # engine: smoke-test `target`, then report SmokeResult
     HANDOVER = "handover"  # no effect; recovery has asked `handover_by` (agent id, or USER for a gate) with a Send
     OPENING = "opening"  # engine: stop the old CLI, start `target` on `new` (None: new session); SessionChanged or
-    #                      ProcessExited / AgentFailed follows
+    #                      ProcessExited / AgentFailed follows. From here on the switch cannot be replaced.
+    #                      TESTING and OPENING always call models.resolve: a stored choice has no keys
     CONFIRMING = "confirming"  # no effect; the first message went out, its answer decides
     DONE = "done"  # store: target becomes `choice`, its session the current one, `switch` becomes None
-    FAILED = "failed"  # engine: if the old CLI was stopped, start it again on `old`; store: `switch` becomes None
+    FAILED = "failed"  # engine: if the old CLI was stopped and the agent is open, start it again on `old`; store:
+    #                    `switch` becomes None. A worker closed during a switch ends it so, and is not reopened
 
 
 class SessionChange(_Str):
-    NEW = "new"  # a session was started as asked
-    RESUMED = "resumed"  # the wanted session continues
-    DIFFERENT = "different"  # the CLI returned another session than asked (SES-2)
+    NEW = "new"  # a session was started as asked; session_id may be "" and is then reported again when known
+    RESUMED = "resumed"  # opened as asked (proves nothing yet: a rejection follows as LOST)
+    DIFFERENT = "different"  # the CLI returned another session than asked (SES-2); before that turn's TurnStarted
     LOST = "lost"  # the CLI rejected the session or its history (SES-2)
     COMPACTED = "compacted"  # same id, summarised: what was given before is gone (PRM-5, 9)
 
@@ -296,12 +325,12 @@ class TextKey(_Str):
     NO_WORKERS = "no_workers"  # MSG-8, to the manager: ask the user
     # jobs and recovery, to the agent itself
     JOB_WAKEUP = "job_wakeup"  # fallback (JOB-5)
-    JOB_LOST = "job_lost"  # JOB-7
+    JOB_LOST = "job_lost"  # JOB-7; says that the job may still be running
     RETRY_CONTINUE = "retry_continue"  # after a failed try in the same session
     RESTART_CONTINUE = "restart_continue"  # after RestartSession (SIL-4)
     MESSAGE_AGAIN = "message_again"  # the unfinished message, again to the new model (MOD-6)
     SESSION_RETURN = "session_return"  # an earlier session reopened: what happened since (SES-4)
-    SESSION_FRESH = "session_fresh"  # a new session without a switch (assumption 3)
+    SESSION_FRESH = "session_fresh"  # a new session without a switch (assumption 3); the engine sends it
     # handover (SES-5)
     HANDOVER_WRITE = "handover_write"  # to the old model
     HANDOVER_REQUEST_CRITIC = "handover_request_critic"  # the critic writes a worker's instruction
@@ -313,13 +342,11 @@ class TextKey(_Str):
     PLAN_LIST_MISSING = "plan_list_missing"
     MILESTONE_START = "milestone_start"
     SILENCE_CHECK = "silence_check"  # SIL-2, 3
-    CHECKLIST_COMPLETE = "checklist_complete"  # MS-4: review, or first answer the critic
-    REVIEW_FULL = "review_full"  # PRM-9: full review text, once per session
-    REVIEW_SHORT = "review_short"
+    CHECKLIST_COMPLETE = "checklist_complete"  # MS-4: review, or first answer the critic; full or short (PRM-9): H, by
+    #                                            SessionRef.given
     REVIEW_RUBRIC_MISSING = "review_rubric_missing"
-    REVIEW_DECISION_MISSING = "review_decision_missing"
-    REVIEW_DECIDE_AGAIN = "review_decide_again"  # MS-8, 9
-    GATE_ANSWERS = "gate_answers"  # all answers in one message (GATE-4); `unsent`: what was held and not sent
+    GATE_ANSWERS = "gate_answers"  # all answers in one message (GATE-4); `unsent`: what was held and not sent;
+    #                                `decide_again`: MS-8, 9
     MILESTONE_CHANGE_REQUEST = "milestone_change_request"  # MS-10
     MILESTONE_CHANGE_UNREADABLE = "milestone_change_unreadable"
     # to the critic
@@ -329,7 +356,7 @@ class TextKey(_Str):
     JOBS_STOPPED = "jobs_stopped"  # the user closed a worker and its job
     # monitor
     MONITOR_CHECK = "monitor_check"
-    MONITOR_REPORT = "monitor_report"  # to the critic
+    MONITOR_REPORT = "monitor_report"  # supervisor to the critic
     # discussion and terminal
     DISCUSSION_APPLY = "discussion_apply"
     # reminder lines (one short line each, PRM-3)
@@ -393,12 +420,12 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.LABEL_BROKEN_PASSED: ("sender", "label", "problem"),
     TextKey.UNKNOWN_WORKER: ("to", "available"),
     TextKey.NO_WORKERS: (),
-    TextKey.JOB_WAKEUP: ("job", "exit_code"),
-    TextKey.JOB_LOST: ("job",),
+    TextKey.JOB_WAKEUP: ("jobs",),  # [{job, exit_code}]
+    TextKey.JOB_LOST: ("jobs",),
     TextKey.RETRY_CONTINUE: (),
     TextKey.RESTART_CONTINUE: (),
     TextKey.MESSAGE_AGAIN: (),
-    TextKey.SESSION_RETURN: ("since", "turns"),  # since: time; turns: the turns of the other sessions meanwhile
+    TextKey.SESSION_RETURN: ("turns_dir", "since"),  # since: time; H says where the turns from then on are
     TextKey.SESSION_FRESH: ("reason", "state_file"),
     TextKey.HANDOVER_WRITE: ("agent",),
     TextKey.HANDOVER_REQUEST_CRITIC: ("agent", "why", "assignment"),
@@ -409,12 +436,8 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.PLAN_LIST_MISSING: (),
     TextKey.MILESTONE_START: ("milestone", "title", "text", "checklist_path", "last_title"),
     TextKey.SILENCE_CHECK: ("attempt", "attempts"),
-    TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "jobs"),
-    TextKey.REVIEW_FULL: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
-    TextKey.REVIEW_SHORT: ("milestone", "title", "rubric", "checklist", "jobs"),
+    TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
     TextKey.REVIEW_RUBRIC_MISSING: ("milestone",),
-    TextKey.REVIEW_DECISION_MISSING: (),
-    TextKey.REVIEW_DECIDE_AGAIN: ("milestone", "title"),
     TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer}]; unsent:
     #                                      [{to, body}]; decide_again: milestone title or ""
     TextKey.MILESTONE_CHANGE_REQUEST: ("milestones",),  # [{id, title, text, status}]
@@ -455,13 +478,13 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.GATE_HANDOVER: ("agent", "by"),
     TextKey.ASK_JOBS_CLOSE: ("worker", "jobs"),
     TextKey.ASK_JOBS_DELETE: ("worker", "jobs"),
-    TextKey.ASK_JOB_TERMINAL: ("agent", "jobs"),
+    TextKey.ASK_JOB_TERMINAL: ("agent", "jobs"),  # jobs empty: it is writing
     TextKey.ASK_FORCE_SWITCH: ("agent", "jobs", "new_session"),
     TextKey.SMOKE_FAILED: ("agent", "choice", "why"),
     TextKey.SWITCH_PENDING: ("agent", "choice"),
     TextKey.COMMAND_REFUSED: ("why",),
     TextKey.NOTE_AGENT_FAILED: ("agent", "why"),
-    TextKey.NOTE_WAKEUP_SENT: ("worker", "job"),
+    TextKey.NOTE_WAKEUP_SENT: ("worker", "jobs"),
     TextKey.NOTE_MONITOR_FAILED: ("monitor", "worker", "why"),
     TextKey.NOTE_SWITCHED: ("agent", "choice", "new_session"),
     TextKey.NOTE_REVIEW_WITHDRAWN: ("milestone", "title"),
@@ -484,7 +507,7 @@ class TextRef:
 class Choice:
     """One way to run an agent (backend + provider + model + effort), main or backup. Made by models.resolve."""
     backend: str = ""
-    provider: str = ""  # OpenCode
+    provider: str = ""  # OpenCode; not part of the session key
     model: str = ""
     effort: str = ""
     model_id: str = ""  # its id in .orch/settings.yaml, if from there
@@ -495,19 +518,27 @@ class Choice:
 
     @property
     def session_key(self) -> str:
-        """Choices with the same key are expected to continue one session (today's Variant.session_key + provider)."""
-        urls = sorted(f"{k}={v}" for k, v in self.env.items() if k.endswith("_BASE_URL") and v)
-        return "|".join([self.backend] + ([self.provider] if self.provider else []) + urls)
+        """Choices with the same key are expected to continue one session (as today's Variant.session_key, but without
+        the user, password and query of an address)."""
+        return "|".join([self.backend] + sorted(f"{k}={v}" for k, v in self._urls().items()))
+
+    def _urls(self) -> Dict[str, str]:
+        return {k: _bare_url(v) for k, v in self.env.items() if k.endswith("_BASE_URL") and v}
+
+    def same(self, other: "Choice") -> bool:
+        """The same choice, whether or not its env and options are filled in."""
+        key = ("backend", "provider", "model", "effort", "name", "session_key")
+        return all(getattr(self, k) == getattr(other, k) for k in key)
 
     @property
     def label(self) -> str:
         return self.name or self.model_id or ":".join(x for x in (self.backend, self.model) if x)
 
     def _stored(self) -> Dict[str, Any]:
-        """As saved: env keeps only the addresses the session key needs, never keys (MOD-1). Before starting a saved
-        choice the engine calls models.resolve(choice) to fill env in again from the settings."""
+        """As saved: no options, and of env only the addresses the session key needs, so never a key (MOD-1). Before
+        starting a choice the engine calls models.resolve, which fills both in again."""
         d = {f.name: getattr(self, f.name) for f in fields(self)}
-        d["env"] = {k: v for k, v in self.env.items() if k.endswith("_BASE_URL")}
+        d["options"], d["env"] = {}, self._urls()
         return d
 
     def public(self) -> Dict[str, Any]:
@@ -530,16 +561,17 @@ class ModelInfo:
 
 @dataclass
 class SessionRef:
-    """One conversation kept by a CLI. Agent.sessions holds one per session key (SES-4)."""
+    """One conversation kept by a CLI. Agent.sessions holds one per session key (SES-4). It is always reopened in its own
+    `cwd` (some CLIs find it only there)."""
     session_id: str
     session_key: str = ""
     choice: Choice = field(default_factory=Choice)  # the choice it last ran with (REC-8); [fact]
     cwd: str = ""
     started: float = 0.0
     last_used: float = 0.0  # [fact]
-    confirmed: bool = False  # [fact] a turn in it ended ok
-    # [engine] what this session was shown -> digest, e.g. {"golden": "ab12", "review": "1", "checklist": "9f"}; from
-    # Message.given when delivered; emptied on SessionChange.COMPACTED
+    confirmed: bool = False  # [fact] a turn in it ended ok, with this session id
+    # [engine] what this session was shown -> digest, e.g. {"golden": "ab12", "review": "1"}; where only changed items
+    # are to be shown, one entry per item ({"item:<id>": digest}). From Message.given when taken; emptied on COMPACTED
     given: Dict[str, str] = field(default_factory=dict)
 
 
@@ -551,17 +583,19 @@ class ProcRef:
     endpoint: str = ""  # pipe, socket or URL
     output_file: str = ""
     stream: str = ""  # names the output `read_pos` counts in (AgentEvent.stream)
-    read_pos: int = 0  # `pos` of the last saved event; events() resumes after it
+    read_pos: str = ""  # `pos` of the last saved event that had one; events() resumes after it
 
 
 @dataclass
 class Caps:
     """What an adapter can do; the engine copies it to Agent.caps."""
-    sends_while_writing: bool = False  # False: messages wait for the turn to end (HoldReason.TURN)
+    sends_while_writing: bool = False  # False: messages wait for the turn to end (HoldReason.TURN). True needs receipts,
+    #                                    and a CLI that takes a message into the running turn or tells when it starts:
+    #                                    Claude, Codex, OpenCode True; Qwen, Qoder, Antigravity (own later turn) False
     reconnects: bool = False  # Orch may close and reconnect to the same process
     job_record: bool = False  # jobs() and job events are reliable
-    wakes_itself: bool = False  # a job's end starts a turn (JOB-4)
-    receipts: bool = False  # reports Received; otherwise send() returning counts as delivered
+    wakes_itself: bool = False  # a job's end starts a turn (JOB-4); False for Codex and Qwen
+    receipts: bool = False  # reports Received; otherwise the engine reports it when send() returns
     shares_terminal: bool = False  # a terminal can join the open session (TERM-4)
     compacts: bool = False
     stops_jobs: bool = False  # stop_job() ends one job without ending the CLI
@@ -577,17 +611,22 @@ class Job:
     state: JobState = JobState.RUNNING  # LOST: [supervisor]
     exit_code: Optional[int] = None
     ended: float = 0.0
-    woke: bool = False  # a turn of the agent started after it ended
+    woke: bool = False  # its end reached its agent: TurnStarted, JobNoticed
     fallback_sent: bool = False  # [supervisor] WakeWorker was sent (JOB-5, JOB-7), once
-    stopped_by_user: bool = False  # [workers], [engine] (stop agents): JOB-7 does not wake
+    stopped_by_user: bool = False  # [workers], [terminal], [engine] (stop agents): JOB-7 does not wake
     last_progress: float = 0.0  # last sign of progress, where the CLI shows one
     reported: bool = False  # [supervisor] no progress was reported (JOB-6)
+
+    @property
+    def open(self) -> bool:
+        """Running, or its end has not reached its agent yet (and the user did not stop it)."""
+        return self.state == JobState.RUNNING or not (self.woke or self.stopped_by_user)
 
 
 @dataclass
 class Message:
     """One message (MSG-3). Fixed by whoever creates it: id, sender, recipient, body, text, needs_answer, trigger,
-    turn, gates. The rest is written as marked."""
+    turn, gates, continues, when_idle. The rest is written as marked."""
     id: str
     sender: str = ORCH  # agent id, USER or ORCH
     recipient: str = ""  # agent id or USER
@@ -597,6 +636,12 @@ class Message:
     trigger: Trigger = Trigger.ORCH
     turn: str = ""  # the turn (Turn.id) whose reply holds it
     gates: List[str] = field(default_factory=list)  # gates whose answers it carries: they take effect with it
+    continues: str = ""  # RETRY_CONTINUE, RESTART_CONTINUE, MESSAGE_AGAIN: the unfinished turn (Turn.id) it lets go on.
+    #                      Whichever turn takes it in also gets that turn's started_by, joined, jobs, triggers, keys
+    #                      and draft, and not this message's own trigger and key
+    when_idle: bool = False  # goes out only while the recipient has no open turn, shown as held by TURN: the discussion
+    #                          apply message, so it never joins a draft turn
+    jobs: List[str] = field(default_factory=list)  # [engine] jobs whose end it reports (WakeWorker.job_ids)
     created: float = 0.0  # [engine]
     seq: int = 0  # [engine] order of creation in the run
     status: MessageStatus = MessageStatus.WAITING  # [fact], [engine]
@@ -604,19 +649,25 @@ class Message:
     bypass: List[HoldReason] = field(default_factory=list)  # from Send.bypass
     drop: Optional[DropReason] = None  # set: closed for good, status failed
     attempts: int = 0  # [engine] transmissions
-    sent_at: float = 0.0  # [engine] the last one
+    sent_at: float = 0.0  # [engine] the last one, saved before send(); 0: never, or it failed
     delivered_at: float = 0.0  # [fact]
+    taken_at: float = 0.0  # [fact] when its text entered the conversation
     answered_at: float = 0.0  # [fact]
     reply_turn: str = ""  # [fact] the turn that took it in
     session_id: str = ""  # [fact] the session it reached (SES-6)
     checked_at: float = 0.0  # [engine] when Resend last asked whether it arrived (MSG-5)
     error: str = ""  # [engine] why the last transmission failed
     rendered: str = ""  # [engine] the exact text sent, reminder included; a resend uses it again
-    given: Dict[str, str] = field(default_factory=dict)  # [engine] Rendered.given; into SessionRef.given when delivered
+    given: Dict[str, str] = field(default_factory=dict)  # [engine] Rendered.given; into SessionRef.given when taken
 
     @property
     def key(self) -> Optional[TextKey]:
         return self.text.key if self.text else None
+
+    @property
+    def sendable(self) -> bool:
+        """It may go, unless its agent is held (or it is when_idle)."""
+        return self.status == MessageStatus.WAITING and not self.holds and self.drop is None and not self.sent_at
 
     @property
     def open(self) -> bool:
@@ -639,7 +690,8 @@ class RetryState:
     attempt: int = 0  # tries made with the current choice since it last worked
     until: float = 0.0  # when to try next
     error: ErrorClass = ErrorClass.TRANSIENT
-    why: str = ""  # the provider's message
+    why: str = ""  # the provider's message, redacted
+    turn: str = ""  # the unfinished turn, for Message.continues
     tried: List[str] = field(default_factory=list)  # Choice.label of the choices that failed
 
 
@@ -664,6 +716,7 @@ class Switch:
     handover_message: str = ""  # the id of the upper level's own message used as the first message
     first_message: str = ""  # message id whose answer confirms the switch
     unfinished: List[str] = field(default_factory=list)  # message ids to send again after it
+    turn: str = ""  # the unfinished turn, for Message.continues
     error: str = ""
 
 
@@ -677,7 +730,7 @@ class Agent:
     state_file: str = ""  # its state.md (SaveNotes)
     fresh_session: str = ""  # config: "compact", "new", "never" at a milestone start (assumption 3)
     lifecycle: Lifecycle = Lifecycle.OPEN  # [workers]
-    status: AgentStatus = AgentStatus.IDLE  # [fact]; FAILED: [recovery]; CLOSED: [workers]
+    status: AgentStatus = AgentStatus.IDLE  # the store derives it: Snapshot.status_of
     choice: Choice = field(default_factory=Choice)  # the current one; [recovery] (switch done)
     choices: List[Choice] = field(default_factory=list)  # main first, then backups in order; [engine] from config
     actual_model: str = ""  # [fact] MOD-5
@@ -693,7 +746,7 @@ class Agent:
     idle_since: float = 0.0  # [fact]; 0 when writing
     last_output: float = 0.0  # [fact]
     tools: List[str] = field(default_factory=list)  # [fact] ids of the tool calls running now
-    failed_why: str = ""  # [recovery]
+    failed_why: str = ""  # [recovery] MarkFailed, never ""; "" again when a turn ended ok
     retry: Optional[RetryState] = None  # [recovery]
     switch: Optional[Switch] = None  # [recovery]
     frozen_restart: float = 0.0  # [supervisor] SIL-4: restarted once in this turn; [fact] 0 after a turn ended ok
@@ -730,6 +783,7 @@ class Refusal(_Str):
     NOT_OPEN = "not_open"  # no discussion, terminal or switch to end
     TERMINAL_OPEN = "terminal_open"
     GATE_OPEN = "gate_open"  # e.g. night mode while a question is open
+    SWITCHING = "switching"  # the switch under way is past the point where it can be replaced
     FILE_CHANGED = "file_changed"
     NOT_POSSIBLE = "not_possible"  # the CLI cannot do it
 
@@ -790,10 +844,13 @@ class Turn:
     ended: float = 0.0
     status: TurnStatus = TurnStatus.RUNNING
     started_by: List[str] = field(default_factory=list)  # ids of the messages it began with
-    joined: List[str] = field(default_factory=list)  # ids of the messages that came in while it ran
-    jobs: List[str] = field(default_factory=list)  # ids of the ended jobs it woke for
-    triggers: List[Trigger] = field(default_factory=list)  # of started_by, or [JOB]; what started it (LAB-6)
+    joined: List[str] = field(default_factory=list)  # ids of the messages taken in while it ran
+    jobs: List[str] = field(default_factory=list)  # ids of the ended jobs it learned of, at its start or while it ran
+    # of all of started_by and joined, plus JOB if `jobs` is not empty; an id the store does not know is the user's.
+    # With no message and no job: USER_CHAT if a terminal is open on the agent, else JOB (LAB-6)
+    triggers: List[Trigger] = field(default_factory=list)
     keys: List[TextKey] = field(default_factory=list)  # text keys of started_by and joined (what it answers)
+    draft: bool = False  # it ran while a discussion was open (its apply turn excepted); stays so after the discussion
     text: str = ""
     reply: Optional[Reply] = None  # set when it ended ok
     ending: Optional[Ending] = None  # set when it ended (JOB-2)
@@ -813,7 +870,9 @@ class Answer:
 @dataclass
 class Gate:
     """Something on the dashboard that waits for the user. Opened by: question, pause, operational as in OpenGate;
-    plan, milestone, milestone_change by milestones. Closed by gates (answers) or its opener (withdrawn, solved)."""
+    plan, milestone, milestone_change by milestones. Closed by gates (answers) or its opener (withdrawn, solved).
+    Night (Snapshot.night): no question, plan or milestone gate opens; the manager's own recommendation, or the
+    approval, acts at once and is recorded (RecordDecision)."""
     id: str  # new_id; for a `cause`: "op-<cause>-<agent>", so it opens once
     kind: GateKind = GateKind.QUESTION
     text: str = ""  # an agent's words
@@ -876,7 +935,6 @@ class Milestone:
     refreshed: List[str] = field(default_factory=list)  # agents whose session start was handled for this milestone
     started: float = 0.0
     ended: float = 0.0
-    rounds: int = 0  # [engine] worker replies delivered while current
 
 
 @dataclass
@@ -887,7 +945,6 @@ class GoldenBoard:
     chars: int = 0
     words: List[str] = field(default_factory=list)  # manager-only words found (leak check)
     leak_told: str = ""  # [golden] digest the manager was told about
-    size_told: int = 0  # [golden] chars at the last size warning
 
 
 @dataclass
@@ -914,7 +971,7 @@ class Watch:
     """What the monitor last said about a worker (REC-10). [supervisor]"""
     worker: str
     checked_at: float = 0.0
-    asked: str = ""  # message id of the check under way
+    asked: str = ""  # message id of the check under way; at most one for all workers
     health: Optional[Health] = None
     reported: Optional[Health] = None  # the status last told to the critic
     reported_at: float = 0.0
@@ -947,6 +1004,7 @@ class Settings:
     job_quiet_after: float = 3600.0  # JOB-6
     return_after: float = 18000.0  # REC-5: try the main choice again
     golden_limit: int = 8000
+    compact_wait: float = 600.0  # how long compact() may hold an agent
     pass_score: Optional[float] = None
     approve_plan: bool = True
     approve_milestones: bool = True
@@ -974,9 +1032,10 @@ class Snapshot:
     agents: Dict[str, Agent] = field(default_factory=dict)  # all, deleted ones too
     messages: Dict[str, Message] = field(default_factory=dict)  # in seq order: every open or held one, those of the
     #                                              current turns and switches, the newest 300 others; the rest: ledger
-    turns: Dict[str, Turn] = field(default_factory=dict)  # by agent: its current or last turn
+    turns: Dict[str, Turn] = field(default_factory=dict)  # by agent: its current or last turn (the store also keeps
+    #                                                          those an open message `continues`)
     gates: Dict[str, Gate] = field(default_factory=dict)  # open, closed but answer not sent, newest 50 others
-    jobs: Dict[str, Job] = field(default_factory=dict)  # running, ended but not woke, lost, newest 50 others
+    jobs: Dict[str, Job] = field(default_factory=dict)  # every open one, newest 50 others
     milestones: List[Milestone] = field(default_factory=list)  # only store of milestones (MS-15)
     checklist: Checklist = field(default_factory=Checklist)  # of the current milestone; not saved, read anew
     golden: GoldenBoard = field(default_factory=GoldenBoard)
@@ -986,8 +1045,8 @@ class Snapshot:
     catalog: List[ModelInfo] = field(default_factory=list)  # [engine]
     paused: bool = False  # by OpenGate and CloseGate only
     finished: bool = False  # [milestones] MS-14
-    night: bool = False  # [engine] (SetNight)
-    rounds: int = 0  # [supervisor] SIL-5
+    night: bool = False  # [engine] (SetNight); see Gate
+    rounds: int = 0  # [supervisor] SIL-5: worker replies delivered to the critic
     silence: Silence = field(default_factory=Silence)
     orch_started: float = 0.0  # [engine] when this Orch process began
 
@@ -1014,6 +1073,28 @@ class Snapshot:
     def running_jobs(self, agent: str) -> List[Job]:
         return [j for j in self.jobs.values() if j.agent == agent and j.state == JobState.RUNNING]
 
+    def open_jobs(self, agent: str) -> List[Job]:
+        return [j for j in self.jobs.values() if j.agent == agent and j.open]
+
+    def status_of(self, agent: str) -> AgentStatus:
+        """What the store writes into Agent.status after every event."""
+        a, t = self.agents[agent], self.turns.get(agent)
+        if not a.is_open:
+            return AgentStatus.CLOSED
+        if a.failed_why:
+            return AgentStatus.FAILED
+        if t is not None and t.status == TurnStatus.RUNNING:
+            return AgentStatus.WRITING
+        return AgentStatus.WAITING_JOB if self.running_jobs(agent) else AgentStatus.IDLE
+
+    def settled(self, agent: str) -> bool:
+        """Nothing is under way with it: no open turn, no open job, no message sent and unanswered. For a pending
+        switch, RefreshSession, compact() and silence."""
+        t = self.turns.get(agent)
+        writing = self.agents[agent].status == AgentStatus.WRITING or (t and t.status == TurnStatus.RUNNING)
+        return not (writing or self.open_jobs(agent)
+                    or any(m.recipient == agent and m.open and m.sent_at for m in self.messages.values()))
+
     def open_gates(self, answer_only: bool = False) -> List[Gate]:
         return [g for g in self.gates.values() if g.is_open and (g.is_answer_gate or not answer_only)]
 
@@ -1022,13 +1103,13 @@ class Snapshot:
                 if m.recipient == agent and m.status == MessageStatus.WAITING and m.drop is None]
 
     def drafting(self, agent: str) -> bool:
-        """Its current or last turn is part of a discussion: what it writes to others is a draft, and its question,
-        pause and decision have no effect (DISC-1, assumption 4). False for the reply to the apply message."""
+        """Its current or last turn is part of a discussion, also of one that ended while it wrote: what it writes to
+        others is a draft, and its question, pause and decision have no effect (DISC-1, assumption 4). False for the
+        reply to the apply message."""
         d, t = self.discussions.get(agent), self.turns.get(agent)
-        if d is None:
+        if d and t and d.phase == DiscussionPhase.APPLYING and d.apply_message in t.started_by + t.joined:
             return False
-        return not (d.phase == DiscussionPhase.APPLYING and t is not None
-                    and d.apply_message in t.started_by + t.joined)
+        return d is not None or (t is not None and t.draft)
 
 
 # ------------------------------------------------------------------------------------------------------- events
@@ -1047,11 +1128,13 @@ class Event:
 
 @dataclass(frozen=True)
 class AgentEvent(Event):
-    """Reported by an adapter. `stream` names the output (session id or file) `pos` counts in. `pos` is where reading
-    resumes after this event. `uid` must be given when one record yields two events of one type, or when the source
-    has no order (e.g. "job:7:ended"); it must be the same on replay."""
+    """Reported by an adapter (the engine too reports Received, with no pos). `stream` names the output (session id or
+    file) `pos` belongs to, and never names two different contents. `pos` is opaque: where reading resumes after this
+    event (a byte offset, "<turn id>/<item id>", ...); "" leaves the read position as it is. `uid` is the same on
+    replay, and needed when one record yields several events (all but the last carry the record's START as pos) or
+    the source has no order (e.g. "job:7:ended"). Reporting an old event again with its key does nothing."""
     stream: str = ""
-    pos: int = 0
+    pos: str = ""
     uid: str = ""
 
     @property
@@ -1061,22 +1144,35 @@ class AgentEvent(Event):
 
 @dataclass(frozen=True)
 class Received(AgentEvent):
-    """The CLI has taken a message in. Store: message delivered, session_id; during a turn also Turn.joined, reply_turn
-    (then `answered` with the next output of the agent); needs_answer False ends here."""
+    """taken False: the CLI has the message (Claude `queued`, OpenCode inbox.enqueued). Store: delivered, session_id.
+    taken True: its text entered the conversation (Claude's echo with our id, Codex's userMessage item, OpenCode
+    inbox.delivered): taken_at too, and in an open turn Turn.joined, triggers, keys and reply_turn; `answered` with the
+    next output. For the message that starts a turn, TurnStarted says that, not this."""
+    message_id: str = ""
+    taken: bool = False
+
+
+@dataclass(frozen=True)
+class Discarded(AgentEvent):
+    """The CLI gave up a message it had received (Claude `cancelled`). Store: in doubt, unless taken or answered."""
     message_id: str = ""
 
 
 @dataclass(frozen=True)
 class TurnStarted(AgentEvent):
-    """Store: new Turn, agent writing; started_by = `message_ids`, or else the messages received since its last turn;
-    those become answered (and delivered); the agent's ended jobs get woke; retry keeps."""
+    """Exactly one per TurnEnded. A wake turn starts with its first own output, not with Claude's `init`. Empty results,
+    /compact, and foreground tasks yield no turn or job event.
+    Store: while a turn is open: only its message_ids join it. Else a new Turn: started_by = `message_ids`, or else the
+    messages received and not taken; and those taken while no turn was open. They become delivered, taken, answered.
+    Turn.jobs = Message.jobs of these, and, if caps.wakes_itself, every ended job of the agent not yet woke; they get
+    woke. retry keeps."""
     message_ids: Tuple[str, ...] = ()  # where the CLI tells
 
 
 @dataclass(frozen=True)
 class Text(AgentEvent):
-    """Output, as a delta, for the live view. Progress: Text, ToolStart, ToolEnd may repeat and are not saved one by
-    one. Store: last_output."""
+    """Output, as a delta, for the live view; "" is bare progress (e.g. the CLI's own API retry). Progress: Text,
+    ToolStart, ToolEnd may repeat and are not saved one by one. Store: last_output."""
     text: str = ""
 
 
@@ -1101,22 +1197,29 @@ class JobStarted(AgentEvent):
 
 @dataclass(frozen=True)
 class JobEnded(AgentEvent):
-    """Store: state ended (lost: the CLI says it ended without a result), exit_code, ended; woke = noticed."""
+    """Store: state ended (lost: it ended without a result), exit_code, ended. A job its CLI stopped at a time limit
+    has ended, not lost."""
     job_id: str = ""
     exit_code: Optional[int] = None
     lost: bool = False
-    noticed: bool = False  # the CLI told the turn that was running: no new turn will start for it
+
+
+@dataclass(frozen=True)
+class JobNoticed(AgentEvent):
+    """The end of the job was told to the turn that is running: no new turn will start for it. Store: woke, and the job
+    into the open Turn's jobs; no turn open: nothing."""
+    job_id: str = ""
 
 
 @dataclass(frozen=True)
 class TurnEnded(AgentEvent):
-    """Store: closes the Turn (opens one first if none is), `ending` by the job record (the engine stores JobsChecked
-    just before), agent idle or waiting_job, tools cleared; on ok: Turn.reply (labels.parse), the session confirmed,
-    retry None, status failed cleared."""
+    """Store: closes the Turn (opens one first if none is), `ending` by Snapshot.open_jobs (the engine stores JobsChecked
+    just before, except while catching up), tools cleared, idle_since; on ok: Turn.reply (labels.parse), the session
+    confirmed (if it is the one asked for), retry None, failed_why cleared."""
     text: str = ""
     status: TurnStatus = TurnStatus.OK
     error: Optional[ErrorClass] = None
-    detail: str = ""  # the CLI's error text
+    detail: str = ""  # the CLI's error text, redacted as it is stored
     retry_after: float = 0.0  # seconds, when the provider says
     session_id: str = ""  # as reported; a different one than asked is also reported as SessionChanged
     meta: Dict[str, Any] = field(default_factory=dict)  # costs and tokens, as in today's turn files
@@ -1124,8 +1227,9 @@ class TurnEnded(AgentEvent):
 
 @dataclass(frozen=True)
 class SessionChanged(AgentEvent):
-    """Store: NEW/RESUMED: Agent.sessions and session_key of the running choice (a switch: Switch.new until done).
-    COMPACTED: `given` emptied. DIFFERENT, LOST: nothing; recovery decides."""
+    """The adapter reports NEW or RESUMED itself once the process is up, with uid "start:<pid>" (then "session:<id>" when
+    a NEW one's id comes later). Store: NEW/RESUMED: Agent.sessions and session_key of the running choice (a switch:
+    Switch.new until done), never `confirmed`. COMPACTED: `given` emptied. DIFFERENT, LOST: nothing; recovery decides."""
     session_id: str = ""
     change: SessionChange = SessionChange.NEW
     detail: str = ""
@@ -1133,17 +1237,20 @@ class SessionChanged(AgentEvent):
 
 @dataclass(frozen=True)
 class ModelReported(AgentEvent):
-    """Store: actual_model."""
+    """What the CLI says it runs, also when it silently fell back to another. Store: actual_model."""
     model: str = ""
 
 
 @dataclass(frozen=True)
 class ProcessExited(AgentEvent):
-    """The CLI is gone. Store: proc None; an open turn ends with error transient (detail); running jobs stay until
-    the next JobsChecked. Reported once, also when it is found dead at reconnect."""
+    """The CLI is gone (events() checks pid and start time). Reported once, also when it is found dead at reconnect; an
+    open turn was ended by a TurnEnded just before (STOPPED if asked, else error).
+    Store: proc None if `stream` is still its stream; messages in doubt (see Sending). Engine: if a job was running,
+    JobsChecked(()) follows: the supervisor marks it lost and wakes the agent, recovery does nothing."""
     exit_code: Optional[int] = None
     detail: str = ""
     asked: bool = False  # Orch or the user stopped it: not a failure
+    reported: bool = False  # the event before it already told the failure: recovery does nothing
 
 
 @dataclass(frozen=True)
@@ -1173,15 +1280,16 @@ class Reconnected(EngineEvent):
 
 @dataclass(frozen=True)
 class JobsChecked(EngineEvent):
-    """Adapter.jobs(), taken before each TurnEnded, after a reconnect, and every minute while a job runs.
-    Store: adds missing jobs, takes over ended states. A job recorded as running and not in `jobs` is left to the
-    supervisor (MarkLost)."""
+    """Adapter.jobs(), taken before each TurnEnded, every minute while a job runs, and after a reconnect once, when all
+    missed events were read (until then JobStarted and JobEnded alone count). Always taken after all available events
+    were read. Store: adds missing jobs, takes over ended states. A job recorded as running and not in `jobs` is left
+    to the supervisor (MarkLost)."""
     jobs: Tuple[Job, ...] = ()
 
 
 @dataclass(frozen=True)
 class SendFailed(EngineEvent):
-    """A transmission raised an error. Store: message.error; it stays waiting."""
+    """A transmission raised an error. Store: message.error, sent_at 0; it stays waiting."""
     message_id: str = ""
     error: ErrorClass = ErrorClass.TRANSIENT
     detail: str = ""
@@ -1213,7 +1321,10 @@ class Said:
 
 @dataclass(frozen=True)
 class TerminalRead(EngineEvent):
-    """What was said in a terminal, read after it closed (TERM-2). Reported after the CLI is open again."""
+    """What was said in a terminal, read after it closed (TERM-2). Reported after the CLI is open again. A shared
+    terminal's turns were ordinary turns already (routing sends their replies to the user), so there `said` has only
+    the user's lines. The terminal module records each reply in `said` with a ToUser, and tells the critic what the
+    user said to a worker (DIRECT_MESSAGE_NOTICE)."""
     said: Tuple[Said, ...] = ()
 
 
@@ -1276,15 +1387,10 @@ class WorkerDelete(UserCommand):
 
 
 @dataclass(frozen=True)
-class JobStop(UserCommand):
-    handler: ClassVar[str] = "workers"
-    job_id: str = ""
-
-
-@dataclass(frozen=True)
 class ChooseModel(UserCommand):
     """A model of the catalog (model_id + effort), or one of the agent's own choices by name (backup = its name, ""
-    with no model_id = the main one). force without confirmed: CommandReply asks first (MOD-6)."""
+    with no model_id = the main one). force without confirmed: CommandReply asks first (MOD-6). Choosing the current one
+    again ends the pending switch. Refused (SWITCHING) from SwitchStep.OPENING on."""
     handler: ClassVar[str] = "models"
     model_id: str = ""
     effort: str = ""
@@ -1298,17 +1404,6 @@ class ForceSwitch(UserCommand):
     """Do the pending switch now."""
     handler: ClassVar[str] = "recovery"
     confirmed: bool = False
-
-
-@dataclass(frozen=True)
-class CancelSwitch(UserCommand):
-    handler: ClassVar[str] = "recovery"
-
-
-@dataclass(frozen=True)
-class RetryNow(UserCommand):
-    """Skip the wait before the next try."""
-    handler: ClassVar[str] = "recovery"
 
 
 @dataclass(frozen=True)
@@ -1332,7 +1427,8 @@ class DiscussionEnd(UserCommand):
 @dataclass(frozen=True)
 class TerminalOpen(UserCommand):
     """From `orch terminal`. The reply's data has {"command": [...], "cwd": "..."}; `orch terminal` fills in the
-    environment itself (models.resolve), so no key passes the dashboard. stop_job: the user agreed that it ends a running job (TERM-5)."""
+    environment itself (models.resolve), so no key passes the dashboard. On a writing agent or one with a job it asks
+    first; stop_job: the user agreed that the turn or job ends (TERM-5)."""
     handler: ClassVar[str] = "terminal"
     stop_job: bool = False
 
@@ -1435,8 +1531,9 @@ class Action:
 
 @dataclass(frozen=True)
 class Send(Action):
-    """Store: create the message (a known id: only add `bypass`). Engine: transmit it once nothing holds it. A message
-    to USER is delivered by being stored. Its subclasses are Sends too: holds and drops work on them alike."""
+    """Store: create the message (a known id: only add `bypass`). Engine: transmit it once nothing holds it ("Sending" at
+    the top). A message to USER is delivered by being stored. Its subclasses are Sends too: holds and drops work on
+    them alike."""
     emitters: ClassVar[Tuple[str, ...]] = MODULE_ORDER + ("engine",)
     message: Message = field(default_factory=lambda: Message(""))
     bypass: Tuple[HoldReason, ...] = ()  # agent holds it passes
@@ -1444,7 +1541,7 @@ class Send(Action):
 
 @dataclass(frozen=True)
 class Tell(Send):
-    """A notice to an agent: needs_answer is False."""
+    """A notice to an agent: needs_answer is False. Sent at once like any other (MSG-9)."""
 
 
 @dataclass(frozen=True)
@@ -1469,10 +1566,11 @@ class Reject(Send):
 
 @dataclass(frozen=True)
 class WakeWorker(Send):
-    """JOB-5 (JOB_WAKEUP) and JOB-7 (JOB_LOST). Store: Job.fallback_sent. Engine: as Send; reopens the session first if
-    the process is gone."""
+    """JOB-5 (JOB_WAKEUP) and JOB-7 (JOB_LOST), one for all its jobs that wait; both only while the jobs are not woke.
+    Store: Job.fallback_sent, Message.jobs = job_ids. Engine: as Send; reopens the session first if the process is
+    gone."""
     emitters: ClassVar[Tuple[str, ...]] = ("supervisor",)
-    job_id: str = ""
+    job_ids: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1515,9 +1613,9 @@ class Drop(Action):
 
 @dataclass(frozen=True)
 class Resend(Action):
-    """Store: checked_at. Engine: ask arrived(): True: store it as delivered, send nothing; False: transmit `rendered`
-    again; None: transmit only if if_unknown. After a restart the engine acts as with if_unknown False and leaves the
-    rest to MSG-5."""
+    """Store: checked_at. Engine: ask arrived(): True: report Received, send nothing; False: transmit `rendered` again;
+    None: transmit only if if_unknown: the supervisor's (MSG-5) says True; in doubt after a restart the engine acts as
+    with False and leaves the rest to MSG-5."""
     emitters: ClassVar[Tuple[str, ...]] = ("supervisor", "recovery")
     message_id: str = ""
     if_unknown: bool = False
@@ -1550,8 +1648,10 @@ class OpenGate(Action):
 @dataclass(frozen=True)
 class CloseGate(Action):
     """Store: closed, answer or withdrawn; with no gate left open, paused ends (GATE-6). The answers of answer
-    gates take effect only with the Send whose message.gates names them (gates emits it when the last one is
-    answered; milestones reads it in `prior`)."""
+    gates take effect only with the Send whose message.gates names them (gates emits it once no answer gate is open and
+    an answer is unsent, on Tick too; milestones reads it in `prior`). Except milestone_change: its approval takes
+    effect with its CloseGate: milestones reads that in `prior`, withdraws the open plan or milestone gate (MS-13) and
+    applies the list."""
     emitters: ClassVar[Tuple[str, ...]] = ("gates", "milestones", "recovery")
     gate_id: str = ""
     answer: Optional[Answer] = None
@@ -1568,8 +1668,9 @@ class HoldDecision(Action):
 
 @dataclass(frozen=True)
 class RecordDecision(Action):
-    """Engine: one entry in the decisions register (gate answers; night mode's own recommendation)."""
-    emitters: ClassVar[Tuple[str, ...]] = ("gates",)
+    """Engine: one entry in the decisions register (gate answers; night mode's own recommendation, and from milestones
+    the plans and milestones approved by night)."""
+    emitters: ClassVar[Tuple[str, ...]] = ("gates", "milestones")
     text: str = ""
     by: str = USER
     source: str = ""  # gate id or turn
@@ -1586,7 +1687,8 @@ class Retry(Action):
 
 @dataclass(frozen=True)
 class StartSwitch(Action):
-    """Store: Agent.switch = switch (replaces a pending one). Engine: the effect of its step."""
+    """Store: Agent.switch = switch (replaces one not yet OPENING); target.same(Agent.choice) and a USER switch: None
+    (the pending one is ended). Engine: the effect of its step. Recovery lifts SWITCH holds an ended switch left."""
     emitters: ClassVar[Tuple[str, ...]] = ("models", "recovery")
     switch: Switch = field(default_factory=lambda: Switch(""))
 
@@ -1600,7 +1702,8 @@ class AdvanceSwitch(Action):
 
 @dataclass(frozen=True)
 class RestartSession(Action):
-    """Engine: stop the agent's CLI if it runs, open its saved session again with its choice (no second CLI ever).
+    """Engine: stop the agent's CLI if it runs, drain its events, open its saved session again with its choice (no second
+    CLI ever). Recovery lets the stopped turn go on (RESTART_CONTINUE).
     Store: frozen_restart = now if `frozen`."""
     emitters: ClassVar[Tuple[str, ...]] = ("supervisor", "recovery")
     agent: str = ""
@@ -1609,8 +1712,9 @@ class RestartSession(Action):
 
 @dataclass(frozen=True)
 class RefreshSession(Action):
-    """Assumption 3. Engine: compact the idle agent's session ("compact"; a new one if it cannot), or start
-    a "new" one."""
+    """Assumption 3, for a settled agent. Engine: if it still is, compact its session ("compact"; a new one if it
+    cannot), or start a "new" one and send SESSION_FRESH. From compact() on it holds the agent (TURN) until
+    SessionChanged(COMPACTED), the process's end or Settings.compact_wait."""
     emitters: ClassVar[Tuple[str, ...]] = ("milestones",)
     agent: str = ""
     mode: str = "compact"
@@ -1644,7 +1748,7 @@ class FailAgent(Action):
 
 @dataclass(frozen=True)
 class MarkFailed(Action):
-    """Nothing is left to try. Store: status failed, failed_why. Recovery adds the notice or gate (REC-3)."""
+    """Nothing is left to try. Store: failed_why (so status failed). Recovery adds the notice or gate (REC-3)."""
     emitters: ClassVar[Tuple[str, ...]] = ("recovery",)
     agent: str = ""
     why: str = ""
@@ -1652,14 +1756,16 @@ class MarkFailed(Action):
 
 @dataclass(frozen=True)
 class AddWorker(Action):
-    """Store: adds the agent. Engine: opens its CLI with the first message."""
+    """Store: adds the agent. Engine: config.add_worker (its agent.yaml, the source of its config, copied from `like`);
+    its CLI opens with the first message."""
     emitters: ClassVar[Tuple[str, ...]] = ("workers",)
     agent: Agent = field(default_factory=lambda: Agent(""))
+    like: str = ""  # the worker it is set up like
 
 
 @dataclass(frozen=True)
 class SetLifecycle(Action):
-    """Store: lifecycle and status. Engine: close or delete: stop the CLI once no job runs (or at once after StopJob);
+    """Store: lifecycle. Engine: close or delete: stop the CLI once no job runs (or at once after StopJob);
     open: reopen the saved session with the next message."""
     emitters: ClassVar[Tuple[str, ...]] = ("workers",)
     agent: str = ""
@@ -1669,13 +1775,13 @@ class SetLifecycle(Action):
 @dataclass(frozen=True)
 class StopJob(Action):
     """Store: stopped_by_user. Engine: adapter.stop_job."""
-    emitters: ClassVar[Tuple[str, ...]] = ("workers",)
+    emitters: ClassVar[Tuple[str, ...]] = ("workers", "terminal")
     job_id: str = ""
 
 
 @dataclass(frozen=True)
 class MarkLost(Action):
-    """JOB-7. Store: state lost."""
+    """JOB-7. Store: state lost, ended = now. The process itself may still run."""
     emitters: ClassVar[Tuple[str, ...]] = ("supervisor",)
     job_id: str = ""
 
@@ -1689,7 +1795,7 @@ class ReportJob(Action):
 
 @dataclass(frozen=True)
 class CountRound(Action):
-    """SIL-5, when a worker's reply is delivered to the critic. Store: rounds + 1 (reset: 0) and the milestone's."""
+    """SIL-5, when a worker's reply is delivered to the critic. Store: rounds + 1 (reset: 0)."""
     emitters: ClassVar[Tuple[str, ...]] = ("supervisor",)
     message_id: str = ""
     reset: bool = False
@@ -1710,7 +1816,8 @@ class SetWatch(Action):
 
 @dataclass(frozen=True)
 class SetMilestones(Action):
-    """Store: the whole list (also rubric, score, accepted, refreshed, ...). Ids never disappear (MS-12)."""
+    """Store: the whole list (also rubric, score, accepted, refreshed, ...), except held_decision, and `notified` of a
+    milestone with a NotifyReviewReady of the same event: those stay as stored. Ids never disappear (MS-12)."""
     emitters: ClassVar[Tuple[str, ...]] = ("milestones",)
     milestones: Tuple[Milestone, ...] = ()
 
@@ -1723,7 +1830,7 @@ class SetFinished(Action):
 
 @dataclass(frozen=True)
 class SetGolden(Action):
-    """Store: leak_told, size_told of `golden`."""
+    """Store: leak_told of `golden`."""
     emitters: ClassVar[Tuple[str, ...]] = ("golden",)
     golden: GoldenBoard = field(default_factory=GoldenBoard)
 
@@ -1738,7 +1845,7 @@ class SaveNotes(Action):
 
 @dataclass(frozen=True)
 class SetDiscussion(Action):
-    """Store: discussions[agent] (None: ended)."""
+    """Store: discussions[agent] (None: ended); a running turn keeps Turn.draft."""
     emitters: ClassVar[Tuple[str, ...]] = ("discussion",)
     agent: str = ""
     discussion: Optional[Discussion] = None
@@ -1806,7 +1913,7 @@ class AgentSpec:
     choice: Choice = field(default_factory=Choice)  # resolved: env complete
     cwd: str = ""
     system_prompt: str = ""
-    run_dir: str = ""  # the adapter keeps its pipe and output file in run_dir/cli/<agent>/
+    run_dir: str = ""  # the adapter keeps its pipe, output file and pid file in run_dir/cli/<agent>/
 
 
 class Adapter(Protocol):
@@ -1814,35 +1921,43 @@ class Adapter(Protocol):
     caps: Caps
 
     def start(self, spec: AgentSpec, session: Optional[SessionRef]) -> ProcRef:
-        """Open the CLI on the session (None: a new one). SessionChanged follows as an event. May raise."""
+        """Open the CLI on the session (None: a new one), in spec.cwd. First ends or joins a CLI an earlier start left
+        (Orch died before saving its ProcRef), found by the pid file. SessionChanged follows as an event. May raise."""
 
     def reconnect(self, proc: ProcRef) -> bool:
-        """Join the running process after a restart; False: it is gone."""
+        """Join the running process after a restart; False: it is gone, but events() still gives everything after
+        proc.read_pos and ends with ProcessExited. The engine drains events() before start()."""
 
     def send(self, message_id: str, text: str) -> None:
         """Hand the text to the CLI now; returns when the CLI's input has taken it. Raises on failure."""
 
     def arrived(self, message_id: str) -> Optional[bool]:
-        """Is it in the session? None: cannot tell."""
+        """Does the CLI have it: in its queue or the conversation? On a newly opened process: is it in the session's
+        history? None: cannot tell."""
 
     def events(self) -> Iterator[AgentEvent]:
         """The events available now after the read position, then stops; never blocks. The engine calls it again and
-        again. After reconnect() it starts after proc.read_pos."""
+        again. After reconnect() it starts after proc.read_pos; stop() or a new start() drops none. It also checks that
+        the process lives (an idle CLI is silent)."""
 
-    def jobs(self) -> List[Job]: ...
+    def jobs(self) -> List[Job]:
+        """Those running, really (not the CLI's ghost entries), and the ended ones of the session it knows."""
 
     def stop_job(self, job_id: str) -> bool: ...
 
-    def interrupt(self) -> None:
-        """End the running turn; the session stays."""
+    def interrupt(self) -> bool:
+        """End the running turn; the session, the process and its jobs stay. False: this CLI cannot (then stop())."""
 
     def detach(self) -> None:
         """Orch closes; the CLI and its jobs stay."""
 
     def stop(self) -> None:
-        """End the CLI and its jobs. ProcessExited(asked=True) may follow."""
+        """End the CLI and its jobs; if it must be killed, also the process groups of its jobs. An open turn ends
+        STOPPED; ProcessExited(asked=True) follows."""
 
-    def compact(self) -> bool: ...
+    def compact(self) -> bool:
+        """Start compacting the idle session; SessionChanged(COMPACTED) follows, and no other event for it. False: it
+        cannot."""
 
     def terminal_command(self, spec: AgentSpec, session: SessionRef) -> List[str]:
         """The command that opens this session for the user; needs no started adapter."""
@@ -1864,16 +1979,19 @@ class Rendered:
 # Entry points (functions with these names and arguments in the module named in ENTRY_POINTS)
 #   labels.parse(text: str, role: Role) -> Reply
 #   milestones.read_checklist(path: str, text: Optional[str]) -> Checklist       text None: missing or unreadable
-#   golden.read_board(path: str, text: Optional[str], last: GoldenBoard) -> GoldenBoard
+#   golden.read_board(path: str, text: Optional[str], last: GoldenBoard, names: Sequence[str]) -> GoldenBoard
+#                                                                                names: the agents' names
 #   texts.render(snap: Snapshot, message: Message) -> Rendered                   with the reminder; its random picks
 #                                                                                use message.id as the seed
 #   texts.words(ref: TextRef, snap: Snapshot) -> str                             gates, command replies, notices
 #   texts.system_prompt(snap: Snapshot, agent: str) -> str
 #   models.module(settings: Dict) -> Module
-#   models.resolve(choice: Choice, settings: Dict) -> Choice                     env and options complete
+#   models.resolve(choice: Choice, settings: Dict, agent_yaml: Dict) -> Choice   env and options complete
 #   models.catalog(settings: Dict, listed: Dict[str, List[ModelInfo]]) -> List[ModelInfo]    listed: by backend
-#   models.smoke_test(adapter: Adapter, spec: AgentSpec, clock: Clock, wait) -> SmokeResult
+#   models.smoke_test(adapter: Adapter, spec: AgentSpec, clock: Clock, wait) -> SmokeResult     not ok when
+#                                                                                ModelReported differs (aliases allowed)
 #   models.save_choice(agent_yaml: Path, choice: Choice) -> None
+#   orch.config.add_worker(project: Path, like: str, worker: str) -> None        (M) copies like's agent.yaml
 
 
 class Runtime(Protocol):
@@ -1892,6 +2010,29 @@ class Runtime(Protocol):
 T = TypeVar("T")
 _TYPES: Dict[str, type] = {}
 _HINTS: Dict[type, Dict[str, Any]] = {}
+
+
+# keys in a provider's words: "sk-...", "api_key=...", "Authorization: Bearer ...", the user and query of an address
+_SECRETS = (
+    (re.compile(r"(?i)\b((?:api|access|secret|auth)[-_ ]?(?:key|token)|authorization|token|secret|password|key)"
+                r"(['\"]?\s*[:=]\s*['\"]?)(?:bearer\s+|basic\s+)?[^\s'\",;}&]{6,}"), r"\1\2***"),
+    (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]{8,}"), r"\1 ***"),
+    (re.compile(r"\b(?:sk|pk|rk|tp|ghp|xox[a-z])[-_][\w-]{8,}|\bAIza[\w-]{20,}"), "***"),
+    (re.compile(r"(\w://)[^\s/@]+@"), r"\1"),
+    (re.compile(r"(\w://[^\s?]+)\?[^\s'\")]+"), r"\1"),
+)
+
+
+def redact(text: str) -> str:
+    """An error text without keys. The store applies it to every error, detail and why it takes in."""
+    for pattern, by in _SECRETS:
+        text = pattern.sub(by, text)
+    return text
+
+
+def _bare_url(url: str) -> str:
+    """Without user, password, query and fragment."""
+    return re.sub(r"(://)[^/@]*@", r"\1", re.sub(r"[?#].*", "", url))
 
 
 def _register(base: type) -> None:
@@ -1932,14 +2073,40 @@ def to_dict(obj: Any) -> Any:
 
 def from_dict(cls: Type[T], data: Any) -> T:
     """The reverse of to_dict. Unknown keys are ignored, missing ones take their default, an unknown enum value stays
-    the plain string. For Event, UserCommand or Action the "type" picks the class; unknown: ValueError."""
+    the plain string. For Event, UserCommand or Action the "type" picks the class; unknown: ValueError. A UserCommand
+    comes from outside, so it must also have an id and fields of the right types (else ValueError)."""
     name = data.get("type") if isinstance(data, dict) else None
     if name is not None and issubclass(cls, (Event, Action)):
         sub = _TYPES.get(name)
         if sub is None or not issubclass(sub, cls):
             raise ValueError(f"unknown {cls.__name__}: {name!r}")
         cls = sub
+    if issubclass(cls, UserCommand):
+        _check_command(cls, data)
     return _load(cls, data)
+
+
+def _check_command(cls: type, data: Any) -> None:
+    if not isinstance(data, dict) or cls is UserCommand:
+        raise ValueError("not a command")
+    hints = typing.get_type_hints(cls)
+    bad = [f.name for f in fields(cls) if f.name in data and not _fits(hints[f.name], data[f.name])]
+    if bad or not data.get("id"):
+        raise ValueError(f"{cls.__name__}: bad {', '.join(bad) or 'id'}")
+
+
+def _fits(tp: Any, v: Any) -> bool:
+    """For the types commands use."""
+    origin, args = getattr(tp, "__origin__", None), getattr(tp, "__args__", ())
+    if origin is Union:
+        return any(_fits(a, v) for a in args)
+    if origin in (tuple, Tuple):
+        return isinstance(v, (list, tuple)) and all(_fits(args[0], x) for x in v)
+    if issubclass(tp, Enum):
+        return v in [e.value for e in tp]
+    if tp is float:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    return isinstance(v, tp) and (tp is bool or not isinstance(v, bool))
 
 
 def _load(tp: Any, v: Any) -> Any:
