@@ -459,6 +459,8 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                      "really needs me.",
     K.CHECKLIST_COMPLETE: _checklist_complete,
     K.REVIEW_RUBRIC_MISSING: "This milestone ({milestone}) has no rubric. Set one first, then score against it and decide.",
+    K.REVIEW_SCORE_LOW: "Your score of {score} out of 5 is below the {pass_score} we agreed on, so the milestone is not "
+                        "accepted. What should {critic} do next?",
     K.GATE_ANSWERS: _gate_answers,
     K.MILESTONE_CHANGE_REQUEST: _milestone_change,
     K.MILESTONE_CHANGE_UNREADABLE: "I could not read the new list of milestones ({problem}). Please send the whole list "

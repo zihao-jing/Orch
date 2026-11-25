@@ -28,7 +28,7 @@ VALUES = {
     "job": "train.py", "minutes": 40, "status": "writing", "live_file": "/run/live.md", "items": ["- [ ] Labels checked"],
     "health": "quiet", "request": "", "open_report": False, "idle_since": T0 - 720, "workers": ["worker-1", "worker-2"],
     "chars": 9000, "limit": 8000, "words": ["boss"], "gates": ["question (A or B?)"], "rules": ["Be brief."],
-    "milestones": ["1. Data"], "score": 4.5, "rounds": 5000, "choices": ["opus", "gpt"], "choice": "opus",
+    "milestones": ["1. Data"], "score": 4.5, "pass_score": 4.8, "rounds": 5000, "choices": ["opus", "gpt"], "choice": "opus",
     "new_session": True, "files": ["a.yaml"],
 }
 TO_WORKER = ("job_wakeup", "job_lost", "retry_continue", "restart_continue", "message_again", "session_return",
@@ -140,6 +140,12 @@ class TestTexts(unittest.TestCase):
         out = texts._compose(texts._Text(snapshot(), C.TextRef(TextKey.MONITOR_REPORT, {
             "worker": "worker-1", "health": "off_track", "minutes": 9}), "critic", "off-track\nIt edits the docs."))
         self.assertEqual(out, "Progress check on worker-1, 9 minutes into its run: off track.\n\nIt edits the docs.")
+
+    def test_MS_6_an_accept_below_the_agreed_score_goes_back(self):
+        out = texts.words(C.TextRef(TextKey.REVIEW_SCORE_LOW, {"milestone": "m1", "score": 3.5, "pass_score": 4.0}),
+                          snapshot())
+        self.assertEqual(out, "Your score of 3.5 out of 5 is below the 4.0 we agreed on, so the milestone is not accepted. "
+                              "What should the critic do next?")
 
     def test_SIL_3_silence_check(self):
         out = texts.words(C.TextRef(TextKey.SILENCE_CHECK, {"attempt": 2, "attempts": 3}), snapshot())
