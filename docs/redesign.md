@@ -47,9 +47,9 @@ Nothing here is implemented yet.
 | Intermediate / final ending | a turn that ends with a job running / with none running. |
 | Job | a command the worker started with its CLI's own background option. |
 | Choice | backend + provider + model + effort. |
-| Session key | backend + provider address; choices with the same key are expected to continue one session. |
+| Session key | backend + `*_BASE_URL` address (not the OpenCode provider name); choices with the same key are expected to continue one session. |
 | Gate | something on the dashboard that waits for the user. |
-| Answer gate | question, pause, plan approval or milestone approval. |
+| Answer gate | question, pause (also the one after three silent checks), plan approval, milestone approval or milestone change. |
 | Operational gate | opened by Orch for a failure or a limit (also counts as a pause). |
 | Silent | nothing is active (2.6). |
 
@@ -62,14 +62,16 @@ Nothing here is implemented yet.
 - **MSG-1 At once.** Each agent's CLI stays open and Orch sends every message immediately, also while the agent writes.
   There is no queue, no replacement of waiting messages, and no `additive` or `urgent`.
 - **MSG-2 Exceptions.** A message waits only while: the user's answer gates are incomplete (GATE-4) or the reply it came
-  from holds a question (GATE-2); a terminal is open on the recipient (TERM-4); Orch is closed; the send failed; the
-  recipient is being switched (MOD-6); or the program cannot take input while running (`command` programs, and any CLI
-  whose probe fails), in which case it goes out when the turn ends.
+  from holds a question (GATE-2, then it is dropped); a terminal is open on the recipient (TERM-4); Orch is closed; the send failed; the
+  recipient is being switched (MOD-6); the user stopped the recipient; the recipient is compacting; or the program does
+  not take input into a running turn (Qoder, Qwen, Antigravity, `command`; see 3.2), in which case it goes out when the
+  turn ends.
 - **MSG-3 Record.** Every message has an id, sender, recipient, text, time, status and cause. Statuses: `waiting`,
   `delivered`, `answered` (the recipient started answering), `failed`. Message status is separate from agent status.
 - **MSG-4 No answer needed.** Messages to the user, and notices, end at `delivered` and never count against silence.
 - **MSG-5 Unanswered.** If the recipient has not started answering 5 minutes after sending, Orch checks whether the
-  message arrived and sends it again once if not. Still nothing → the agent failed (REC-1).
+  message arrived and sends it again once if not. Still nothing → the agent failed (REC-1). The 5 minutes count only
+  while the recipient is idle and the message was really sent. Answered means the model has it, not only its CLI.
 - **MSG-6 Send once.** Save the intent to send, with the message id, before sending. After a restart, check whether it
   arrived before sending again.
 - **MSG-7 Order.** Messages to one agent enter its one conversation in order. Each names its sender where the recipient
@@ -134,11 +136,12 @@ Nothing here is implemented yet.
 
 - **JOB-1** Workers use their CLI's own background option. Orch reads the CLI's job record. `nohup` and the like are
   rejected as far as each CLI can enforce it; the prompt says so in any case. The old process detector is removed.
-- **JOB-2** At the end of a turn Orch checks the record: a job running → *intermediate*, status `waiting for job`;
-  none → *final*, ready for review.
+- **JOB-2** At the end of a turn Orch checks the record: a job running, or ended but not yet seen by
+  its worker → *intermediate*, status `waiting for job`; otherwise → *final*, ready for review.
 - **JOB-3** An intermediate reply goes to the critic at once, marked "job still running, not ready for review". The
   critic may message the worker (the job keeps running) or be silent. It does not tick items that depend on the job.
-- **JOB-4** When a job ends, the CLI wakes its own session and Orch catches the reply.
+- **JOB-4** When a job ends, the CLI wakes its own session and Orch catches the reply. Codex and Qwen never wake
+  themselves: for them Orch sends the JOB-5 message as soon as the job ended and the worker is idle.
 - **JOB-5 Fallback.** If no turn starts within about 1 minute after a job ended, Orch messages the same session ("your
   job finished, continue"), or resumes the session if the process has exited. Once per job, after checking again that
   no turn started; shown on the dashboard.
@@ -197,7 +200,8 @@ Nothing here is implemented yet.
 ## 2.7 Gates and pause (GATE)
 
 - **GATE-1** `<question>` opens a gate with selectable options. By itself it pauses nothing.
-- **GATE-2** A reply with a question forwards nothing to the critic or to workers, whatever else it contains.
+- **GATE-2** A reply with a question forwards nothing to the critic or to workers, whatever else it contains. What was
+  not sent is listed to the manager with the answers.
 - **GATE-3** The answer returns to the manager, which then messages the critic.
 - **GATE-4** With several answer gates, Orch records each answer and sends all to the manager in one message once the
   last answer gate is closed.
@@ -216,7 +220,8 @@ Nothing here is implemented yet.
 - **DISC-1** Only with the manager or the critic. The agent communicates only with the user; what it writes to others is
   a draft, including what it was writing when the discussion began.
 - **DISC-2** Incoming messages and job ends enter the conversation at once.
-- **DISC-3** The user applies it: one consolidated message per recipient. For the critic, its one reply follows the
+- **DISC-3** The user applies it: one consolidated message per recipient. Apply waits until the agent's current reply has
+  ended. For the critic, its one reply follows the
   normal rules (labelled parts to workers, untagged text to the manager).
 - **DISC-4** Ending without applying drops drafts, never incoming messages.
 - **DISC-5** In a critic discussion nothing it writes reaches the manager.
@@ -236,7 +241,7 @@ Nothing here is implemented yet.
 - **MOD-1** A dashboard window chooses each agent's backend, provider (OpenCode), model and effort from the list in
   `.orch/settings.yaml` (edited by hand; keys never shown). It also shows and switches to the agent's backups.
 - **MOD-2** Effort levels come from each CLI: Codex `model/list`; OpenCode variants (`provider/model#variant`); fixed
-  levels for Claude and Antigravity; Qoder after its probe; hidden where there are none (Qwen).
+  levels for Claude, Antigravity and Qoder (Antigravity: in the model id or as a flag, never both); hidden for Qwen.
 - **MOD-3** Saved in `agent.yaml`, replacing the old model and effort lines and keeping other settings and comments. It
   clears any remembered backup; backups are remembered by name.
 - **MOD-4** New projects start with `.orch/settings.yaml` and agents that refer to it. For existing projects Orch writes
@@ -366,21 +371,38 @@ flowchart LR
 
 ## 3.2 Keeping CLIs open
 
-| CLI | Open with | Input | Output after Orch closes |
-|---|---|---|---|
-| Claude, Qoder (Qwen, if its probe passes) | `--input-format stream-json` | a named pipe opened read-write, so it never closes (worked in a live test) | an output file with a saved read position |
-| Codex | `codex app-server --listen unix://…` | socket | read the thread again (probe P3) |
-| OpenCode | `opencode serve` | HTTP | read the session again (probe P4) |
-| `command`, and any CLI whose probe fails | one process per turn | waits for the turn to end | output file |
+| CLI | Open with | Message while writing | Wakes itself after a job | Output after Orch closes |
+|---|---|---|---|---|
+| Claude | `--input-format stream-json`, named pipe opened read-write | taken in at the next tool step, else next turn | yes | output file, saved position |
+| Qoder | as Claude | Orch holds it until the turn ends | yes | output file, saved position |
+| Qwen | as Claude | Orch holds it until the turn ends | no | output file, saved position |
+| Antigravity | `--input-format stream-json` | Orch holds it until the turn ends, including its jobs | not needed: the turn stays open until its jobs end | output file, saved position |
+| Codex | `codex app-server --listen unix://…` (WebSocket) | steered into the running turn | no | read the thread's turns and items |
+| OpenCode | `opencode serve` | taken in at the next step | yes | read the session's messages and jobs (no event replay) |
+| `command` | one process per turn | Orch holds it until the turn ends | – | output file |
 
 The auditor stays one process per audit.
+
+Settings the adapters must make (details in `docs/probes/`):
+
+- **Claude:** `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` raised, or background jobs end at 30 minutes (2 hours at
+  most). Deny rules for `nohup`, `setsid` and `&`.
+- **Qoder:** background jobs end at 10 minutes (whether this can be raised is being tested). No interrupt without
+  ending the CLI. Never send `/model`: it changes the user's global settings.
+- **Codex:** a very large `thread_unload_delay_secs`, or an idle thread without a connection is unloaded after a minute
+  and its jobs are killed; `thread/resume` after every connect.
+- **OpenCode:** after a server restart its job list still shows dead jobs as running: check `GET /api/shell/{id}`. Filter
+  jobs by session, as the list covers the whole database.
+- **All:** compare the reported model and session id with the ones asked for (Qwen, Qoder and Antigravity replace unknown
+  ones silently). A smoke test is a real turn (OpenCode accepts any name when switching). End a CLI with SIGTERM; after
+  SIGKILL its jobs may live on without an owner.
 
 ## 3.3 Modules (`orch/runtime/`)
 
 | Module | Content | Pure |
 |---|---|---|
 | `contracts.py` | data classes, enums, protocols; no logic | – |
-| `adapters/` (`base`, `claude`, `codex`, `opencode`, `oneshot`, `mock`) | one open CLI: start, reconnect, send, events, jobs, interrupt, close | no |
+| `adapters/` (`base`, `claude`, `codex`, `opencode`, `agy`, `oneshot`, `mock`) | one open CLI: start, reconnect, send, events, jobs, interrupt, close | no |
 | `store.py` | state, message ledger, agent registry, crash-safe saving, snapshot | no |
 | `labels.py`, `routing.py` | parse a reply; decide recipients, holds, returns | yes |
 | `gates.py` | questions, pauses, approvals, operational gates | yes |
@@ -569,7 +591,7 @@ Done when: `tests/rt_helpers.py` lets a wave 1 agent write a test in ten lines; 
 | X1 | adapter for Claude, Qoder, Qwen; JOB-1, 4 | `adapters/claude.py` | L |
 | X2 | adapter for Codex app-server; JOB-1, 4 | `adapters/codex.py` | L |
 | X3 | adapter for OpenCode server; JOB-1, 4 | `adapters/opencode.py` | L |
-| X4 | `command` and Antigravity, one process per turn | `adapters/oneshot.py` | S |
+| X4 | Antigravity (stays open); `command`, one process per turn | `adapters/agy.py`, `adapters/oneshot.py` | S |
 
 Done when, for each package: its own tests pass without any CLI or network, and every listed id has a test. The full
 suite is not part of a package (4.5). Adapters use recorded event streams, and a live test behind `ORCH_LIVE=1`.
