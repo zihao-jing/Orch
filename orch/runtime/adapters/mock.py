@@ -82,7 +82,6 @@ class MockCLI:
         self.jobs: Dict[str, Job] = {}
         self.log: List[AgentEvent] = []  # all output of all its processes; pos = index + 1
         self.owner: Any = None  # the adapter that joined it
-        self.interrupts = True  # False: interrupt() is not supported
         self.replies: Deque[Reply] = deque()
         self._pending: List[Tuple[float, int, Union[AgentEvent, Callable[[], None]]]] = []
         self._n = 0
@@ -338,15 +337,6 @@ class MockAdapter(BaseAdapter):
         if job_id not in self.cli.jobs:
             return False
         self.cli.job_end(job_id.split("/", 1)[1], exit_code=143)
-        return True
-
-    def interrupt(self) -> bool:
-        self.cli.flush()
-        if not self.cli.interrupts:
-            return False
-        if self.cli._busy:
-            self.cli._pending = [p for p in self.cli._pending if not isinstance(p[2], (TurnEnded, Text, ToolEnd))]
-            self.cli.emit(TurnEnded, status=TurnStatus.STOPPED)
         return True
 
     def detach(self) -> None:
