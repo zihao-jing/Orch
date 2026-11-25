@@ -301,20 +301,20 @@ class TestReconnect(Rig):
         ad._ws.close()  # the socket drops, the server lives
         ad._ws = None
         self.ctl(proc, "turn/start", threadId=proc.stream, input=[{"type": "text", "text": "hi"}],
-                 clientUserMessageId="x0000000000h1")
+                 clientUserMessageId="x0000000000a8")
         ev = self.until(ad, self.ended)
         self.assertEqual(next(e for e in ev if isinstance(e, TurnEnded)).text, "ok: hi")
-        self.assertEqual(next(e for e in ev if isinstance(e, TurnStarted)).message_ids, ("x0000000000h1",))
+        self.assertEqual(next(e for e in ev if isinstance(e, TurnStarted)).message_ids, ("x0000000000a8",))
 
     def until_job_turn(self, ad):
-        ad.send("x0000000000g1", "JOB go")
+        ad.send("x0000000000a7", "JOB go")
         return self.until(ad, self.ended)
 
 
 class TestProcess(Rig):
     def test_a_server_that_dies_ends_the_open_turn_then_exits(self):
         ad, proc, _ = self.started()
-        ad.send("x0000000000i1", "LONG")
+        ad.send("x0000000000a9", "LONG")
         self.until(ad, lambda e: any(isinstance(x, TurnStarted) for x in e))
         os.kill(proc.pid, 9)
         ev = self.until(ad, lambda e: any(isinstance(x, ProcessExited) for x in e))
@@ -328,7 +328,7 @@ class TestProcess(Rig):
 
     def test_stop_ends_the_server_and_reports_it_asked(self):
         ad, proc, _ = self.started()
-        ad.send("x0000000000j1", "LONG")
+        ad.send("x0000000000b3", "LONG")
         self.until(ad, lambda e: any(isinstance(x, TurnStarted) for x in e))
         ad.stop()
         ev = list(ad.events())
@@ -369,7 +369,7 @@ class TestAround(Rig):
 
     def test_transcript_has_the_users_own_lines_only(self):
         ad, proc, spec = self.started()
-        ad.send("x0000000000k1", "ours")
+        ad.send("x0000000000b4", "ours")
         self.until(ad, self.ended)
         self.ctl(proc, "turn/start", threadId=proc.stream, input=[{"type": "text", "text": "typed in the terminal"}],
                  clientUserMessageId="3f1c9a52-0000-4000-8000-000000000002")
@@ -397,12 +397,12 @@ class TestLive(Rig):
         proc = ad.start(spec, None)
         ad.spec = spec
         try:
-            ad.send("x0000000000l1", "Reply with the single word PONG.")
+            ad.send("x0000000000b5", "Reply with the single word PONG.")
             ev = self.until(ad, self.ended, 120)
             end = next(e for e in ev if isinstance(e, TurnEnded))
             self.assertEqual(end.status, TurnStatus.OK, end.detail)
             self.assertIn("PONG", end.text)
-            ad.send("x0000000000l2", "Start the command `sh -c 'sleep 20; exit 3'` as a background job: call your shell "
+            ad.send("x0000000000b6", "Start the command `sh -c 'sleep 20; exit 3'` as a background job: call your shell "
                     "tool with yield_time_ms 500 so you do not wait. Do not poll it. Then reply STARTED.")
             ev = self.until(ad, self.ended, 120)
             self.assertIn("JobStarted", self.kinds(ev))
@@ -413,7 +413,7 @@ class TestLive(Rig):
                                                   stream=proc.stream, read_pos=ad.cursor)))
             ev = self.until(ad2, lambda e: any(isinstance(x, JobEnded) for x in e), 90)
             self.assertEqual(next(e for e in ev if isinstance(e, JobEnded)).exit_code, 3)
-            self.assertTrue(ad2.arrived("x0000000000l2"))
+            self.assertTrue(ad2.arrived("x0000000000b6"))
             print("live ok:", [type(e).__name__ for e in ev])
             ad2.stop()
         finally:
