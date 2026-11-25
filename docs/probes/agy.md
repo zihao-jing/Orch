@@ -14,9 +14,9 @@ Run on 2026-11-25 in temporary folders under `/Users/fancy/.claude/jobs/4b93f1df
 | Question | Answer | Verified? |
 |---|---|---|
 | Input mode that stays open | `--input-format stream-json --output-format stream-json`. One NDJSON message per stdin line, shape `{"event":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`. A FIFO held open: 4 messages, 4 results, one conversation. A message sent during a turn was queued and answered after it. Without the `event` key or `message` object the process exits with an error (`stream input "user" message is missing the "message" field`). | verified |
-| Message sent while writing | Queued. Each message became its own turn, in order (`num_turns` 1, 2, 3, 4). | verified |
+| Message sent while writing | Queued by the CLI; each becomes its own turn, in order. **While an async job runs the turn stays open, so a message sent then is not answered until the job ends** (timed test: sent at 25 s, job ended at 54 s, answered at 59 s). | verified |
 | Background jobs with a record | `run_command` takes `WaitMsBeforeAsync`. With `0` the command goes async and returns an id `<conversation>/task-N`. Without it, the command ran in the foreground (4 s block). Record: `manage_task` with `Action: list` shows status, created and completed times, and "No background tasks are currently running" when empty. Output also in `brain/<conv>/.system_generated/tasks/task-N.log` (the failing one held `bad`). | verified |
-| Self-wake when a job ends | **Yes.** After an async job ended (exit 3, about 6 s), the stream emitted a `system_message` and a new `agent_response` ("Task `<id>/task-3` has completed (exited with code 3).") with no input from the probe. A second job (exit 0, 12 s) also produced a wake-up step. Its text was empty; the next user message then summarised both. | verified |
+| Self-wake when a job ends | **Not as a new turn.** The turn stays open until its async jobs end: in the timed test (45 s job, "reply STARTED and end your turn") `STARTED` itself appeared only when the job ended (54 s), followed by a `system_message`, the report of the job and one `result` covering everything (57 s). The earlier runs also show one `result` for reply and wakeups. | verified (coordinator, with timestamps) |
 | Resume a session | `--conversation <id>` (the `conversation_id` comes in the first `init` event in stream mode and in `result` in `-p` json). A new stream process with `--conversation` recalled a code word given in the old process. | verified |
 | Error for an unknown session id | **Not an error.** `warning: conversation "<id>" not found` on stderr, exit 0, and a **new** conversation with a new `conversation_id` answers. Orch must compare the returned id with the requested one. | verified |
 | Does a model switch keep the session | Yes. Conversation started on `gemini-3.8-flash-low`, continued on `gemini-3.8-flash-medium`: recall worked; `init.model` reports `gemini-3.8-flash-medium`. | verified |
@@ -73,7 +73,7 @@ agy models                                                          # model list
 - An unknown `--conversation` id silently starts a new conversation (exit 0).
 - `--model <id-with-effort-suffix> --effort <x>` is rejected, so effort is either part of the model id or the `--effort` flag, never both.
 - Two processes on the same conversation do not error; the second waits for the running turn.
-- Agy wakes itself after an async job ends (unlike Qwen), so JOB-4 can rely on the CLI.
+- Agy keeps its turn open while an async job runs and reports the job inside that turn: there is no intermediate ending (JOB-2, JOB-3), and no reply to anyone until the job ends. The tool step stays `ACTIVE` meanwhile.
 - The last stream `result` after a kill has `status: ERROR` (our kill). Orch must not count it as a turn error.
 
 ## Recommended capability values
@@ -85,8 +85,27 @@ agy models                                                          # model list
 | job_record | `true` (`manage_task` list; `brain/<conv>/.system_generated/tasks/task-N.log`) | verified |
 | shares_terminal | `not verified` | not verified |
 | compacts | `not verified` (`/compact` accepted, effect not checked) | not verified |
-| self_wake (JOB-4) | `true` (system message and agent reply with no input) | verified |
+| self_wake (JOB-4) | not applicable: the turn does not end while a job runs | verified |
 
 ## Conclusion
 
-Agy can run as an open CLI: one process with stream-json input stays open across messages, queues messages sent during a turn, and wakes itself when an async job ends. Orch must check that the returned conversation id equals the requested one, and must not send both `--model` with an effort suffix and `--effort`.
+Agy can run as an open CLI: one process with stream-json input stays open across messages, queues messages sent during a turn, and keeps the turn open until its async jobs end. Orch must check that the returned conversation id equals the requested one, and must not send both `--model` with an effort suffix and `--effort`.
+
+## Timed job test (coordinator, 2026-11-25)
+
+Seconds since start; `gemini-3.8-flash-low`, default mode, open stdin pipe.
+
+```
+  0.0 >>> sent: run_command with WaitMsBeforeAsync 0 "sleep 45; echo done", reply STARTED, end the turn
+  8.8 step 2 ACTIVE tool run_command
+ 25.0 >>> sent: Reply with the single word PING.
+ 53.9 step 2 DONE  tool run_command
+ 53.9 step 3 DONE  agent_response "STARTED"
+ 53.9 step 4 DONE  system_message
+ 56.6 step 5 DONE  agent_response "The command has finished executing with output: `done`."
+ 56.6 result SUCCESS num_turns 1
+ 59.3 step 7 DONE  agent_response "PING"
+ 59.3 result SUCCESS num_turns 2
+```
+
+One run, one model, 45 s. Whether a much longer job is also waited for is not verified.
