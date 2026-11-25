@@ -173,9 +173,10 @@ class TestContracts(unittest.TestCase):
 
     def test_redact(self):
         for text in ("Invalid key sk-abcdef1234567890", 'api_key="abcdef123456"', "Authorization: Bearer abcdef123456",
-                     "bad http://u:abcdef123456@host/v1", "GET https://h/v1?key=abcdef123456 failed"):
+                     "bad http://u:abcdef123456@host/v1", "GET https://h/v1?key=abcdef123456 failed", "Api-Key abcdef123456", "token: abcdef123456"):
             self.assertNotIn("abcdef12", C.redact(text))
-        for text in ("API Error: 529 overloaded", "session 7be3e7e5-9f82-4e07-aea9-819df103e5a6 not found", "see https://h/v1"):
+        for text in ("API Error: 529 overloaded", "session 7be3e7e5-9f82-4e07-aea9-819df103e5a6 not found", "see https://h/v1",
+                     "maximum token: 1048576", "session_limit_reached", "key: session_limit_reached", "Invalid API key provided"):
             self.assertEqual(C.redact(text), text)
 
     def test_session_key_and_secrets(self):
@@ -369,15 +370,16 @@ class TestMock(unittest.TestCase):
             self.names()
             self.assertEqual(self.last[-1].change, change)
 
-    def test_frozen_swallowed_refused_interrupted(self):
+    def test_frozen_swallowed_refused_stopped(self):
         self.cli.script(CliReply(receipt=False, starts=False), CliReply(ends=False, tools=["run: x"]))
         self.ad.send("m1", "Lost")
         self.assertEqual((self.names(), self.ad.arrived("m1")), ([], False))
         self.ad.send("m2", "Go")
         self.assertEqual(self.names(5000), ["Received", "TurnStarted", "ToolStart", "Text"])
-        self.assertTrue(self.ad.interrupt())
-        self.names(0)
-        self.assertEqual(self.last[-1].status, C.TurnStatus.STOPPED)
+        self.ad.stop()
+        self.ad.start(C.AgentSpec("worker-1"), C.SessionRef("worker-1-s1"))
+        self.assertEqual(self.names(0), ["TurnEnded", "ProcessExited", "SessionChanged"])
+        self.assertEqual(self.last[0].status, C.TurnStatus.STOPPED)
         self.cli.refuse_sends(1, C.ErrorClass.BILLING)
         with self.assertRaises(AdapterError) as e:
             self.ad.send("m3", "x")
@@ -401,7 +403,7 @@ class TestMock(unittest.TestCase):
     def test_protocol_and_registry(self):
         methods = [n for n in vars(C.Adapter) if not n.startswith("_") and callable(getattr(C.Adapter, n))]
         self.assertEqual([n for n in methods if not hasattr(BaseAdapter, n)], [])
-        self.assertEqual(len(methods), 14)
+        self.assertEqual(len(methods), 13)
         self.assertIsInstance(adapters.make("mock", self.clock), MockAdapter)
         with self.assertRaises(ValueError):
             adapters.make("none", self.clock)

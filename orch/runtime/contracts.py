@@ -32,21 +32,28 @@ Holds
 
 Sending (MSG-6)
   - A message may go when it is `sendable` (waiting, no hold, sent_at 0) and its agent is not held. The store saves
-    `rendered`, `sent_at` and attempts BEFORE Adapter.send(); SendFailed sets sent_at back to 0.
+    `rendered`, `sent_at` and attempts BEFORE Adapter.send(); SendFailed sets sent_at back to 0. Wherever sent_at
+    becomes 0, so does checked_at.
   - delivered = the CLI has it (Received). taken = its text entered the conversation: Received(taken=True) into the
     running turn, or a TurnStarted. answered = the turn that took it went on (next output) or started.
-  - In doubt: after an Orch restart, when the CLI exited, or when its session or process was replaced, every message to
-    it that is waiting with sent_at set, or delivered but neither taken nor answered (the CLI's queue dies with it;
-    the store makes it waiting again, sent_at kept; notices too). The engine asks arrived() on the new process: True:
-    it reports Received(taken=True); False: sent_at 0, so it goes again; None: it stays and MSG-5 decides.
+  - In doubt: when the CLI exited, or its session or process was replaced, every message to it that is waiting with
+    sent_at set, or delivered but neither taken nor answered (the CLI's queue dies with it; the store makes it waiting
+    again, sent_at kept; notices too). The engine asks arrived() on the new process: True: it reports
+    Received(taken=True); False: sent_at 0, so it goes again; None: a notice counts as delivered, any other stays and
+    MSG-5 decides. After an Orch restart with the same process: only those waiting with sent_at set, True reports
+    Received(taken=False); delivered ones stay.
+  - The engine's own Received carries a uid with `attempts`, so each transmission has its own.
 
 Timers: never from before this Orch began. Frozen (SIL-4) counts from max(last_output, orch_started). Unanswered (MSG-5)
 counts from max(sent_at, checked_at, recipient.idle_since, orch_started) and stands still while the recipient writes, is
 held or retrying. The job fallback (JOB-5, also JOB_LOST) counts from max(job.ended, idle_since), never while writing.
+With caps.wakes_itself False there is no minute: WakeWorker goes out as soon as the job ended (or is LOST) and its agent
+has no open turn, also after an Orch restart. Never while Agent.retry or Agent.switch is set, failed_why is set, or the
+agent is held.
 
 Failures: exactly one report each. Open turn: TurnEnded(error), then ProcessExited(reported=True) if the CLI is gone.
 No open turn: SessionChanged(LOST or DIFFERENT). Otherwise ProcessExited. asked=True, or a turn ended by our own
-stop() or interrupt(), is STOPPED and no failure.
+stop(), is STOPPED and no failure.
 
 Routing handles every ended turn except those of the monitor and auditor and those answering HANDOVER_WRITE (in
 Turn.keys); MONITOR_REPORT is the supervisor's. A worker's reply goes to the user only if
@@ -166,7 +173,7 @@ class TurnStatus(_Str):
     RUNNING = "running"
     OK = "ok"
     ERROR = "error"
-    STOPPED = "stopped"  # interrupted by Orch or the user; not an error
+    STOPPED = "stopped"  # ended by Orch or the user; not an error
 
 
 class JobState(_Str):
@@ -182,7 +189,7 @@ class HoldReason(_Str):
     DRAFT = "draft"  # message: written in a discussion (DISC-1)
     TERMINAL = "terminal"  # agent: a terminal is open on it (TERM-4)
     SWITCH = "switch"  # agent: it is being switched (MOD-6)
-    TURN = "turn"  # agent: its program takes no input while running, or is compacting; also a message with when_idle
+    TURN = "turn"  # agent: its program takes no input while running, or is compacting
     SEND_FAILED = "send_failed"  # agent: a send failed, or it has failed with no choice left
     STOPPED = "stopped"  # agent: the user stopped it
 
@@ -209,6 +216,7 @@ class DropReason(_Str):
     WORKER_CLOSED = "worker_closed"  # late result or message of a closed worker (WRK-4, 5)
     REPLACED = "replaced"  # the handover instruction replaces it (SES-6)
     MERGED = "merged"  # an outdated intermediate reply after a restart (REC-7)
+    NOT_NEEDED = "not_needed"  # engine: a held WakeWorker whose jobs all got woke meanwhile
 
 
 class GateKind(_Str):
@@ -353,7 +361,7 @@ class TextKey(_Str):
     CHECKLIST_UNREADABLE = "checklist_unreadable"  # MS-2
     NOBODY_WATCHES = "nobody_watches"  # REC-10, after 2 failures
     JOB_NO_PROGRESS = "job_no_progress"  # JOB-6
-    JOBS_STOPPED = "jobs_stopped"  # the user closed a worker and its job
+    JOBS_STOPPED = "jobs_stopped"  # the user closed a worker and its job, or its job was stopped for a terminal
     # monitor
     MONITOR_CHECK = "monitor_check"
     MONITOR_REPORT = "monitor_report"  # supervisor to the critic
@@ -398,7 +406,7 @@ class TextKey(_Str):
     COMMAND_REFUSED = "command_refused"  # `why`: a Refusal
     # notices to the user in the chat
     NOTE_AGENT_FAILED = "note_agent_failed"
-    NOTE_WAKEUP_SENT = "note_wakeup_sent"
+    NOTE_WAKEUP_SENT = "note_wakeup_sent"  # not where wakes_itself is False: there it is the normal way
     NOTE_MONITOR_FAILED = "note_monitor_failed"
     NOTE_SWITCHED = "note_switched"
     NOTE_REVIEW_WITHDRAWN = "note_review_withdrawn"  # MS-13
@@ -611,7 +619,8 @@ class Job:
     state: JobState = JobState.RUNNING  # LOST: [supervisor]
     exit_code: Optional[int] = None
     ended: float = 0.0
-    woke: bool = False  # its end reached its agent: TurnStarted, JobNoticed
+    woke: bool = False  # its end reached its agent: a turn took it in, JobNoticed; set at once for a job that has
+    #                     ended, or ends, while its agent is not open (its result is only recorded)
     fallback_sent: bool = False  # [supervisor] WakeWorker was sent (JOB-5, JOB-7), once
     stopped_by_user: bool = False  # [workers], [terminal], [engine] (stop agents): JOB-7 does not wake
     last_progress: float = 0.0  # last sign of progress, where the CLI shows one
@@ -638,10 +647,13 @@ class Message:
     gates: List[str] = field(default_factory=list)  # gates whose answers it carries: they take effect with it
     continues: str = ""  # RETRY_CONTINUE, RESTART_CONTINUE, MESSAGE_AGAIN: the unfinished turn (Turn.id) it lets go on.
     #                      Whichever turn takes it in also gets that turn's started_by, joined, jobs, triggers, keys
-    #                      and draft, and not this message's own trigger and key
-    when_idle: bool = False  # goes out only while the recipient has no open turn, shown as held by TURN: the discussion
-    #                          apply message, so it never joins a draft turn
-    jobs: List[str] = field(default_factory=list)  # [engine] jobs whose end it reports (WakeWorker.job_ids)
+    #                      and draft (not a turn that took in the apply message), and not this message's own trigger
+    #                      and key. A turn that starts while Agent.retry.turn is set continues that one, as if a message
+    #                      did. "": an ordinary message, with its own trigger and key
+    when_idle: bool = False  # goes out only while the recipient has no open turn and no message sent to it unanswered:
+    #                          the discussion apply message, so it never joins a draft turn. Never in `holds`; the
+    #                          dashboard shows that it waits
+    jobs: List[str] = field(default_factory=list)  # [engine] WakeWorker.job_ids: the turn that takes it in gets them
     created: float = 0.0  # [engine]
     seq: int = 0  # [engine] order of creation in the run
     status: MessageStatus = MessageStatus.WAITING  # [fact], [engine]
@@ -1032,8 +1044,8 @@ class Snapshot:
     agents: Dict[str, Agent] = field(default_factory=dict)  # all, deleted ones too
     messages: Dict[str, Message] = field(default_factory=dict)  # in seq order: every open or held one, those of the
     #                                              current turns and switches, the newest 300 others; the rest: ledger
-    turns: Dict[str, Turn] = field(default_factory=dict)  # by agent: its current or last turn (the store also keeps
-    #                                                          those an open message `continues`)
+    turns: Dict[str, Turn] = field(default_factory=dict)  # by agent: its current or last turn. Inside the store only,
+    #                                         those named by an open message's `continues`, Agent.retry.turn, switch.turn
     gates: Dict[str, Gate] = field(default_factory=dict)  # open, closed but answer not sent, newest 50 others
     jobs: Dict[str, Job] = field(default_factory=dict)  # every open one, newest 50 others
     milestones: List[Milestone] = field(default_factory=list)  # only store of milestones (MS-15)
@@ -1146,8 +1158,9 @@ class AgentEvent(Event):
 class Received(AgentEvent):
     """taken False: the CLI has the message (Claude `queued`, OpenCode inbox.enqueued). Store: delivered, session_id.
     taken True: its text entered the conversation (Claude's echo with our id, Codex's userMessage item, OpenCode
-    inbox.delivered): taken_at too, and in an open turn Turn.joined, triggers, keys and reply_turn; `answered` with the
-    next output. For the message that starts a turn, TurnStarted says that, not this."""
+    inbox.delivered): taken_at too, and in an open turn Turn.joined, triggers, keys and reply_turn, and its Message.jobs
+    into Turn.jobs (they get woke); `answered` with the next output. For the message that starts a turn, TurnStarted
+    says that, not this."""
     message_id: str = ""
     taken: bool = False
 
@@ -1162,8 +1175,8 @@ class Discarded(AgentEvent):
 class TurnStarted(AgentEvent):
     """Exactly one per TurnEnded. A wake turn starts with its first own output, not with Claude's `init`. Empty results,
     /compact, and foreground tasks yield no turn or job event.
-    Store: while a turn is open: only its message_ids join it. Else a new Turn: started_by = `message_ids`, or else the
-    messages received and not taken; and those taken while no turn was open. They become delivered, taken, answered.
+    Store: while a turn is open: only its message_ids join it, with their Message.jobs (they get woke). Else a new Turn:
+    started_by = `message_ids`, or else the messages received and not taken; and those taken while no turn was open. They become delivered, taken, answered.
     Turn.jobs = Message.jobs of these, and, if caps.wakes_itself, every ended job of the agent not yet woke; they get
     woke. retry keeps."""
     message_ids: Tuple[str, ...] = ()  # where the CLI tells
@@ -1191,7 +1204,9 @@ class ToolEnd(AgentEvent):
 
 @dataclass(frozen=True)
 class JobStarted(AgentEvent):
-    """Store: adds the job."""
+    """Store: adds the job. Antigravity, whose turn waits for its jobs, reports JobNoticed before its TurnEnded. Codex: a
+    command is a job only if it still runs when its turn ends: JobStarted just before TurnEnded, jobs() leaves out the
+    open turn's commands; when catching up, compare the item's and the turn's end times."""
     job: Optional[Job] = None
 
 
@@ -1289,7 +1304,7 @@ class JobsChecked(EngineEvent):
 
 @dataclass(frozen=True)
 class SendFailed(EngineEvent):
-    """A transmission raised an error. Store: message.error, sent_at 0; it stays waiting."""
+    """A transmission raised an error. Store: message.error, sent_at and checked_at 0; it stays waiting."""
     message_id: str = ""
     error: ErrorClass = ErrorClass.TRANSIENT
     detail: str = ""
@@ -1567,6 +1582,7 @@ class Reject(Send):
 @dataclass(frozen=True)
 class WakeWorker(Send):
     """JOB-5 (JOB_WAKEUP) and JOB-7 (JOB_LOST), one for all its jobs that wait; both only while the jobs are not woke.
+    When: "Timers" at the top.
     Store: Job.fallback_sent, Message.jobs = job_ids. Engine: as Send; reopens the session first if the process is
     gone."""
     emitters: ClassVar[Tuple[str, ...]] = ("supervisor",)
@@ -1703,7 +1719,9 @@ class AdvanceSwitch(Action):
 @dataclass(frozen=True)
 class RestartSession(Action):
     """Engine: stop the agent's CLI if it runs, drain its events, open its saved session again with its choice (no second
-    CLI ever). Recovery lets the stopped turn go on (RESTART_CONTINUE).
+    CLI ever). Recovery lets an unfinished turn go on: RESTART_CONTINUE (continues = that turn) when the CLI is open
+    again after this, StartAgents, a restart after StopOrch(agents=True), TerminalClose or a failed switch; not for an
+    interrupt the user made inside a terminal.
     Store: frozen_restart = now if `frozen`."""
     emitters: ClassVar[Tuple[str, ...]] = ("supervisor", "recovery")
     agent: str = ""
@@ -1945,9 +1963,6 @@ class Adapter(Protocol):
 
     def stop_job(self, job_id: str) -> bool: ...
 
-    def interrupt(self) -> bool:
-        """End the running turn; the session, the process and its jobs stay. False: this CLI cannot (then stop())."""
-
     def detach(self) -> None:
         """Orch closes; the CLI and its jobs stay."""
 
@@ -2014,9 +2029,12 @@ _HINTS: Dict[type, Dict[str, Any]] = {}
 
 # keys in a provider's words: "sk-...", "api_key=...", "Authorization: Bearer ...", the user and query of an address
 _SECRETS = (
-    (re.compile(r"(?i)\b((?:api|access|secret|auth)[-_ ]?(?:key|token)|authorization|token|secret|password|key)"
+    # (a number or a snake_case word after "token:" or "key:" is none)
+    (re.compile(r"(?i)\b((?:api|access|secret|auth)[-_ ]?(?:key|token)|authorization|secret|password|"
+                r"(?:token|key)(?!['\"]?\s*[:=]\s*['\"]?(?:\d+|[a-z]+(?:_[a-z]+)+)(?![\w-])))"
                 r"(['\"]?\s*[:=]\s*['\"]?)(?:bearer\s+|basic\s+)?[^\s'\",;}&]{6,}"), r"\1\2***"),
     (re.compile(r"(?i)\b(bearer|basic)\s+[\w.~+/=-]{8,}"), r"\1 ***"),
+    (re.compile(r"(?i)\b(api[-_ ]?key)\s+(?=[\w-]*\d)[\w-]{8,}"), r"\1 ***"),
     (re.compile(r"\b(?:sk|pk|rk|tp|ghp|xox[a-z])[-_][\w-]{8,}|\bAIza[\w-]{20,}"), "***"),
     (re.compile(r"(\w://)[^\s/@]+@"), r"\1"),
     (re.compile(r"(\w://[^\s?]+)\?[^\s'\")]+"), r"\1"),
