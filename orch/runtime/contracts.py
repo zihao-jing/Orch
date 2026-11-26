@@ -353,6 +353,8 @@ class TextKey(_Str):
     CHECKLIST_COMPLETE = "checklist_complete"  # MS-4: review, or first answer the critic; full or short (PRM-9): H, by
     #                                            SessionRef.given
     REVIEW_RUBRIC_MISSING = "review_rubric_missing"
+    REVIEW_SCORE_LOW = "review_score_low"  # MS-6: an ACCEPT below Settings.pass_score is not accepted; the manager is asked
+    #                                        what the critic should do next
     GATE_ANSWERS = "gate_answers"  # all answers in one message (GATE-4); `unsent`: what was held and not sent;
     #                                `decide_again`: MS-8, 9
     MILESTONE_CHANGE_REQUEST = "milestone_change_request"  # MS-10
@@ -383,7 +385,10 @@ class TextKey(_Str):
     REM_NIGHT = "rem_night"
     REM_ASK_AND_END = "rem_ask_and_end"
     REM_WRITING = "rem_writing"
-    REM_STATE_EDITED = "rem_state_edited"  # the user edited the agent's state.md
+    REM_STATE_EDITED = "rem_state_edited"  # Agent.state_edited is set and differs from given["state"]
+    REM_CHECKLIST = "rem_checklist"  # to the critic: where its checklist file is (new session or new milestone)
+    REM_DISCUSSION_OVER = "rem_discussion_over"  # the discussion ended without being applied
+    REM_NIGHT_OVER = "rem_night_over"
     # gates Orch opens, shown to the user
     GATE_PLAN = "gate_plan"
     GATE_MILESTONE = "gate_milestone"
@@ -434,7 +439,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.RESTART_CONTINUE: (),
     TextKey.MESSAGE_AGAIN: (),
     TextKey.SESSION_RETURN: ("turns_dir", "since"),  # since: time; H says where the turns from then on are
-    TextKey.SESSION_FRESH: ("reason", "state_file"),
+    TextKey.SESSION_FRESH: ("state_file",),
     TextKey.HANDOVER_WRITE: ("agent",),
     TextKey.HANDOVER_REQUEST_CRITIC: ("agent", "why", "assignment"),
     TextKey.HANDOVER_REQUEST_MANAGER: ("agent", "why"),
@@ -446,7 +451,9 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.SILENCE_CHECK: ("attempt", "attempts"),
     TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
     TextKey.REVIEW_RUBRIC_MISSING: ("milestone",),
-    TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer}]; unsent:
+    TextKey.REVIEW_SCORE_LOW: ("milestone", "score", "pass_score"),
+    TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer, approve}]
+    #   (approve: True/False for plan, milestone and change gates, else None); unsent:
     #                                      [{to, body}]; decide_again: milestone title or ""
     TextKey.MILESTONE_CHANGE_REQUEST: ("milestones",),  # [{id, title, text, status}]
     TextKey.MILESTONE_CHANGE_UNREADABLE: ("problem",),
@@ -473,6 +480,9 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.REM_ASK_AND_END: (),
     TextKey.REM_WRITING: ("rules",),
     TextKey.REM_STATE_EDITED: ("path",),
+    TextKey.REM_CHECKLIST: ("path",),
+    TextKey.REM_DISCUSSION_OVER: (),
+    TextKey.REM_NIGHT_OVER: (),
     TextKey.GATE_PLAN: ("milestones",),
     TextKey.GATE_MILESTONE: ("milestone", "title", "score"),
     TextKey.GATE_MILESTONE_CHANGE: (),
@@ -740,6 +750,7 @@ class Agent:
     display: str = ""  # how others name it
     cwd: str = ""
     state_file: str = ""  # its state.md (SaveNotes)
+    state_edited: str = ""  # [engine] digest of state.md while it differs from what SaveNotes wrote last; else ""
     fresh_session: str = ""  # config: "compact", "new", "never" at a milestone start (assumption 3)
     lifecycle: Lifecycle = Lifecycle.OPEN  # [workers]
     status: AgentStatus = AgentStatus.IDLE  # the store derives it: Snapshot.status_of
