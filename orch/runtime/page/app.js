@@ -550,6 +550,12 @@
         h("span", { class: "bx", title: item[0] ? "Complete" : "To do" }, item[0] ? "✓" : "○"), h("span", {}, spanNodes(L.markdown(item[1])[0] ? L.markdown(item[1])[0].lines[0] : []))))]));
   }
   let ckOpen = store.get("orch-checklist-open") === "1";
+  let msOpen = store.get("orch-msdetails-open") === "1";
+  function foldBox(cls, open, store_key, title, note, setOpen) {
+    const box = h("details", { class: "ck-box " + cls, open }, h("summary", { class: "ck-head" }, h("h3", {}, title), note ? h("span", { class: "mute small" }, note) : null));
+    box.addEventListener("toggle", () => { setOpen(box.open); store.set(store_key, box.open ? "1" : "0"); });
+    return box;
+  }
   function renderProgress() {
     const ms = S.milestones || [], ck = S.checklist || {};
     const cur = ms.find(m => m.status === "current");
@@ -557,29 +563,34 @@
     paint($("progress"), JSON.stringify([ms, ck, shown && shown.id]), () => {
       if (!ms.length) return h("p", { class: "empty" }, "No milestones yet.");
       const [d, n] = L.progress(ck);
-      const out = [h("ol", { class: "ms" }, ms.map((m, i) => h("li", { class: "mscard ms-" + m.status + (shown && shown.id === m.id ? " picked" : "") },
+      const pick = m => { ckPick = m.id; renderProgress(); };
+      const out = [h("ol", { class: "ms" }, ms.map((m, i) => h("li", { class: "mscard ms-" + m.status + (shown && shown.id === m.id ? " picked" : ""),
+          tabindex: "0", role: "button", "aria-pressed": shown && shown.id === m.id ? "true" : "false", title: "Show this milestone's details and checklist below",
+          on: { click: ev => { if (!ev.target.closest("button")) pick(m); }, keydown: ev => { if ((ev.key === "Enter" || ev.key === " ") && ev.target === ev.currentTarget) { ev.preventDefault(); pick(m); } } } },
           h("div", { class: "ms-top" }, h("span", { class: "ms-num", "aria-hidden": "true" }, m.status === "done" ? "✓" : String(i + 1)),
             h("span", { class: "ms-status" }, L.MS_STATUS[m.status] || ""),
             m.score !== null && m.score !== undefined && m.status === "done" ? h("span", { class: "ms-score", title: "Score out of 5" }, m.score + " / 5") : null),
           h("div", { class: "t" }, m.title),
           m.status === "current" && n ? [h("div", { class: "bar" }, h("i", { style: "width:" + Math.round(100 * d / n) + "%" })), h("div", { class: "mute small" }, d + " of " + n + " done")] : null,
-          h("div", { class: "milestone-actions" },
-            m.checklist_path && !(shown && shown.id === m.id) ? h("button", { type: "button", class: "link", on: { click: () => { ckPick = m.id; ckOpen = true; renderProgress(); } } }, "Checklist") : null,
-            m.status === "done" ? h("button", { type: "button", class: "link", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen") : null),
-          m.text || (m.rubric || []).length ? h("details", { class: "ms-details" }, h("summary", { class: "link" }, "Details"), m.text ? md(m.text) : null,
-            (m.rubric || []).length ? [h("div", { class: "ms-sub" }, "Rubric"), h("ul", {}, m.rubric.map(r => h("li", {}, r)))] : null) : null)))];
+          m.status === "done" ? h("div", { class: "milestone-actions" },
+            h("button", { type: "button", class: "link", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen")) : null)))];
       if (shown) {
-        const box = h("details", { class: "ck-box", open: ckOpen }, h("summary", { class: "ck-head" }, h("h3", {}, "Checklist"),
-          h("span", { class: "mute small" }, shown.title + (shown.status === "current" && n ? " · " + d + " of " + n + " done" : ""))));
-        box.addEventListener("toggle", () => { ckOpen = box.open; store.set("orch-checklist-open", ckOpen ? "1" : "0"); });
+        if (shown.text || (shown.rubric || []).length) {
+          const box = foldBox("ms-details", msOpen, "orch-msdetails-open", "Details", shown.title, v => { msOpen = v; });
+          box.append(h("div", { class: "ck-body" }, shown.text ? md(shown.text) : null,
+            (shown.rubric || []).length ? [h("div", { class: "ms-sub" }, "Rubric"), h("ul", {}, shown.rubric.map(r => h("li", {}, r)))] : null));
+          out.push(box);
+        }
+        const box = foldBox("ck-list", ckOpen, "orch-checklist-open", "Checklist",
+          shown.title + (shown.status === "current" && n ? " · " + d + " of " + n + " done" : ""), v => { ckOpen = v; });
         if (shown.status === "current") box.append(checklistList(ck));
-        else {
+        else if (shown.checklist_path) {
           const holder = h("div", {}, h("p", { class: "mute" }, "Loading…"));
           box.append(holder);
           cached("api/checklist?milestone=" + encodeURIComponent(shown.id))
             .then(c => holder.replaceChildren(checklistList(c)))
             .catch(() => holder.replaceChildren(h("p", { class: "mute" }, "Could not load this checklist.")));
-        }
+        } else box.append(h("p", { class: "mute" }, "No checklist yet."));
         out.push(box);
       }
       return out;
@@ -650,14 +661,13 @@
     const meta = m.written_by || {}, exception = L.messageException(m), hint = L.statusHint(m);
     const to = [m.recipient].concat(m.also || []);
     const allWorkers = to.length > 1 && to.every(r => (named[r] || {}).role === "worker");
-    const route = L.agentName(named, m.sender) + " → " + (allWorkers ? to.length + " workers" : to.map(r => L.agentName(named, r)).join(", "));
+    const toText = allWorkers ? to.length + " workers" : to.map(r => L.agentName(named, r)).join(", ");
     const fullRoute = L.agentName(named, m.sender) + " → " + to.map(r => L.agentName(named, r)).join(", ");
     const size = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const d = h("details", { class: cls.filter(Boolean).join(" "), data: { message: m.id } },
       h("summary", { title: [fullRoute, hint].filter(Boolean).join(" · ") },
         h("span", { class: "tm", title: m.sameReply ? "Written in the same reply as the row above" : "" }, m.sameReply ? "" : L.stamp(m.created, nowSrv())),
-        h("span", { class: "lv", title: (L.LEVELS[level] || [""])[0], "aria-hidden": "true" }),
-        h("span", { class: "route" }, route),
+        h("span", { class: "route" }, h("b", {}, L.agentName(named, m.sender)), h("span", { class: "to" }, " → " + toText)),
         h("span", { class: "pv" }, L.preview(L.messageText(m))),
         h("span", { class: "st-slot" }, exception || L.messageStatus(m) ? h("span", { class: "st " + L.messageTone(m) + (exception ? "" : " plain"),
           title: hint }, exception || L.messageStatus(m)) : null),
