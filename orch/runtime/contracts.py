@@ -465,7 +465,8 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.JOBS_STOPPED: ("worker", "jobs"),
     TextKey.MONITOR_CHECK: ("worker", "status", "minutes", "assignment", "live_file", "items"),
     TextKey.MONITOR_REPORT: ("worker", "health", "minutes"),
-    TextKey.DISCUSSION_APPLY: ("request",),  # request: the user's own words with Apply, or ""
+    TextKey.DISCUSSION_APPLY: ("request", "milestone_change"),  # request: the user's own words with Apply, or "";
+    #   milestone_change: True when the discussion wanted one, so a reply after a later question is still read as a change
     TextKey.REM_WORKER_LINE: ("worker", "status", "assignment", "open_report", "idle_since", "jobs"),
     TextKey.REM_WORKERS: ("workers",),
     TextKey.REM_LABELS: ("workers",),
