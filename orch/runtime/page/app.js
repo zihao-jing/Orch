@@ -566,11 +566,13 @@
           on: { click: ev => { if (!ev.target.closest("button")) pick(m); }, keydown: ev => { if ((ev.key === "Enter" || ev.key === " ") && ev.target === ev.currentTarget) { ev.preventDefault(); pick(m); } } } },
           h("div", { class: "ms-top" }, h("span", { class: "ms-num", "aria-hidden": "true" }, m.status === "done" ? "✓" : String(i + 1)),
             h("span", { class: "ms-status" }, L.MS_STATUS[m.status] || ""),
+            h("span", { class: "grow" }),
+            m.status === "done" ? h("button", { type: "button", class: "link ms-reopen", title: "Open this milestone again",
+              on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen") : null,
             m.score !== null && m.score !== undefined && m.status === "done" ? h("span", { class: "ms-score", title: "Score out of 5" }, m.score + " / 5") : null),
           h("div", { class: "t" }, m.title),
           m.status === "current" && n ? [h("div", { class: "bar" }, h("i", { style: "width:" + Math.round(100 * d / n) + "%" })), h("div", { class: "mute small" }, d + " of " + n + " done")] : null,
-          m.status === "done" ? h("div", { class: "milestone-actions" },
-            h("button", { type: "button", class: "link", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen")) : null)))];
+          null)))];
       if (shown) {
         if (shown.text || (shown.rubric || []).length) {
           const box = foldBox("ms-details", msOpen, "orch-msdetails-open", "Details", shown.title, v => { msOpen = v; });
