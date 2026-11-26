@@ -444,7 +444,7 @@ def _handler(board: Board, bind: str):
             for f in sorted((board.run_dir / "live").glob("*.jsonl")):
                 try:
                     size = f.stat().st_size
-                    off = offsets.get(f.name, size if first else 0)
+                    off = offsets.get(f.name, f.read_bytes().rfind(b"\n") + 1 if first else 0)
                     if size > off:
                         with f.open("rb") as fh:
                             fh.seek(off)
