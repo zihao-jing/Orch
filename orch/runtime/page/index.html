@@ -13,17 +13,12 @@
  <header>
   <div class="run-heading"><h1 id="title">Orch dashboard</h1><span id="runstate"></span></div>
   <div class="header-actions" id="header-actions">
-   <button class="pri" id="talkbtn" type="button" aria-haspopup="dialog" aria-expanded="false">Talk<span id="talkbadge"></span></button>
+   <button id="nightbtn" type="button" class="quiet" aria-pressed="false" title="The manager answers questions on its own and records its choices">Night mode</button>
+   <button id="runsbtn" type="button" class="quiet" title="Read the records of previous runs">Earlier runs</button>
+   <button id="stopbtn" type="button" class="quiet danger-text">Stop agents</button>
+   <button id="morebtn" type="button" class="icon" aria-haspopup="dialog" title="Update, restart, or close Orch" aria-label="Update, restart, or close Orch">⋯</button>
    <button class="icon" id="themebtn" type="button" title="Switch between light and dark" aria-label="Switch between light and dark">◐</button>
-   <details class="menu" id="run-menu">
-    <summary class="icon" aria-label="Run actions" title="Run actions">⋯</summary>
-    <div class="menu-items">
-     <button id="nightbtn" type="button" aria-pressed="false" title="The manager answers questions on its own and records its choices">Night mode</button>
-     <button id="runsbtn" type="button" title="Read the records of previous runs">Earlier runs</button>
-     <button id="morebtn" type="button" aria-haspopup="dialog" title="Update, restart, or close Orch">More</button>
-     <button id="stopbtn" type="button" class="danger-text">Stop agents</button>
-    </div>
-   </details>
+   <button class="pri" id="talkbtn" type="button" aria-haspopup="dialog" aria-expanded="false">Talk<span id="talkbadge"></span></button>
   </div>
  </header>
  <div id="lost" class="banner lost" role="alert" hidden>Connection lost. Trying again&hellip;</div>

@@ -478,25 +478,26 @@
     if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "sm", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
     controls.append(h("button", { type: "button", class: "sm", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"));
     if (a.role !== "monitor" && a.lifecycle === "open") controls.append(terminalLink(a));
-    controls.append(h("span", { class: "grow" }), actions);
+    controls.append(h("span", { class: "grow" }));
     body.append(controls);
     const activity = h("div", { class: "activity-body", data: { livelog: a.id }, hidden: !openAct.has(a.id) });
-    items.append(h("button", { type: "button", title: "Show this agent’s recent output and tools",
+    controls.insertBefore(h("button", { type: "button", class: "sm", title: "Show this agent’s recent output and tools",
       on: { click: ev => {
         activity.hidden = !activity.hidden;
-        ev.currentTarget.textContent = activity.hidden ? "Recent activity" : "Hide recent activity";
+        ev.currentTarget.textContent = activity.hidden ? "Activity" : "Hide activity";
         if (activity.hidden) openAct.delete(a.id);
         else { openAct.add(a.id); paintActivity(a.id); loadLive(a.id, "open"); }
-      } } }, openAct.has(a.id) ? "Hide recent activity" : "Recent activity"));
+      } } }, openAct.has(a.id) ? "Hide activity" : "Activity"), controls.querySelector(".grow"));
     body.append(activity);
-    if (a.role === "worker") L.workerActions(a).forEach(type => items.append(h("button", { type: "button",
-      class: type === "WorkerDelete" ? "danger-text" : "",
+    if (a.role === "worker") L.workerActions(a).forEach(type => (type === "WorkerDelete" ? items : controls).append(h("button", { type: "button",
+      class: type === "WorkerDelete" ? "danger-text" : "sm",
       title: { WorkerClose: "Close this worker and keep its session", WorkerReopen: "Reopen this worker in its saved session", WorkerDelete: "Permanently remove this worker from the team" }[type],
       on: { click: ev => workerAct(type, a, ev.currentTarget) } },
       { WorkerClose: "Close", WorkerReopen: "Reopen", WorkerDelete: "Delete" }[type])));
-    if (a.lifecycle === "open") items.append(a.stopped_by_user
-      ? h("button", { type: "button", title: "Resume this agent in its saved session", on: { click: act("StartAgents", { agents: [a.id] }) } }, "Start")
-      : h("button", { type: "button", title: "Stop this agent and its jobs", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
+    if (a.lifecycle === "open") controls.append(a.stopped_by_user
+      ? h("button", { type: "button", class: "sm", title: "Resume this agent in its saved session", on: { click: act("StartAgents", { agents: [a.id] }) } }, "Start")
+      : h("button", { type: "button", class: "sm", title: "Stop this agent and its jobs", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
+    if (items.children.length) controls.append(actions);   // only Delete stays behind ⋯
     return box;
   }
   function railDot(a) {
@@ -1011,8 +1012,6 @@
     $("talkin").addEventListener("input", e => { drafts["talk:" + who] = e.target.value; saveDrafts(); });
     $("talkin").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendTalk(); } });
     document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("talk").hidden && !$("dlg").open && !$("dlg2").open) closeTalk(); });
-    const runMenu = $("run-menu");
-    ["nightbtn", "stopbtn", "morebtn", "runsbtn"].forEach(id => $(id).addEventListener("click", () => { runMenu.open = false; }));
     document.addEventListener("click", e => document.querySelectorAll("details.menu[open]").forEach(menu => {
       if (!menu.contains(e.target)) menu.open = false;
     }));

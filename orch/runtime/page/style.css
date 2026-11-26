@@ -36,13 +36,17 @@
 html, body { margin: 0; background: var(--page); color: var(--ink); font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { overflow-wrap: anywhere; }
 .wrap { max-width: 1440px; margin: 0 auto; padding: 0 clamp(16px, 3.3vw, 48px) 48px; }
-header { min-height: 74px; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
+header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; padding: 6px 0; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.header-actions button.quiet { background: transparent; border-color: transparent; color: var(--ink2); padding: 5px 9px; }
+.header-actions button.quiet:hover { background: var(--panel); border-color: var(--line); }
+.header-actions button.quiet.on { color: var(--accent); border-color: var(--line); }
+.header-actions button.quiet.danger-text { color: var(--danger, #a33); }
 .run-heading, .header-actions, #runstate, .state-label { display: flex; align-items: center; gap: 8px; }
 .run-heading { flex-wrap: wrap; gap: 3px 13px; min-width: 0; }
-.header-actions { flex: none; }
+.header-actions { flex: none; flex-wrap: wrap; justify-content: flex-end; }
 #runstate { flex-wrap: wrap; color: var(--mute); }
 h1, h2, h3 { margin: 0; line-height: 1.25; }
-h1 { font-size: 22px; font-weight: 680; letter-spacing: -.025em; }
+h1 { font-size: 19px; font-weight: 680; letter-spacing: -.025em; }
 h2 { font-size: 15px; font-weight: 680; }
 h3 { font-size: 14px; font-weight: 660; }
 p { margin: 0 0 8px; }
@@ -278,7 +282,8 @@ dialog .acts { justify-content: flex-end; margin-top: 12px; }
 }
 @media (max-width: 600px) {
   .wrap { padding: 0 12px 30px; }
-  header { min-height: 64px; margin-bottom: 13px; }
+  header { min-height: 44px; margin-bottom: 10px; }
+  .header-actions { flex-wrap: wrap; }
   .header-actions { gap: 5px; }
   .workspace { gap: 12px; }
   .card { padding: 12px; }
