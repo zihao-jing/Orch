@@ -33,7 +33,7 @@
   <section class="card" aria-labelledby="msgs-h"><h2 id="msgs-h">Messages</h2>
    <div class="mfilter"><input type="search" id="msearch" placeholder="Search messages" aria-label="Search messages">
     <select id="mwho" class="sm" aria-label="Show messages of"></select></div>
-   <div id="messages"></div><div class="acts" style="margin-top:8px"><button type="button" class="sm" id="older" hidden>Older messages</button></div></section>
+   <div class="acts"><button type="button" class="sm" id="older" hidden>Older messages</button></div><div id="messages"></div></section>
   <details class="card" id="goldcard"><summary><h2>Golden board</h2></summary><div id="golden"></div></details>
   <details class="card" id="auditcard"><summary><h2>Audit</h2></summary><div id="audit"></div></details>
  </main>
@@ -51,6 +51,7 @@
 </div>
 
 <dialog id="dlg"><h3 id="dlg-h"></h3><div id="dlg-b"></div><div class="acts" id="dlg-a"></div></dialog>
+<dialog id="dlg2"><h3 id="dlg-h2"></h3><div id="dlg-b2"></div><div class="acts" id="dlg-a2"></div></dialog>
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="logic.js"></script>
 <script src="app.js"></script>
