@@ -50,6 +50,11 @@ class EngineTest(unittest.TestCase):
     def chat(self, engine, id, agent="worker-1"):
         return engine.submit(C.Chat(agent, self.clock.now(), id, text=id))
 
+    def test_MOD_1_a_started_orch_lists_the_models_of_its_settings(self):
+        engine = self.engine([agent("worker-1")], list_models=False,
+                             models={"gpt": {"backend": "codex", "backend_options": {"model": "gpt-5.5", "effort": "high"}}})
+        self.assertEqual([(m.id, m.backend, m.model) for m in engine.store.snapshot().catalog], [("gpt", "codex", "gpt-5.5")])
+
     def test_MSG_1_writing_capabilities(self):
         for while_writing in (True, False):
             with self.subTest(while_writing=while_writing), tempfile.TemporaryDirectory() as directory:

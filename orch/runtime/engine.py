@@ -82,6 +82,32 @@ class Engine:
             except BaseException:
                 self.close()
                 raise
+            self._fill_catalog()
+
+    def _fill_catalog(self) -> None:
+        """MOD-1, 2: the models of the settings for the page now; their effort levels as each CLI lists them come later,
+        from a background thread (a CLI may take seconds to answer, or not answer)."""
+        if not (self.settings or {}).get("models"):
+            return
+        self.store.configure(catalog=models.catalog(self.settings, {}))
+        backends = sorted({str(e.get("backend") or "") for e in (self.settings.get("models") or {}).values()
+                           if isinstance(e, dict)} & set(self.factories))
+        if not backends or self.settings.get("list_models", True) is False:
+            return
+
+        def listing() -> None:
+            listed: Dict[str, Any] = {}
+            for b in backends:
+                try:
+                    listed[b] = list(self.factories[b]().catalog())
+                except Exception as exc:  # a CLI that cannot list: its models keep the settings' effort
+                    LOG.info("could not list the models of %s: %s", b, exc)
+            try:
+                if not self._closed:
+                    self.store.configure(catalog=models.catalog(self.settings, listed))
+            except Exception as exc:
+                LOG.info("could not save the model list: %s", exc)
+        threading.Thread(target=listing, name="orch-models", daemon=True).start()
 
     def _recover(self) -> None:
         # Attach first so replayed process operations can act on the saved CLI. Replay its output after pending facts.

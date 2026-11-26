@@ -487,6 +487,10 @@ class Viewer:
         self.snapshot()
         if self._store is None:
             return {"ok": False, "error": "an old run: it can be read, not changed"}
+        if not self.orch_running():
+            # never saved for later: a click here would otherwise act, maybe many times, when Orch next starts
+            return {"ok": False, "shown": "No Orch is running this run, so nothing was done. To change it, start it: "
+                                          "orch run <project> --resume --serve"}
         from ..cli import write_command
         write_command(self.run_dir, command)
         return {"ok": True, "queued": True}

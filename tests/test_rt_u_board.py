@@ -129,3 +129,18 @@ class BoardChecklist(unittest.TestCase):
             self.assertEqual(c["steps"][0]["items"], [[True, "greets"], [False, "tests"]])
             self.assertEqual(b.checklist("m2")["error"], "none")
             self.assertEqual(b.checklist("m9")["error"], "not found")
+
+
+class ViewerRefusesWithoutOrch(unittest.TestCase):
+    def test_a_request_is_never_saved_for_a_later_orch(self):
+        from unittest import mock
+        from orch.runtime.board import Viewer
+        with tempfile.TemporaryDirectory() as d:
+            v = Viewer(Path(d))
+            v._store = object()
+            with mock.patch.object(Viewer, "snapshot", lambda self: None), \
+                    mock.patch.object(Viewer, "orch_running", lambda self: False):
+                r = v.submit({"type": "WorkerAdd", "id": "x"})
+            self.assertFalse(r["ok"])
+            self.assertIn("No Orch is running", r["shown"])
+            self.assertFalse((Path(d) / "commands").exists())
