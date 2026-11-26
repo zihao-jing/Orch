@@ -88,6 +88,15 @@ class Facts(unittest.TestCase):
         lines = audit.version_lines()
         self.assertTrue(lines[0].startswith("Orch "))
 
+    def test_a_note_to_the_user_is_shown_in_its_words(self):
+        note = message("xnote", sender="orch", recipient="user", body="", status="delivered",
+                       text=C.TextRef(C.TextKey.NOTE_FINISHED, {}))
+        s = self.snap(note)
+        digest, seen = audit.build(self.run, s, list(s.messages.values()), versions=VERSIONS)
+        self.assertIn("All milestones are done.", digest)
+        self.assertNotIn("(empty)", digest.split("## Messages")[1].split("## Turns")[0])
+        self.assertIn("All milestones are done.", seen["ids"]["xnote"])
+
     def test_AUD_1_the_window_starts_at_the_run_and_after_the_last_audit(self):
         s = self.snap(message("xold", created=T0 - 6000), message("xnew", created=T0 - 100))
         _, seen = audit.build(self.run, s, list(s.messages.values()), versions=VERSIONS)

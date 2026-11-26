@@ -264,7 +264,8 @@ def _milestone_start(t: _Text) -> str:
         if t.get("approved_plan") else ""
     return last + t.fill(
         "The milestone “{title}” starts now.\n\n{text}\n\n"
-        "Write {critic} its instruction, and set the rubric. {critic} keeps its checklist for it in `{checklist_path}`.")
+        "Write {critic} its instruction, and set the rubric. I tell {critic} myself to keep its checklist in "
+        "`{checklist_path}`, so your instruction needs no path.")
 
 
 def _checklist_complete(t: _Text) -> str:

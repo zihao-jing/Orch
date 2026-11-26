@@ -87,8 +87,15 @@ def excerpt(text: str, limit: int = EXCERPT) -> str:
     return flat if len(flat) <= limit else flat[:limit].rstrip() + " …"
 
 
-def _text(m: Message) -> str:
-    return m.rendered or m.body
+def _text(m: Message, snap: Optional[Snapshot] = None) -> str:
+    """What the recipient read. A note to the user is never sent to a CLI: its words come from its text key."""
+    if m.rendered or m.body or not (m.text and snap is not None):
+        return m.rendered or m.body
+    from . import texts
+    try:
+        return texts.words(m.text, snap)
+    except Exception:  # an unknown key in an old record: shown as empty rather than stopping the audit
+        return ""
 
 
 # ------------------------------------------------------------------------------------------------ AUD-2 facts
@@ -187,7 +194,7 @@ def build(run_dir: Path, snap: Snapshot, messages: Sequence[Message], findings: 
         waited = f", delivered after {_mins(m.delivered_at - m.created)}" if m.delivered_at else ""
         out.append(f"- {m.id} · {_hm(m.created)} · {m.sender}→{m.recipient} · {m.status.value}{waited}"
                    + (f" · held by {', '.join(str(h) for h in m.holds)}" if m.holds else "")
-                   + f": {excerpt(_text(m), limit)}")
+                   + f": {excerpt(_text(m, snap), limit)}")
     out += ["", f"## Turns ({len(tl)} in this stretch" + (f", the newest {len(shown_t)} shown" if len(tl) >
                                                             len(shown_t) else "") + ")", ""]
     for t in shown_t:
@@ -198,7 +205,7 @@ def build(run_dir: Path, snap: Snapshot, messages: Sequence[Message], findings: 
     if notes.strip():
         out += ["", "## The user's notes on earlier audits", "",
                 "Respect these. A dismissed point comes back only with new evidence, which you name.", "", notes.strip()]
-    shown = {m.id: _text(m) for m in shown_ms}
+    shown = {m.id: _text(m, snap) for m in shown_ms}
     shown.update({t["turn_id"]: (t.get("output") or "") + "\n" + (t.get("input") or "") for t in shown_t})
     text = "\n".join(out) + "\n"
     return text, {"since": since, "until": until, "ids": shown, "digest": text, "messages": len(ms), "turns": len(tl),
