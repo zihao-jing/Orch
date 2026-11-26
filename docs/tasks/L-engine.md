@@ -57,10 +57,11 @@ engine.state() / submit(command) / message(id) / messages(...)   # the Runtime p
 3. **Performing intents.** First every intent that is not a transmission, then the transmissions (`Send` of a message
    that `store.can_send` allows). For a transmission: `r = texts.render(snap, msg)`;
    `store.begin_send(id, r.text, r.given)` (saved before sending); then `adapter.send(id, r.text)`; on an exception
-   emit `SendFailed(message_id, error class)` as a new event. Mark every intent with `store.intent_done(id, error)`.
+   emit `SendFailed(message_id, error class)` as a new event. If the adapter's `caps.receipts` is False, emit `Received` yourself when
+   `send` returns. Copy `adapter.caps` to `Agent.caps` when an agent's adapter is made. Mark every intent with `store.intent_done(id, error)`.
    Actions that start, stop, restart or switch an agent use the adapter factory and `store.set_proc`; the system
    prompt comes from `texts.system_prompt`. Messages that wait (holds, closed agent, busy CLI without
-   caps.input_in_turn) are not sent; `store.to_send()` gives what may go now, check it after every event (MSG-1, 2).
+   caps.sends_while_writing) are not sent; `store.to_send()` gives what may go now, check it after every event (MSG-1, 2).
 4. **Engine events.** `OrchStarted` once after recovery; `Reconnected` per agent after a successful reconnect;
    `JobsChecked` from `adapter.jobs()` every `jobs_check_s` (default 60) per agent with a running job;
    `SmokeResult` from `models.smoke_test` when an action asks for one (run it in a thread; feed the result back as an
@@ -78,8 +79,8 @@ engine.state() / submit(command) / message(id) / messages(...)   # the Runtime p
 
 ## Tests (`tests/test_rt_l.py`, each requirement id in a test name or docstring)
 
-- MSG-1: a message to an agent that is writing goes out at once when caps allow input in a turn; with
-  `input_in_turn=False` it goes out right after TurnEnded.
+- MSG-1: a message to an agent that is writing goes out at once when caps.sends_while_writing; with
+  `sends_while_writing=False` it goes out right after TurnEnded.
 - MSG-2: a held message is not sent; released later, it goes out once.
 - MSG-6 / REC-8: crash after `begin_send` but before the intent is marked done (simulate by building a new Engine on the
   same run_dir): arrived True -> not sent again; False -> sent once more; never twice in the mock's received list.
