@@ -1962,7 +1962,8 @@ class TestProjectFolder(unittest.TestCase):
         for f in (".gitignore", "agents/manager/agent.yaml", "agents/manager/goal.md", "agents/critic/preference.md",
                   "agents/worker/agent.yaml"):
             self.assertTrue((d / f).is_file(), f)
-        self.assertFalse(list(d.glob("*.yaml")) + list(d.rglob("task.md")))
+        self.assertEqual([p.name for p in d.glob("*.yaml")], ["settings.yaml"])  # MOD-4: the model list
+        self.assertFalse(list(d.rglob("task.md")))
         self.assertEqual((d / "agents/critic/system_prompt.md").read_text(),
                          (ROOT / "orch/prompts/critic.md").read_text())  # copied from the role default
         cfg = load_config(str(self.tmp))  # the project root finds .orch/agents
@@ -2020,6 +2021,10 @@ class TestProjectFolder(unittest.TestCase):
                 .replace("approve_milestones: true\n", "").replace("max_rounds: 20 ", "# ").replace("max_rounds: 3\n", "")
             text = re.sub(r"(?m)^backend: \w+", "backend: mock", text)
             y.write_text(text + extra)
+        import yaml
+        st = yaml.safe_load((d / "settings.yaml").read_text())  # MOD-4: agents name models of settings.yaml
+        st["models"] = {k: {"backend": "mock", "backend_options": {}} for k in st["models"]}
+        (d / "settings.yaml").write_text(yaml.safe_dump(st))
         self.assertTrue(all(a.backend == "mock" for a in load_config(str(self.tmp)).monitors[0].agents))
         self.assertEqual(cli.main(["run", str(self.tmp)]), 0)
         t = next((d / "runs").glob("*/*/rounds/r000/t01-manager.json"))
