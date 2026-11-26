@@ -101,6 +101,8 @@ button[aria-busy="true"]::before { content: ""; display: inline-block; width: .7
 
 button.link, .link { width: fit-content; padding: 1px 0; color: var(--link); border: 0; border-radius: 2px; background: transparent; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; font-weight: 560; }
 button.link:hover, .link:hover { color: var(--ink); background: transparent; }
+.section-head button.link { text-decoration: none; }
+.section-head button.link:hover { text-decoration: underline; }
 .more-list { margin: 7px 0; }
 .icon, summary.icon { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; color: var(--ink2); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; font-size: 19px; line-height: 1; cursor: pointer; }
 summary.icon::-webkit-details-marker { display: none; }
