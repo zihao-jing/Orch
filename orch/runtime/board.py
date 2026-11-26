@@ -162,6 +162,11 @@ def _message_level(m: Message, roles: Dict[str, str]) -> str:
     return "critic" if "critic" in parties else "you"
 
 
+def _owner(m: Message) -> str:
+    """Whose line a message is on the page: its writer; Orch's messages count toward the one they went to."""
+    return m.recipient if m.sender == "orch" else m.sender
+
+
 def _orch_note(m: Message) -> bool:
     key = str(m.text.key) if m.text else ""
     return m.sender == "orch" and (key.startswith(("note_", "rem_")) or key in {
@@ -251,13 +256,14 @@ class Board:
         supported = {"you", "critic", "workers", "monitor"}
         levels = set(one("levels", "you,critic,workers,monitor").split(",")) & supported
         notes = one("notes") != "0"
+        hidden = {x for x in one("off").split(",") if x}  # agents switched off; a line belongs to its writer
         roles = {aid: a.get("role", "") for aid, a in (self.state().get("agents") or {}).items()}
         selected, total = [], 0
         cursor = before
         while levels:
             batch, more = self.runtime.messages(before=cursor, limit=500, q=search, agent=agent)
             for m in sorted(batch, key=lambda item: item.seq, reverse=True):
-                if _message_level(m, roles) not in levels or (not notes and _orch_note(m)):
+                if _message_level(m, roles) not in levels or (not notes and _orch_note(m)) or _owner(m) in hidden:
                     continue
                 total += 1
                 if len(selected) < limit:

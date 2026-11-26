@@ -45,6 +45,9 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual(board.messages({"timeline": ["1"], "levels": ["you"], "notes": ["0"]})["messages"], [])
         monitor = board.messages({"timeline": ["1"], "levels": ["monitor"]})
         self.assertEqual([m["id"] for m in monitor["messages"]], ["monitor"])
+        # one chip per agent: a line belongs to its writer, Orch's to the one it went to
+        off = board.messages({"timeline": ["1"], "limit": ["500"], "off": ["lead,lookout"]})
+        self.assertEqual({m["id"] for m in off["messages"]}, {"worker"})
 
     def test_UI_2_summary_has_model_and_character_counts_without_full_text(self):
         turn = "r001-t01-lead"

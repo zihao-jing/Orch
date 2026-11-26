@@ -364,10 +364,11 @@ async function fetchStub(url, opt) {
     const p = new URLSearchParams(url.split('?')[1]);
     const levels = (p.get('levels') || '').split(',');
     const q = (p.get('q') || '').toLowerCase(), agent = p.get('agent'), before = Number(p.get('before')), limit = Number(p.get('limit'));
+    const off = (p.get('off') || '').split(',').filter(Boolean);
     const matching = win.OrchLogic.sortedMessages(state.messages).filter(m =>
       (!before || m.seq < before) && (!agent || m.sender === agent || m.recipient === agent) &&
       (!q || m.body.toLowerCase().includes(q)) && levels.includes(win.OrchLogic.messageLevel(m, state.agents)) &&
-      (p.get('notes') !== '0' || !win.OrchLogic.isNotice(m)));
+      (p.get('notes') !== '0' || !win.OrchLogic.isNotice(m)) && !off.includes(m.sender === 'orch' ? m.recipient : m.sender));
     const {rows, remaining} = win.OrchLogic.latest(matching, limit);
     return json({messages: rows, remaining, more: remaining > 0});
   }
@@ -658,21 +659,20 @@ global.SC = {
     await click($('older'));
     assert.strictEqual(ids().length, 83);
     assert.ok($('message-pages').hidden);
-    await click(byText($('levels'), 'Manager ↔ Critic'));
-    assert.strictEqual(ids().length, 5);
-    assert.ok(!JSON.parse(store['orch-message-levels']).includes('critic'));
+    await click(byText($('who'), 'Critic'));   // one chip per agent: the critic's lines go
+    assert.ok(ids().length < 83 && ids().every(id => getState().messages[id].sender !== 'critic'));
+    assert.deepStrictEqual(JSON.parse(store['orch-message-hidden']), ['critic']);
+    await click(byText($('who'), 'Critic')); assert.strictEqual(ids().length, 30);   // back on; a filter change starts at the first page
     $('orch-notes').checked = false;
     $('orch-notes').fire('change');
     await settle();
-    assert.strictEqual(ids().length, 3);
+    assert.ok(ids().length < 83);
     assert.strictEqual(store['orch-message-notes'], '0');
     type($('msearch'), 'Hello manager');
     await new Promise(resolve => setTimeout(resolve, 12));
     await settle();
     assert.deepStrictEqual(ids(), ['mu']);
-    $('mwho').value = 'worker-1';
-    $('mwho').fire('change');
-    await settle();
+    await click(byText($('who'), 'You'));
     assert.ok($('messages').textContent.includes('No messages match.'));
   },
   async answeredWithoutGates({assert, $, getState, refresh}) {

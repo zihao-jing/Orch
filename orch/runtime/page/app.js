@@ -14,7 +14,8 @@
   const detail = new Map();
   let timeline = { rows: [], remaining: 0, limit: L.MESSAGE_PAGE, busy: false, queued: false };
   let headVersion = "";
-  let levels = new Set(Object.keys(L.LEVELS));
+  // agents whose lines are hidden; new agents show
+  let hiddenWho = new Set((() => { try { return JSON.parse(store.get("orch-message-hidden") || "[]"); } catch (e) { return []; } })());
   let who = "manager";          // the talk panel's recipient
   let seenSeq = null, modalRefresh = null;
   let goldText = null, auditText = null, auditNotes = null, goldEdit = false, notesEdit = false, lastSide = 0;
@@ -25,10 +26,6 @@
     set(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* no storage: fine */ } },
   };
   let drafts = {};
-  try {
-    const saved = JSON.parse(store.get("orch-message-levels"));
-    if (Array.isArray(saved)) levels = new Set(saved.filter(x => Object.hasOwn(L.LEVELS, x)));
-  } catch (e) { /* use all interaction levels */ }
   try { drafts = JSON.parse(window.sessionStorage.getItem("orch-drafts") || "{}"); } catch (e) { drafts = {}; }
   function saveDrafts() { try { window.sessionStorage.setItem("orch-drafts", JSON.stringify(drafts)); } catch (e) { /* ignore */ } }
   function clearDraft(k) { delete drafts[k]; saveDrafts(); }
@@ -599,8 +596,7 @@
 
 
   // messages
-  const messageFilter = () => ({ q: $("msearch").value, agent: $("mwho").value,
-    levels: [...levels], notes: $("orch-notes").checked });
+  const messageFilter = () => ({ q: $("msearch").value, off: [...hiddenWho], notes: $("orch-notes").checked });
 
   function cached(path) {
     if (!detail.has(path)) {
@@ -713,11 +709,15 @@
   }
 
   function renderMessages() {
-    const opts = [["", "All agents"]].concat(agentList().map(a => [a.id, nm(a.id)]));
-    const keep = $("mwho").value;
-    if (paint($("mwho"), JSON.stringify(opts), () => opts.map(x => h("option", { value: x[0] }, x[1])))) {
-      $("mwho").value = opts.some(x => x[0] === keep) ? keep : "";
-    }
+    const who = [["user", "You", "user"]].concat(agentList().map(a => [a.id, nm(a.id), a.role]));
+    paint($("who"), JSON.stringify([who, [...hiddenWho]]), () => who.map(([id, name, role]) => h("button", { type: "button",
+      class: "level-toggle who-" + role, "aria-pressed": String(!hiddenWho.has(id)),
+      title: (id === "user" ? "Your messages and Orch's notes to you" : "What " + name + " wrote, and Orch's messages to it"),
+      on: { click: () => {
+        if (hiddenWho.has(id)) hiddenWho.delete(id); else hiddenWho.add(id);
+        store.set("orch-message-hidden", JSON.stringify([...hiddenWho]));
+        $("who")._sig = null; renderMessages(); resetTimeline();
+      } } }, name)));
     const { rows, remaining, busy, ready } = timeline;
     const shown = rows.length, total = shown + remaining;
     $("message-pages").hidden = remaining <= 0;
@@ -777,17 +777,6 @@
 
   function wireFilters() {
     $("orch-notes").checked = store.get("orch-message-notes") !== "0";
-    Object.entries(L.LEVELS).forEach(([level, [name, title]]) => {
-      const b = h("button", { type: "button", class: "level-toggle level-" + level, title,
-        "aria-pressed": String(levels.has(level)),
-        on: { click: () => {
-          if (levels.has(level)) levels.delete(level); else levels.add(level);
-          b.setAttribute("aria-pressed", String(levels.has(level)));
-          store.set("orch-message-levels", JSON.stringify([...levels]));
-          resetTimeline();
-        } } }, name);
-      $("levels").append(b);
-    });
     $("orch-notes").addEventListener("change", e => {
       store.set("orch-message-notes", e.target.checked ? "1" : "0");
       resetTimeline();
@@ -797,7 +786,6 @@
       clearTimeout(timer);
       timer = setTimeout(resetTimeline, 250);
     });
-    $("mwho").addEventListener("change", () => { clearTimeout(timer); resetTimeline(); });
     $("older").addEventListener("click", () => loadTimeline(Math.min(L.MESSAGE_PAGE, timeline.remaining)));
     $("show-all").addEventListener("click", () => loadTimeline(timeline.remaining));
   }

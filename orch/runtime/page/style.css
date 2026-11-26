@@ -251,6 +251,10 @@ button.link.term::before { content: ">_"; font: 600 10px ui-monospace, Menlo, mo
 .level-critic { --level: var(--critic); }
 .level-workers { --level: var(--workers); }
 .level-monitor { --level: var(--monitor); }
+.who-user, .who-manager { --level: var(--you); }
+.who-critic { --level: var(--critic); }
+.who-worker { --level: var(--workers); }
+.who-monitor { --level: var(--monitor); }
 button.level-toggle { color: var(--level); display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 6px; border-color: transparent; }
 .level-toggle[aria-pressed="true"] { background: var(--surface); border-color: var(--line); }
 .level-toggle[aria-pressed="false"] { color: var(--mute); }

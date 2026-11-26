@@ -114,8 +114,9 @@
     return { rows: limit > 0 ? list.slice(-limit) : [], remaining: Math.max(0, list.length - limit) };
   }
 
-  function pageQuery({ limit = MESSAGE_PAGE, before = 0, q = "", agent = "", levels = Object.keys(LEVELS), notes = true }) {
+  function pageQuery({ limit = MESSAGE_PAGE, before = 0, q = "", agent = "", levels = Object.keys(LEVELS), notes = true, off = [] }) {
     const p = new URLSearchParams({ timeline: "1", limit: String(limit), levels: levels.join(",") || "none", notes: notes ? "1" : "0" });
+    if (off.length) p.set("off", off.join(","));
     if (before > 0) p.set("before", String(before));
     if (q.trim()) p.set("q", q.trim());
     if (agent) p.set("agent", agent);
