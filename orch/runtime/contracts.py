@@ -33,7 +33,8 @@ Holds
 Sending (MSG-6)
   - A message may go when it is `sendable` (waiting, no hold, sent_at 0) and its agent is not held. The store saves
     `rendered`, `sent_at` and attempts BEFORE Adapter.send(); SendFailed sets sent_at back to 0. Wherever sent_at
-    becomes 0, so does checked_at.
+    becomes 0, so does checked_at, except the MSG-5 resend after arrived() said False: it keeps checked_at, so the next
+    expiry fails the agent instead of sending again.
   - delivered = the CLI has it (Received). taken = its text entered the conversation: Received(taken=True) into the
     running turn, or a TurnStarted. answered = the turn that took it went on (next output) or started.
   - In doubt: when the CLI exited, or its session or process was replaced, every message to it that is waiting with
@@ -385,7 +386,10 @@ class TextKey(_Str):
     REM_NIGHT = "rem_night"
     REM_ASK_AND_END = "rem_ask_and_end"
     REM_WRITING = "rem_writing"
-    REM_STATE_EDITED = "rem_state_edited"  # the user edited the agent's state.md
+    REM_STATE_EDITED = "rem_state_edited"  # Agent.state_edited is set and differs from given["state"]
+    REM_CHECKLIST = "rem_checklist"  # to the critic: where its checklist file is (new session or new milestone)
+    REM_DISCUSSION_OVER = "rem_discussion_over"  # the discussion ended without being applied
+    REM_NIGHT_OVER = "rem_night_over"
     # gates Orch opens, shown to the user
     GATE_PLAN = "gate_plan"
     GATE_MILESTONE = "gate_milestone"
@@ -403,6 +407,7 @@ class TextKey(_Str):
     ASK_JOBS_DELETE = "ask_jobs_delete"
     ASK_JOB_TERMINAL = "ask_job_terminal"  # TERM-5
     ASK_FORCE_SWITCH = "ask_force_switch"  # MOD-6; `new_session`: a new conversation with a handover starts
+    SMOKE_TEST = "smoke_test"  # MOD-7: the short real turn of a smoke test
     SMOKE_FAILED = "smoke_failed"  # MOD-7
     SWITCH_PENDING = "switch_pending"
     COMMAND_REFUSED = "command_refused"  # `why`: a Refusal
@@ -436,7 +441,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.RESTART_CONTINUE: (),
     TextKey.MESSAGE_AGAIN: (),
     TextKey.SESSION_RETURN: ("turns_dir", "since"),  # since: time; H says where the turns from then on are
-    TextKey.SESSION_FRESH: ("reason", "state_file"),
+    TextKey.SESSION_FRESH: ("state_file",),
     TextKey.HANDOVER_WRITE: ("agent",),
     TextKey.HANDOVER_REQUEST_CRITIC: ("agent", "why", "assignment"),
     TextKey.HANDOVER_REQUEST_MANAGER: ("agent", "why"),
@@ -449,7 +454,8 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
     TextKey.REVIEW_RUBRIC_MISSING: ("milestone",),
     TextKey.REVIEW_SCORE_LOW: ("milestone", "score", "pass_score"),
-    TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer}]; unsent:
+    TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer, approve}]
+    #   (approve: True/False for plan, milestone and change gates, else None); unsent:
     #                                      [{to, body}]; decide_again: milestone title or ""
     TextKey.MILESTONE_CHANGE_REQUEST: ("milestones",),  # [{id, title, text, status}]
     TextKey.MILESTONE_CHANGE_UNREADABLE: ("problem",),
@@ -459,7 +465,8 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.JOBS_STOPPED: ("worker", "jobs"),
     TextKey.MONITOR_CHECK: ("worker", "status", "minutes", "assignment", "live_file", "items"),
     TextKey.MONITOR_REPORT: ("worker", "health", "minutes"),
-    TextKey.DISCUSSION_APPLY: ("request",),  # request: the user's own words with Apply, or ""
+    TextKey.DISCUSSION_APPLY: ("request", "milestone_change"),  # request: the user's own words with Apply, or "";
+    #   milestone_change: True when the discussion wanted one, so a reply after a later question is still read as a change
     TextKey.REM_WORKER_LINE: ("worker", "status", "assignment", "open_report", "idle_since", "jobs"),
     TextKey.REM_WORKERS: ("workers",),
     TextKey.REM_LABELS: ("workers",),
@@ -476,6 +483,9 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.REM_ASK_AND_END: (),
     TextKey.REM_WRITING: ("rules",),
     TextKey.REM_STATE_EDITED: ("path",),
+    TextKey.REM_CHECKLIST: ("path",),
+    TextKey.REM_DISCUSSION_OVER: (),
+    TextKey.REM_NIGHT_OVER: (),
     TextKey.GATE_PLAN: ("milestones",),
     TextKey.GATE_MILESTONE: ("milestone", "title", "score"),
     TextKey.GATE_MILESTONE_CHANGE: (),
@@ -491,6 +501,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.ASK_JOBS_DELETE: ("worker", "jobs"),
     TextKey.ASK_JOB_TERMINAL: ("agent", "jobs"),  # jobs empty: it is writing
     TextKey.ASK_FORCE_SWITCH: ("agent", "jobs", "new_session"),
+    TextKey.SMOKE_TEST: (),
     TextKey.SMOKE_FAILED: ("agent", "choice", "why"),
     TextKey.SWITCH_PENDING: ("agent", "choice"),
     TextKey.COMMAND_REFUSED: ("why",),
@@ -525,7 +536,6 @@ class Choice:
     options: Dict[str, Any] = field(default_factory=dict)
     env: Dict[str, str] = field(default_factory=dict)  # may hold keys: see `_stored`
     name: str = ""  # a backup's name (REC, MOD-3); "" for the main choice
-    retries: int = 5
 
     @property
     def session_key(self) -> str:
@@ -652,7 +662,8 @@ class Message:
     #                      Whichever turn takes it in also gets that turn's started_by, joined, jobs, triggers, keys
     #                      and draft (not a turn that took in the apply message), and not this message's own trigger
     #                      and key. A turn that starts while Agent.retry.turn is set continues that one, as if a message
-    #                      did. "": an ordinary message, with its own trigger and key
+    #                      did. "": an ordinary message, with its own trigger and key. Store: when it is taken, the
+    #                      messages the continued turn took in and left unanswered count as answered (MSG-5 ignores them)
     when_idle: bool = False  # goes out only while the recipient has no open turn and no message sent to it unanswered:
     #                          the discussion apply message, so it never joins a draft turn. Never in `holds`; the
     #                          dashboard shows that it waits
@@ -743,10 +754,12 @@ class Agent:
     display: str = ""  # how others name it
     cwd: str = ""
     state_file: str = ""  # its state.md (SaveNotes)
+    state_edited: str = ""  # [engine] digest of state.md while it differs from what SaveNotes wrote last; else ""
     fresh_session: str = ""  # config: "compact", "new", "never" at a milestone start (assumption 3)
     lifecycle: Lifecycle = Lifecycle.OPEN  # [workers]
     status: AgentStatus = AgentStatus.IDLE  # the store derives it: Snapshot.status_of
     choice: Choice = field(default_factory=Choice)  # the current one; [recovery] (switch done)
+    choice_since: float = 0.0  # [store] when `choice` last changed (REC-5 counts return_after from it)
     choices: List[Choice] = field(default_factory=list)  # main first, then backups in order; [engine] from config
     actual_model: str = ""  # [fact] MOD-5
     caps: Caps = field(default_factory=Caps)  # [engine]
@@ -1034,6 +1047,8 @@ class RunInfo:
     workspace: str = ""
     run_dir: str = ""
     decisions_path: str = ""  # the decisions register
+    audit_notes_path: str = ""  # audit-decisions.md beside audit.findings_path(...), the file the auditor reads
+    audit_running: bool = False  # an audit runs now
     started: float = 0.0
     version: str = ""  # Orch's version
 
@@ -2022,6 +2037,12 @@ class Runtime(Protocol):
     def submit(self, command: UserCommand) -> Dict[str, Any]:
         """Run the command and return its CommandReply as `reply_json`."""
 
+    def message(self, id: str) -> Optional["Message"]:
+        """The full message (with `rendered`), from state.json or the ledger; None if unknown."""
+
+    def messages(self, before: int = 0, limit: int = 50, q: str = "", agent: str = "") -> Tuple[List["Message"], bool]:
+        """Messages older than seq `before` (0: newest), at most `limit`, in seq order, and whether more exist."""
+
 
 # ----------------------------------------------------------------------------------------------- stored form
 
@@ -2174,11 +2195,12 @@ def _load(tp: Any, v: Any) -> Any:
 # GET  /api/messages?before=<seq>&limit=&q=&agent=   {"messages": [Message without rendered], "more": bool}
 # GET  /api/message?id=                        {"message": Message with rendered}
 # GET  /api/turn?id=                           today's turn file (old runs too)
-# GET  /api/live?agent=&from=<n>               {"items": [{"at", "k": "text"|"tool", "s"}], "next": n}: the lines of
+# GET  /api/live?agent=&from=<n>               {"items": [{"n", "at", "k": "text"|"tool", "s"}], "next": n}: the lines of
 #                                              <run_dir>/live/<agent>.jsonl, which the engine writes
-# GET  /api/events                             server-sent: `state` {"rev"}, `live` {"agent", "at", "k", "s"}
+# GET  /api/events                             server-sent: `state` {"rev"}, `live` {"agent", "n", "at", "k", "s"};
+#                                              n: the line's index, so after a reconnect the page asks /api/live from n+1
 # GET  /api/golden | /api/audit_notes          {"text", "digest", "path"}
-# GET  /api/audit                              {"report", "running"}
+# GET  /api/audit                              {"report", "running"}: report = the reply part of the newest audit, redacted
 # GET  /api/runs                               {"runs": [{"id", "project", "status", "started", "old": bool}]}
 # GET  /api/run?id=                            an old run, as today's board state (UI-6)
 # Shown texts (gate.words, message.text, reply.text) carry a TextRef; J adds `shown`, the rendered words, next to it.
