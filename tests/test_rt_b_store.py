@@ -247,7 +247,7 @@ class TestMessages(Base):
         self.send("open")
         self.assertEqual(len(self.s.messages), S.KEEP_MESSAGES + 1)
         self.assertNotIn("u0", self.s.messages)
-        with open(self.dir / "messages.jsonl", "ab") as f:
+        with open(self.dir / "ledger.jsonl", "ab") as f:
             f.write(b'{"id": "torn')
         self.reopen()
         self.assertEqual(self.store.message("u0").body, "Text 0")

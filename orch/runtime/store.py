@@ -4,7 +4,7 @@ Files in the run folder
   state.json        everything, replaced in one atomic write; `runtime` holds the records, the other keys are for the old
                     readers (report, audit, commands)
   state.prev.json   the write before it, used if state.json cannot be read
-  messages.jsonl    the ledger: closed messages that left the state (one line each; the last line of an id counts)
+  ledger.jsonl      the ledger: closed messages that left the state (one line each; the last line of an id counts)
   archive.jsonl     gates, jobs and handled event keys that left the state
   rounds/rNNN/      turn files, as today
   locks/run.lock    one Orch per run
@@ -830,7 +830,7 @@ class _Change:
         # (a notice its agent has not taken in yet is needed: it may be in doubt later)
         for m in closed[:-KEEP_MESSAGES]:
             del s.messages[m.id]
-            out.append(("messages", to_dict(m)))
+            out.append(("ledger", to_dict(m)))
         for g in self._oldest([g for g in s.gates.values() if not g.is_open and not (
                 g.is_answer_gate and g.answer and not g.sent_in and not g.withdrawn)], KEEP_GATES):
             del s.gates[g.id]
@@ -1089,13 +1089,13 @@ class Store:
         """Any message of the run."""
         m = self.state.snap.messages.get(message_id)
         if m is None and message_id in self.old_messages:
-            rows = [r for r in _read_lines(self.run_dir / "messages.jsonl") if r.get("id") == message_id]
+            rows = [r for r in _read_lines(self.run_dir / "ledger.jsonl") if r.get("id") == message_id]
             m = from_dict(Message, rows[-1]) if rows else None
         return m
 
     def messages(self, before: int = 0, limit: int = 50, q: str = "", agent: str = "") -> Tuple[List[Message], bool]:
         """The newest `limit` messages with seq < before (0: no limit), in order, and whether there are older ones."""
-        rows: Dict[str, Any] = {r["id"]: r for r in _read_lines(self.run_dir / "messages.jsonl") if r.get("id")}
+        rows: Dict[str, Any] = {r["id"]: r for r in _read_lines(self.run_dir / "ledger.jsonl") if r.get("id")}
         rows.update(self.state.snap.messages)
         out = []
         for m in rows.values():
@@ -1139,7 +1139,7 @@ class Store:
             _replace(d / f"{stem}.output.md", rec["output"])
 
     def _archive(self, rows: List[Tuple[str, Dict[str, Any]]]) -> None:
-        for name in ("messages", "archive"):
+        for name in ("ledger", "archive"):
             mine = [r for n, r in rows if n == name]
             if not mine:
                 continue
@@ -1156,7 +1156,7 @@ class Store:
                 self._archived(name, r)
 
     def _archived(self, name: str, r: Dict[str, Any]) -> None:
-        if name == "messages":
+        if name == "ledger":
             self.old_messages.add(r.get("id", ""))
         elif "gate" in r:
             self.old_gates.add(r["gate"]["id"])
@@ -1201,7 +1201,7 @@ class Store:
         return st
 
     def _load_archives(self) -> None:
-        for name in ("messages", "archive"):
+        for name in ("ledger", "archive"):
             for r in _read_lines(self.run_dir / f"{name}.jsonl"):
                 self._archived(name, r)
         self._keys.update(self.state.handled)
