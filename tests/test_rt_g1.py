@@ -102,30 +102,55 @@ class TestUnreadable(unittest.TestCase):
         assert_none(self, decide(module(), s, tick(s)), NotifyReviewReady)
 
 
+DONE = "r001-t01-critic"  # the turn of the critic that ended with <done/> (the default turn id of the helpers)
+
+
 class TestReviewTrigger(unittest.TestCase):
-    def test_MS_4_complete_and_quiet_tells_the_manager_once(self):
-        s = base()
-        actions = decide(module(), s, tick(s))
-        n = assert_has(self, actions, NotifyReviewReady, milestone_id="m1", digest="d1", recipient="manager")
+    def test_MS_4_a_done_turn_tells_the_manager_once(self):
+        s = base(milestone("m1", checklist_path=CK, started=T0 - 500, done_turn=DONE))
+        n = assert_has(self, decide(module(), s, tick(s)), NotifyReviewReady, milestone_id="m1", digest=DONE,
+                       recipient="manager")
         self.assertEqual(n.message.key, K.CHECKLIST_COMPLETE)
         self.assertEqual(n.message.text.values["milestone"], "m1")
-        s2 = base(milestone("m1", checklist_path=CK, notified="d1"))
+        self.assertEqual(n.message.text.values["rubric_path"], "/run/rubric-1.md")
+        s2 = base(milestone("m1", checklist_path=CK, notified=DONE, done_turn=DONE))
         assert_none(self, decide(module(), s2, tick(s2)), NotifyReviewReady)
 
-    def test_MS_4_again_only_after_the_checklist_changed_and_is_complete_again(self):
-        s = base(milestone("m1", checklist_path=CK, notified="d1"), ck(complete=False, digest="d2"))
+    def test_MS_4_a_ticked_checklist_without_a_done_turn_tells_nothing(self):
+        s = base()  # the checklist is complete, the critic never said <done/>
         assert_none(self, decide(module(), s, tick(s)), NotifyReviewReady)
-        s = base(milestone("m1", checklist_path=CK, notified="d1"), ck(digest="d3"))
-        assert_has(self, decide(module(), s, tick(s)), NotifyReviewReady, digest="d3")
+
+    def test_MS_4_a_critic_done_turn_starts_the_review(self):
+        s = base(milestone("m1", checklist_path=CK, started=T0 - 500))
+        s, ev = turn_ended(s, "critic", reply=Reply(untagged="All done.", done=True))
+        actions = decide(module(), s, ev)
+        self.assertEqual(ms_of(actions)[0].done_turn, DONE)
+        assert_has(self, actions, NotifyReviewReady, milestone_id="m1", digest=DONE)
+
+    def test_MS_4_a_done_turn_before_the_milestone_started_does_not_count(self):
+        s = base(milestone("m1", checklist_path=CK, started=T0 - 10))
+        s, ev = turn_ended(s, "critic", reply=Reply(untagged="All done.", done=True))  # started at T0 - 30
+        self.assertEqual(find(decide(module(), s, ev), NotifyReviewReady), [])
+
+    def test_MS_4_a_second_done_turn_asks_again_and_no_other_turn_does(self):
+        s = base(milestone("m1", checklist_path=CK, started=T0 - 500, notified=DONE, done_turn=DONE))
+        s, ev = turn_ended(s, "critic", reply=Reply(untagged="Not yet.", done=False))
+        self.assertEqual(find(decide(module(), s, ev), NotifyReviewReady), [])
+        s, ev = turn_ended(s, "critic", reply=Reply(untagged="All done.", done=True))
+        s.turns["critic"].id = "r002-t01-critic"
+        actions = decide(module(), s, ev)
+        self.assertEqual(ms_of(actions)[0].done_turn, "r002-t01-critic")
+        assert_has(self, actions, NotifyReviewReady, digest="r002-t01-critic")
 
     def test_MS_4_waits_while_a_worker_writes_or_a_message_waits(self):
-        s = base(agent("worker-1", status="writing"))
+        s = base(milestone("m1", checklist_path=CK, done_turn=DONE), agent("worker-1", status="writing"))
         assert_none(self, decide(module(), s, tick(s)), NotifyReviewReady)
-        s = base(message("w1", "worker-1", "critic", status="waiting", sent_at=0.0))
+        s = base(milestone("m1", checklist_path=CK, done_turn=DONE),
+                 message("w1", "worker-1", "critic", status="waiting", sent_at=0.0))
         assert_none(self, decide(module(), s, tick(s)), NotifyReviewReady)
 
     def test_MS_4_running_jobs_do_not_block_and_are_shown(self):
-        s = base(job("worker-1/j1"))
+        s = base(milestone("m1", checklist_path=CK, done_turn=DONE), job("worker-1/j1"))
         n = assert_has(self, decide(module(), s, tick(s)), NotifyReviewReady)
         self.assertEqual(n.message.text.values["jobs"], ["worker-1: train.py"])
 
@@ -135,9 +160,9 @@ class TestReviewTrigger(unittest.TestCase):
         s = base(milestone("m1", checklist_path=CK, accepted=True))
         assert_none(self, decide(module(), s, tick(s)), NotifyReviewReady)
 
-    def test_scenario_5_MS_4_silent_reply_that_completes_the_checklist_still_offers_the_review(self):
-        s = base()
-        reply = Reply(untagged="All done.", silent=True, messages=[OutMessage("worker-1", "Thanks.")])
+    def test_scenario_5_MS_4_silent_done_reply_still_offers_the_review(self):
+        s = base(milestone("m1", checklist_path=CK, started=T0 - 500))
+        reply = Reply(untagged="All done.", silent=True, done=True, messages=[OutMessage("worker-1", "Thanks.")])
         s, ev = turn_ended(s, "critic", reply=reply)
         assert_has(self, decide(module(), s, ev), NotifyReviewReady, milestone_id="m1")
 
@@ -201,16 +226,16 @@ class TestDecision(unittest.TestCase):
                                                    "score": 2.0, "pass_score": 3.0})
         self.assertFalse(ms_of(actions)[0].accepted)
 
-    def test_MS_7_revise_changes_nothing_and_the_review_waits_for_a_changed_checklist(self):
+    def test_MS_7_revise_changes_nothing_and_the_review_waits_for_a_new_done(self):
         s, ev = manager_reply(review_snap(), decision="REVISE", score=2.0)
         actions = pipeline(s, ev)
         assert_none(self, actions, OpenGate)
         assert_none(self, actions, Send, recipient="critic")
         self.assertFalse(ms_of(actions)[0].accepted)
-        s2 = base(milestone("m1", checklist_path=CK, notified="d1", score=2.0), ck(complete=False, digest="d2"))
+        s2 = base(milestone("m1", checklist_path=CK, notified=DONE, done_turn=DONE, score=2.0))
         self.assertEqual(decide(module(), s2, tick(s2)), [])
-        s3 = base(milestone("m1", checklist_path=CK, notified="d1"), ck(digest="d3"))
-        assert_has(self, decide(module(), s3, tick(s3)), NotifyReviewReady)
+        s3 = base(milestone("m1", checklist_path=CK, notified=DONE, done_turn="r002-t01-critic"))
+        assert_has(self, decide(module(), s3, tick(s3)), NotifyReviewReady, digest="r002-t01-critic")
 
     def test_MS_8_pause_decision_is_held_by_gates_and_decided_again_after_it(self):
         s, ev = manager_reply(review_snap(), decision="PAUSE")
@@ -222,7 +247,7 @@ class TestDecision(unittest.TestCase):
         again = message("n2", "manager", key=K.GATE_ANSWERS, values={"answers": [], "unsent": [], "decide_again": "Milestone m1"})
         s2 = review_snap([again], paused=False)
         s2.milestones[0].held_decision = Decision.PAUSE
-        s2, ev2 = turn_ended(s2, "manager", reply=Reply(untagged="Ok.", decision="ACCEPT", score=4.0), started_by=["n2"])
+        s2, ev2 = turn_ended(s2, "manager", reply=Reply(untagged="Ok.", decision="ACCEPT", score=5.0), started_by=["n2"])
         self.assertEqual(len([g for g in find(pipeline(s2, ev2), OpenGate) if g.gate.kind == "milestone"]), 1)
 
     def test_MS_9_a_held_decision_is_not_acted_on(self):
@@ -340,7 +365,7 @@ class TestPlan(unittest.TestCase):
         s2 = snapshot(milestone("m1", checklist_path=CK, notified="d1", rubric=["r"]), milestone("m2", "pending"),
                       message("n1", "manager", key=K.CHECKLIST_COMPLETE, values={"milestone": "m1", "title": "Milestone m1", "text": "It works."}),
                       ck(), night=True)
-        s2, ev2 = manager_reply(s2, decision="ACCEPT", score=4.0)
+        s2, ev2 = manager_reply(s2, decision="ACCEPT", score=5.0)
         actions = decide(module(), s2, ev2)
         assert_none(self, actions, OpenGate)
         self.assertEqual([m.status for m in ms_of(actions)], ["done", "current"])
@@ -464,14 +489,18 @@ class TestChange(unittest.TestCase):
         self.assertEqual((start.message.text.values["milestone"], start.message.text.values["last_title"]), ("m2", "One"))
 
     def test_MS_14_an_old_completed_run_can_be_reopened(self):
-        s = snapshot(milestone("m1", "done", checklist_path=CK), ck(), finished=True)
+        s = snapshot(milestone("m1", "done", checklist_path=CK, done_turn=DONE), ck(), finished=True)
         actions = decide(module(), s, event(ReopenMilestone, s, "", milestone_id="m1"))
-        self.assertEqual(ms_of(actions)[0].status, "current")
+        m = ms_of(actions)[0]
+        self.assertEqual((m.status, m.done_turn), ("current", ""))
         assert_has(self, actions, SetFinished, finished=False)
         assert_has(self, actions, CommandReply, ok=True)
-        assert_none(self, actions, NotifyReviewReady)  # the old, complete checklist counts as seen
-        again = snapshot(milestone("m1", "current", checklist_path=CK, notified="@reopened"), ck(digest="dx"))
-        self.assertEqual(ms_of(decide(module(), again, tick(again)))[0].notified, "dx")
+        assert_none(self, actions, NotifyReviewReady)  # an old <done/> does not count
+        again = snapshot(milestone("m1", "current", checklist_path=CK, notified="@reopened"), ck())
+        assert_none(self, decide(module(), again, tick(again)), NotifyReviewReady)
+        again = snapshot(milestone("m1", "current", checklist_path=CK, notified="@reopened", done_turn="r002-t01-critic"),
+                         ck())
+        assert_has(self, decide(module(), again, tick(again)), NotifyReviewReady, digest="r002-t01-critic")
 
     def test_MS_14_only_a_finished_milestone_can_be_reopened(self):
         s = snapshot(milestone("m1", checklist_path=CK), ck())

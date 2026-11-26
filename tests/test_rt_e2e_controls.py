@@ -93,8 +93,10 @@ class TestControls(RuntimeCase):
             "<score>5</score><decision>ACCEPT</decision><summary>Verified.</summary>",
             "1. [m1] Revised output\n<rubric>Updated output works</rubric>",
         )
+        self.cli(CRITIC).script("Output is ready.\n<done/>")
         self.start()
         self.write_checklist(True)
+        self.assign()
         self.wait_for(lambda: bool(self.state.open_gates()), "milestone approval")
         review = next(g for g in self.state.open_gates() if g.kind == C.GateKind.MILESTONE)
         initial_review = self.assert_received_once(MANAGER, key=C.TextKey.CHECKLIST_COMPLETE)

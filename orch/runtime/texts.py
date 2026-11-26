@@ -269,26 +269,13 @@ def _milestone_start(t: _Text) -> str:
 
 
 def _checklist_complete(t: _Text) -> str:
-    full = t.seen.get("review") != "1"
-    if full:
-        t.given["review"] = "1"
-    parts = [t.fill("Every item of {critic}'s checklist is ticked, for the milestone “{title}” ({milestone}).")
-             + t.jobs(" Still running: ", ".")]
+    """MS-4: the critic says the milestone is done; its rubric is in the file the message names."""
+    body = t.fill("{critic} says the milestone is done. Review it now against the milestone and your rubric "
+                  "(`{rubric_path}`): look at the work, score each criterion, then give the score and your decision. "
+                  "If the work is not ready, write to {critic} what is missing instead.")
     if t.get("text"):
-        parts.append(t.fill("Done when: {text}"))
-    if t.get("rubric"):
-        parts.append("Your rubric:\n\n" + _bullets(t.get("rubric")))
-    if t.get("checklist"):
-        c = t.get("checklist")
-        parts.append("The checklist:\n\n" + (c if isinstance(c, str) else "\n".join(str(x) for x in c)))
-    if full:
-        parts.append(t.fill(
-            "Review the milestone now: look at the work, score each criterion, then give the score and your decision. If "
-            "{critic} still waits for an answer that matters for this, or the work is not ready, write to {critic} "
-            "instead and review later. You are told again only after the checklist has changed and is complete again."))
-    else:
-        parts.append(t.fill("Review the milestone, or first answer {critic}, as before."))
-    return "\n\n".join(parts)
+        body += "\n\n" + t.fill("Done when: {text}")
+    return body + t.jobs("\n\nStill running: ", ".")
 
 
 def _gate_answers(t: _Text) -> str:

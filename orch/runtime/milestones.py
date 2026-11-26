@@ -16,7 +16,7 @@ from . import contracts as C
 from .contracts import (Checklist, ChecklistStep, Milestone, MilestoneStatus as S, Snapshot, TextKey as K, TextRef)
 
 NAME = "milestones"
-REOPENED = "@reopened"  # Milestone.notified of a reopened milestone: the checklist as it is counts as seen
+REOPENED = "@reopened"  # Milestone.notified of a reopened milestone: no review until the critic says <done/> again
 
 
 # ------------------------------------------------------------------------------------------------ the checklist file
@@ -39,15 +39,6 @@ def read_checklist(path: str, text: Optional[str]) -> Checklist:
     body = "\n".join(f"{s.title}|{int(s.done)}|" + "|".join(f"{int(d)}{t}" for d, t in s.items) for s in steps)
     return Checklist(path=path, digest=hashlib.sha1(body.encode("utf-8")).hexdigest()[:16], steps=steps,
                      complete=all(s.done for s in steps))
-
-
-def checklist_lines(ck: Checklist) -> str:
-    """The checklist as a value for a text: a heading per step, one line per item."""
-    out: List[str] = []
-    for s in ck.steps:
-        out.append(f"{s.title}{'' if s.items else (' [x]' if s.done else ' [ ]')}")
-        out += [f"- [{'x' if d else ' '}] {t}" for d, t in s.items]
-    return "\n".join(out)
 
 
 # ----------------------------------------------------------------------------------------------- reading a list
@@ -90,6 +81,11 @@ def parse_list(text: str) -> List[Tuple[str, str, str]]:
         parts = re.split(r"\s+[—–-]\s+|:\s+", clean, maxsplit=1)
         out.append((mid_, re.sub(r"[*_`]", "", parts[0]).strip(), parts[1].strip() if len(parts) > 1 else ""))
     return out
+
+
+def rubric_path(run_dir: str, ms: Sequence[Milestone], m: Milestone) -> str:
+    """In the run's folder, named by the milestone's position, as checklist_path (MS-12): the critic sees no id."""
+    return f"{run_dir}/rubric-{[x.id for x in ms].index(m.id) + 1}.md"
 
 
 def _number(ms: Sequence[Milestone]) -> int:
@@ -195,6 +191,8 @@ class _Run:
             self.reopen(ev)
         elif isinstance(ev, C.TurnEnded) and ev.agent == self.manager:
             self.manager_turn(ev)
+        elif isinstance(ev, C.TurnEnded) and self.snap.critic and ev.agent == self.snap.critic.id:
+            self.critic_turn(ev)
         self.gate_closed()
         self.upkeep()
         if self.dirty:
@@ -219,8 +217,8 @@ class _Run:
         self.out += [C.Send(msg), C.CommandReply(ev.id)]
 
     def reopen(self, ev: C.ReopenMilestone) -> None:
-        """MS-12, 14: a finished milestone becomes the current one again; the checklist as it is counts as seen, so the
-        manager hears of it when the critic changes it."""
+        """MS-12, 14: a finished milestone becomes the current one again; an old <done/> does not count, so the manager
+        hears of it only after the critic says <done/> again."""
         m = next((x for x in self.ms if x.id == ev.milestone_id), None)
         if m is None:
             return self.refuse(C.Refusal.UNKNOWN)
@@ -231,7 +229,7 @@ class _Run:
             for g in self.open_gate(C.GateKind.MILESTONE, old.id):
                 self.out.append(C.CloseGate(g.id, withdrawn=True))
             self.put(replace(old, status=S.PENDING, accepted=False))
-        self.put(replace(m, status=S.CURRENT, ended=0.0, accepted=False, notified=REOPENED, asked_to_fix="",
+        self.put(replace(m, status=S.CURRENT, ended=0.0, accepted=False, notified=REOPENED, done_turn="", asked_to_fix="",
                          refreshed=list(self.snap.agents)))
         self.finished = False
         self.start_message(m)
@@ -276,6 +274,16 @@ class _Run:
         if way:
             return self.change_reply(t, r, msgs, way)
         self.decision(t, r, msgs)
+
+    def critic_turn(self, ev: C.TurnEnded) -> None:
+        """MS-4: a critic turn that ends with <done/>, started in this milestone and not part of a discussion, starts
+        the review; `done_turn` is that turn. Its checklist does not matter."""
+        snap, m = self.snap, self.cur()
+        t = snap.turns.get(ev.agent)
+        if m is None or t is None or t.reply is None or not t.reply.done or t.status != C.TurnStatus.OK \
+                or t.started < m.started or snap.drafting(ev.agent):
+            return
+        self.put(replace(m, done_turn=t.id))
 
     def plan_reply(self, t: C.Turn, r: C.Reply, msgs: List[C.Message]) -> None:
         """Until there is a plan, any reply with a numbered list (and no question) is read as one: a gate to approve,
@@ -329,7 +337,8 @@ class _Run:
         """Did the turn take in a message of these keys about this milestone (or answers that decide it again)?"""
         for x in msgs:
             v = x.text.values if x.text else {}
-            if x.key in keys and v.get("milestone") == m.id and (v.get("title"), v.get("text", m.text)) == (m.title, m.text):
+            if x.key in keys and v.get("milestone") == m.id \
+                    and (v.get("title", m.title), v.get("text", m.text)) == (m.title, m.text):
                 return True  # an old one of a rewritten milestone does not count (MS-13)
             if x.key == K.GATE_ANSWERS and K.GATE_ANSWERS in keys and v.get("decide_again") == m.title:
                 return True
@@ -433,8 +442,9 @@ class _Run:
                     self.out.append(C.CloseGate(og.id, withdrawn=True))
                 if reviewing:
                     self.note(K.NOTE_REVIEW_WITHDRAWN, {"milestone": m.id, "title": m.title})
+                # a rewritten milestone needs a <done/> of its own; the review is asked again only then
                 self.put(replace(m, rubric=list(proposed.rubric) if proposed else [], score=None, accepted=False,
-                                 summary="", notified="" if reviewing else m.notified))
+                                 summary="", notified="" if reviewing else m.notified, done_turn=""))
         elif self.cur() is None:  # added after the last one (MS-14): starts like any other
             nxt = next((x for x in self.ms if x.status == S.PENDING), None)
             if nxt:
@@ -445,7 +455,7 @@ class _Run:
         """The milestone becomes the current one; the manager gets the usual first message (its reply carries the
         rubric)."""
         refreshed = [] if any(x.status == S.DONE for x in self.ms) else list(self.snap.agents)  # none at the very first
-        m = replace(m, status=S.CURRENT, started=self.snap.now, ended=0.0, accepted=False, notified="",
+        m = replace(m, status=S.CURRENT, started=self.snap.now, ended=0.0, accepted=False, notified="", done_turn="",
                     asked_to_fix="", refreshed=refreshed)
         self.put(replace(m, checklist_path=self.checklist_path(m)))
         self.finished = False
@@ -475,14 +485,11 @@ class _Run:
         m, ck = self.cur(), snap.checklist
         if ck.path != m.checklist_path:
             return
-        if m.notified == REOPENED and ck.digest and not ck.error:
-            return self.put(replace(m, notified=ck.digest))
-        if ck.error:
-            return self.unreadable(m, ck)
-        if m.asked_to_fix:
-            m = replace(m, asked_to_fix="")
-            self.put(m)
-        self.review(m, ck)
+        if ck.error:  # the checklist does not start the review (MS-4), but a broken one is said to the critic
+            self.unreadable(m, ck)
+        elif m.asked_to_fix:
+            self.put(replace(m, asked_to_fix=""))
+        self.review(self.cur())
 
     def quiet(self) -> bool:
         """MS-4: no worker is writing, no message to a worker or the critic waits (the critic itself is not writing)."""
@@ -496,18 +503,19 @@ class _Run:
         return not any(x.recipient in team and x.status == C.MessageStatus.WAITING and x.drop is None
                        for x in snap.messages.values())
 
-    def review(self, m: Milestone, ck: Checklist) -> None:
+    def review(self, m: Milestone) -> None:
+        """MS-4: the manager is asked once for each <done/> (its turn is `done_turn`)."""
         snap = self.snap
-        if not ck.complete or ck.digest == m.notified or m.accepted or snap.paused or self.finished \
+        if not m.done_turn or m.done_turn == m.notified or m.accepted or snap.paused or self.finished \
                 or self.manager in snap.discussions:
             return
         if self.open_gate(C.GateKind.MILESTONE, m.id) or not self.quiet():
             return
         jobs = [f"{j.agent}: {j.label}" for j in snap.jobs.values() if j.state == C.JobState.RUNNING]
         msg = C.Message(self.new_id(), C.ORCH, self.manager, trigger=C.Trigger.ORCH, text=TextRef(
-            K.CHECKLIST_COMPLETE, {"milestone": m.id, "title": m.title, "text": m.text, "rubric": list(m.rubric),
-                                   "checklist": checklist_lines(ck), "jobs": jobs}))
-        self.out.append(C.NotifyReviewReady(msg, milestone_id=m.id, digest=ck.digest))
+            K.CHECKLIST_COMPLETE, {"milestone": m.id, "text": m.text,
+                                   "rubric_path": rubric_path(snap.run.run_dir, self.ms, m), "jobs": jobs}))
+        self.out.append(C.NotifyReviewReady(msg, milestone_id=m.id, digest=m.done_turn))
 
     def unreadable(self, m: Milestone, ck: Checklist) -> None:
         """MS-2: not complete; the critic is asked to fix it, once for each problem, after it has had a turn."""

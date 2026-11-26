@@ -451,7 +451,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.PLAN_LIST_MISSING: (),
     TextKey.MILESTONE_START: ("milestone", "title", "text", "checklist_path", "last_title", "approved_plan"),
     TextKey.SILENCE_CHECK: ("attempt", "attempts"),
-    TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
+    TextKey.CHECKLIST_COMPLETE: ("milestone", "text", "rubric_path", "jobs"),
     TextKey.REVIEW_RUBRIC_MISSING: ("milestone", "title"),
     TextKey.REVIEW_SCORE_LOW: ("milestone", "title", "score", "pass_score"),
     TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer, approve}]
@@ -852,6 +852,7 @@ class Reply:
     untagged: str = ""  # outside labels
     messages: List[OutMessage] = field(default_factory=list)
     silent: bool = False
+    done: bool = False  # critic only: <done/>, the milestone is finished in its view
     questions: List[Question] = field(default_factory=list)
     pauses: List[str] = field(default_factory=list)
     decision: Optional[Decision] = None
@@ -957,7 +958,8 @@ class Milestone:
     checklist_path: str = ""
     accepted: bool = False  # the manager accepted it; the approval gate may still be open
     summary: str = ""  # the manager's <summary> at its review
-    notified: str = ""  # checklist digest the manager was last told about (MS-4)
+    notified: str = ""  # the done turn (or REOPENED) the manager was last told about (MS-4)
+    done_turn: str = ""  # id of the critic's last turn that ended with <done/> for this milestone (MS-4)
     asked_to_fix: str = ""  # checklist digest (or error) the critic was asked to fix (MS-2)
     held_decision: Optional[Decision] = None  # [gates] MS-9: waits for the answers, then the manager decides again
     refreshed: List[str] = field(default_factory=list)  # agents whose session start was handled for this milestone
@@ -1033,7 +1035,7 @@ class Settings:
     return_after: float = 18000.0  # REC-5: try the main choice again
     golden_limit: int = 8000
     compact_wait: float = 600.0  # how long compact() may hold an agent
-    pass_score: Optional[float] = None
+    pass_score: Optional[float] = 4.5
     approve_plan: bool = True
     approve_milestones: bool = True
 

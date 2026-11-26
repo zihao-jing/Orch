@@ -12,10 +12,10 @@ from typing import Dict, List, Optional, Tuple
 from .contracts import (BrokenLabel, Decision, Health, OutMessage, Problem, Question, Reply, Role)
 
 MANAGER_LABELS = ("message", "question", "pause", "rubric", "score", "decision", "summary", "state")
-CRITIC_LABELS = ("message", "silent")
+CRITIC_LABELS = ("message", "silent", "done")
 LABELS = {Role.MANAGER: MANAGER_LABELS, Role.CRITIC: CRITIC_LABELS}
 # every name some role used to have: one the role no longer has is REMOVED
-KNOWN = set(MANAGER_LABELS) | {"silent", "plan", "checklist", "verdict", "wait-job", "no-wait", "preference",
+KNOWN = set(MANAGER_LABELS) | {"silent", "done", "plan", "checklist", "verdict", "wait-job", "no-wait", "preference",
                                "instruction", "workers", "to", "discussion-resolution"}
 
 _TAG = re.compile(r"<(/?)([a-z][a-z-]*)\b([^<>]*)>", re.I)
@@ -73,9 +73,9 @@ def _scan(text: str, names: Tuple[str, ...]):
         attrs, problem = _attrs(rest), None
         if not _ATTRS_OK.fullmatch(rest):  # unreadable attributes
             problem = Problem.NO_RECIPIENT
-        if selfclosed or name == "silent":  # <x/>, or <silent> alone
+        if selfclosed or name in ("silent", "done"):  # <x/>, or <silent> / <done> alone
             end = t.end()
-            if name == "silent" and i < len(tags) and tags[i].group(1) and tags[i].group(2).lower() == "silent" \
+            if name in ("silent", "done") and i < len(tags) and tags[i].group(1) and tags[i].group(2).lower() == name \
                     and not m_text[end:tags[i].start()].strip():
                 end = tags[i].end()
                 i += 1
@@ -141,6 +141,8 @@ def _read(reply: Reply, name: str, attrs: Dict[str, str], body: str) -> Optional
     """Put one well-formed label into the reply; a Problem if its content is unusable."""
     if name == "silent":
         reply.silent = True
+    elif name == "done":
+        reply.done = True
     elif name == "pause":
         reply.pauses.append(body)
     elif not body:
