@@ -685,7 +685,8 @@
     $("message-count").textContent = ready ? (remaining ? shown + " of " + total : shown + (shown === 1 ? " message" : " messages")) : "Loading…";
     if (!ready) return;
     const eligible = new Set(L.sendableToCritic(messages(), agents()));
-    patchRows($("messages"), rows, m => msgRow(m, eligible.has(m.id)), m =>
+    // the newest on top; older pages load below
+    patchRows($("messages"), rows.slice().reverse(), m => msgRow(m, eligible.has(m.id)), m =>
       JSON.stringify([m, eligible.has(m.id), nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
   }
 
@@ -805,7 +806,10 @@
         h("div", { class: "w" }, (me ? "You" : nm(m.sender)) + " - " + L.stamp(m.created, nowSrv()) + (me ? " - " + L.messageStatus(m) : "")),
         h("div", { class: "b" }, md(L.messageText(m)), elig.indexOf(m.id) >= 0 ? h("button", { type: "button", class: "sm", on: { click: act("SendToCritic", { message_id: m.id, agent: m.sender }) } }, "Send to critic") : null));
     })] : h("p", { class: "empty" }, "Nothing yet. Write below."));
-    if (changed && near) box.scrollTop = box.scrollHeight;
+    const fresh = force || box._who !== who;   // just opened, or another agent: start at the newest
+    box._who = who;
+    if (changed && (near || fresh)) box.scrollTop = box.scrollHeight;
+    if (fresh) setTimeout(() => { box.scrollTop = box.scrollHeight; }, 0);   // again once the window is laid out
     $("talk-h").textContent = "Talk to";
     const isLead = a.role === "manager" || a.role === "critic";
     paint($("talkacts"), JSON.stringify([isLead, !!disc, disc && disc.phase, who, S.run && S.run.project]), () => [

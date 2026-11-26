@@ -323,7 +323,11 @@
 
   // the first line of a text, for a folded message
   function preview(text, n) {
-    const s = String(text || "").replace(/\s+/g, " ").trim();
+    const s = String(text || "").split("\n")
+      .filter(l => !/^\s*```/.test(l) && !TABLE_SEP.test(l) && !/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l))
+      .map(l => l.replace(/^\s*(#{1,6}|>)\s*/, "").replace(/^\s*\|(.*?)\|?\s*$/, (_, r) => r.split("|").map(c => c.trim()).join(" · ")))
+      .join(" ").replace(/\*\*([^*]+)\*\*/g, "$1").replace(/`([^`]+)`/g, "$1")
+      .replace(/\s+/g, " ").trim();
     return s.length > (n || 140) ? s.slice(0, n || 140) + "…" : s;
   }
 

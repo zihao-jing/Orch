@@ -217,7 +217,7 @@ button.level-toggle { color: var(--level); display: inline-flex; align-items: ce
 .level-toggle[aria-pressed="false"] { color: var(--mute); }
 .level-toggle::before { content: ""; height: 6px; width: 6px; border-radius: 50%; background: currentColor; }
 .level-toggle[aria-pressed="false"]::before { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
-.page-controls { display: flex; align-items: center; gap: 5px 10px; flex-wrap: wrap; margin-bottom: 5px; }
+.page-controls { display: flex; align-items: center; gap: 5px 10px; flex-wrap: wrap; margin-top: 8px; }
 .msg + .msg { border-top: 1px solid var(--line); }
 .msg > summary { cursor: pointer; min-height: 30px; min-width: 0; display: flex; align-items: center; gap: 9px; border-radius: 6px; white-space: nowrap; padding: 2px 4px 2px 3px; color: var(--ink2); list-style: none; }
 .msg > summary::-webkit-details-marker { display: none; }

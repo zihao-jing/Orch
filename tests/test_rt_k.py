@@ -129,6 +129,7 @@ const T = {
     const o = L.markdown('> said\n---\n*it* x*y* [d](https://e.org) [x](javascript:1)');
     assert.deepStrictEqual(o.map(x => x.t), ['quote', 'hr', 'p']);
     assert.deepStrictEqual(o[2].lines[0].map(x => x.t), ['i', 'text', 'a', 'text']);
+    assert.strictEqual(L.preview('| A | B |\n|---|---|\n| `x` | **2** |\n# Next'), 'A · B x · 2 Next');   // no Markdown symbols in a folded row
   },
   gateAnswer() {
     const g = {id: 'g1'};
@@ -635,12 +636,15 @@ global.SC = {
     await refresh();
     const ids = () => $('messages').children.map(row => row.dataset.message);
     assert.strictEqual(ids().length, 30);
-    assert.strictEqual(ids().at(-1), 'typed-83');
+    assert.strictEqual(ids()[0], 'typed-83');   // the newest on top
+    assert.strictEqual(ids().at(-1), 'typed-54');
     assert.strictEqual($('remaining').textContent, '53 older');
     assert.ok(!$('show-all').hidden);
     await click($('older'));
     assert.strictEqual(ids().length, 60);
     assert.ok(gets.some(url => url.includes('before=54')));
+    assert.strictEqual(ids()[0], 'typed-83');   // older ones go below
+    assert.strictEqual(ids().at(-1), 'typed-24');
     assert.ok($('show-all').hidden);
     await click($('older'));
     assert.strictEqual(ids().length, 83);
