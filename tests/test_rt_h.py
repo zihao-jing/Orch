@@ -29,7 +29,7 @@ VALUES = {
     "health": "quiet", "request": "", "open_report": False, "idle_since": T0 - 720, "workers": ["worker-1", "worker-2"],
     "chars": 9000, "limit": 8000, "words": ["boss"], "gates": ["question (A or B?)"], "rules": ["Be brief."],
     "milestones": ["1. Data"], "score": 4.5, "pass_score": 4.8, "rounds": 5000, "choices": ["opus", "gpt"], "choice": "opus",
-    "new_session": True, "files": ["a.yaml"],
+    "new_session": True, "files": ["a.yaml"], "milestone_change": False,
 }
 TO_WORKER = ("job_wakeup", "job_lost", "retry_continue", "restart_continue", "message_again", "session_return",
              "session_fresh", "handover_write", "handover_instruction")

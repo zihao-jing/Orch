@@ -376,7 +376,7 @@ def _discussion_apply(t: _Text) -> str:
     out = ("I am applying our discussion now. Write what we agreed on, one complete message for each recipient; it "
            "replaces everything you drafted in the discussion. If nothing changes for someone, write them nothing.")
     d = t.snap.discussions.get(t.reader)
-    if d is not None and d.milestone_change:
+    if t.get("milestone_change") or (d is not None and d.milestone_change):
         out += " Include the whole new list of milestones in the numbered form."
     if t.role == Role.CRITIC:
         out += " Also sum up in plain text what changes, without <silent/>."
@@ -561,6 +561,7 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                                      + " finish or stop " + ("them" if _many(t) else "it") + " before deleting the worker for good?"),
     K.ASK_JOB_TERMINAL: _ask_terminal,
     K.ASK_FORCE_SWITCH: _force,
+    K.SMOKE_TEST: "This is a short test of your program. Reply with the single word OK and do nothing else.",
     K.SMOKE_FAILED: "The test of {choice} for {agent} failed, so nothing was switched: {why}.",
     K.SWITCH_PENDING: "{agent} switches to {choice} as soon as it is idle and has no job.",
     K.COMMAND_REFUSED: lambda t: next((s for k, s in REFUSED.items() if str(k) == str(t.get("why"))), t.value("why")),
