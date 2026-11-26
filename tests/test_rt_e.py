@@ -67,7 +67,7 @@ class TestWorkers(unittest.TestCase):
         assert_has(self, fin, Drop, message_id="m1", reason=DropReason.WORKER_CLOSED)
         stop = decide(W, snap, event(WorkerClose, snap, "worker-1", jobs="stop"))
         assert_has(self, stop, StopJob, job_id="worker-1/j1")
-        assert_has(self, stop, Tell, recipient="critic", key=TextKey.JOBS_STOPPED)
+        assert_none(self, stop, Tell)  # the critic is not told: its reminder shows the worker as stopped
 
     def test_scenario_16_late_result_of_a_closed_worker_is_recorded_then_reopened(self):
         snap = snapshot(agent("worker-1", lifecycle="closed"))
@@ -429,12 +429,13 @@ class TestReview2(unittest.TestCase):
         assert_none(self, acts, ResetSilence)
         assert_has(self, acts, AskManagerToCheck)
 
-    def test_SIL_5_a_reply_the_user_sends_on_is_a_round_too(self):
+    def test_SIL_5_a_reply_the_user_sends_on_is_refused_and_counts_no_round(self):
         reply = message("r1", "user", "worker-1", status="delivered", needs_answer=False, turn="t9", body="Mine.")
         reply.sender, reply.seq = "worker-1", 5
         snap = snapshot(reply)
         r = decide(routing_module(), snap, event(SendToCritic, snap, "", message_id="r1"))
-        assert_has(self, decide(S, snap, event(SendToCritic, snap, "", message_id="r1"), prior=r), CountRound)
+        assert_has(self, r, CommandReply, ok=False)
+        assert_none(self, decide(S, snap, event(SendToCritic, snap, "", message_id="r1"), prior=r), CountRound)
 
     def test_other_agent_ids_nothing_assumes_critic_or_manager(self):
         snap = rename(snapshot(silence=Silence()))

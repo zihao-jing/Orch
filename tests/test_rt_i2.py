@@ -67,7 +67,7 @@ class TestOpen(unittest.TestCase):
         s = snapshot(agent("worker-1", caps=NO_SHARE, status="waiting_job"), job("worker-1/j1"))
         actions = opened(s, "worker-1", stop_job=True)
         assert_has(self, actions, StopJob, job_id="worker-1/j1")
-        assert_has(self, actions, Tell, recipient="critic", key=K.JOBS_STOPPED)
+        assert_none(self, actions, Tell)  # the critic is not told: its reminder shows the worker as stopped
         assert_has(self, actions, OpenTerminal)
 
     def test_TERM_5_an_idle_agent_without_jobs_opens_without_a_question(self):
@@ -121,19 +121,18 @@ class TestRead(unittest.TestCase):
         self.assertEqual(m.recipient, USER)
         assert_none(self, actions, Tell)  # what the user said to the critic is a discussion: applied later
 
-    def test_TERM_3_what_the_user_said_to_a_worker_is_shown_to_the_critic_as_its_own_users(self):
+    def test_TERM_3_what_the_user_said_to_a_worker_stays_with_the_worker(self):
         s = snapshot(agent("worker-1", holds=["terminal"]))
         said = (Said(USER, "Use the other file.", T0 - 50), Said("worker-1", "Done.", T0 - 40))
         actions = decide(module(), s, event(TerminalRead, s, "worker-1", said=said))
-        tell = assert_has(self, actions, Tell, recipient="critic", key=K.DIRECT_MESSAGE_NOTICE)
-        self.assertEqual((tell.message.body, tell.message.text.values), ("Use the other file.", {"worker": "worker-1"}))
+        assert_none(self, actions, Tell)  # the critic is not told
         assert_has(self, actions, ToUser, sender="worker-1", body="Done.")
 
     def test_TERM_3_a_shared_terminal_has_only_the_users_lines(self):
         s = snapshot(agent("worker-1", holds=["terminal"]))
         actions = decide(module(), s, event(TerminalRead, s, "worker-1", said=(Said(USER, "Hi.", T0),)))
         assert_none(self, actions, ToUser)
-        assert_has(self, actions, Tell, recipient="critic")
+        assert_none(self, actions, Tell)
         assert_has(self, actions, ReleaseAgent)
 
     def test_TERM_4_unknown_agent_and_empty_lines_do_nothing_harmful(self):

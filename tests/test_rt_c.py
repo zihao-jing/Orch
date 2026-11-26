@@ -109,19 +109,13 @@ class TestWorkerReplies(unittest.TestCase):
         _, acts = routed(snap, "worker-1", "Job done.", triggers=["job"])
         assert_has(self, acts, Send, recipient="critic")
 
-    def test_LAB_6_send_to_critic_button(self):
+    def test_LAB_6_send_to_critic_is_refused_and_nothing_goes_to_the_critic(self):
         reply = message("r1", "user", "worker-1", status="delivered", needs_answer=False, turn="t9", body="My answer.")
         reply.sender, reply.seq = "worker-1", 5
-        ask = message("q1", "worker-1", sender="user", body="What is X?", seq=3)
-        snap = snapshot(reply, ask)
-        cmd = event(SendToCritic, snap, "", message_id="r1")
-        acts = decide(R, snap, cmd)
-        m = assert_has(self, acts, Send, recipient="critic", key=TextKey.WORKER_TO_CRITIC).message
-        self.assertEqual(m.text.values, {"worker": "worker-1", "question": "What is X?"})
-        assert_has(self, acts, CommandReply, ok=True)
-        snap.messages["x1"] = m  # sent once only
-        again = decide(R, snap, cmd)
-        assert_has(self, again, CommandReply, ok=False)
+        snap = snapshot(reply)
+        acts = decide(R, snap, event(SendToCritic, snap, "", message_id="r1"))
+        assert_has(self, acts, CommandReply, ok=False)
+        assert_none(self, acts, Send)
 
     def test_WRK_4_late_reply_of_a_closed_worker_is_recorded_not_routed(self):
         snap = snapshot(agent("worker-1", lifecycle="closed"))
@@ -226,12 +220,12 @@ class TestManagerReplies(unittest.TestCase):
 
 
 class TestChat(unittest.TestCase):
-    def test_MSG_9_user_chat_to_a_worker_is_shown_to_the_critic(self):
+    def test_MSG_9_user_chat_to_a_worker_stays_between_the_user_and_the_worker(self):
         snap = snapshot(gate("g1"))
         acts = decide(R, snap, event(Chat, snap, "worker-1", text="Stop that."))
         m = assert_has(self, acts, Send, recipient="worker-1", sender=USER, body="Stop that.").message
         self.assertEqual(m.trigger, Trigger.USER_CHAT)
-        assert_has(self, acts, Tell, recipient="critic", key=TextKey.DIRECT_MESSAGE_NOTICE)
+        assert_none(self, acts, Tell)  # the critic is not told
         assert_has(self, acts, CommandReply, ok=True, command_id="c1")
         assert_none(self, acts, CloseGate)  # GATE-5 chat closes no gate
 
@@ -294,7 +288,7 @@ class TestReview2(unittest.TestCase):
         _, acts = routed(snap, "reviewer", '<message to="lead">hi</message>')
         assert_has(self, acts, ReturnToSender, recipient="reviewer")
         acts = decide(R, snap, event(Chat, snap, "worker-1", text="x"))
-        assert_has(self, acts, Tell, recipient="reviewer")
+        assert_none(self, acts, Tell)  # a chat with a worker is not shown to the critic
 
     def test_DISC_1_a_draft_sends_no_notice_and_rejects_nothing(self):
         snap = snapshot(Discussion("manager"))

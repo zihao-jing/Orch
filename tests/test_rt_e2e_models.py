@@ -7,8 +7,8 @@ class TestModels(RuntimeCase):
         self.settings.retry_waits = [2]
         self.cli(W1).script("Main ready.", *[Reply(error=C.ErrorClass.TRANSIENT) for _ in range(self.settings.retries)], "Main resumed.")
         self.cli(W1, "codex").script("Backup ready.")
-        self.cli(CRITIC).script(QUIET, tell(W1, "Run the experiment.") + QUIET,
-                                tell(W1, "Recover with the clean dataset.") + QUIET)
+        self.cli(CRITIC).script(tell(W1, "Run the experiment.") + QUIET,
+                                tell(W1, "Recover with the clean dataset.") + QUIET)  # a chat with a worker is not shown to the critic
         self.start()
         self.chat(W1, "Establish main session.")
         self.advance(2)

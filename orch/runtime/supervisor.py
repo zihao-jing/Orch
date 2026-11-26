@@ -15,7 +15,7 @@ from .contracts import (
     TurnStatus, USER, Watch, WakeWorker, new_id)
 
 NAME = "supervisor"
-_WORKER_REPLIES = (TextKey.WORKER_FINAL, TextKey.WORKER_INTERMEDIATE, TextKey.WORKER_TO_CRITIC)
+_WORKER_REPLIES = (TextKey.WORKER_FINAL, TextKey.WORKER_INTERMEDIATE)  # a chat's reply is no longer sent to the critic
 
 
 def decide(snap: Snapshot, event: Event, prior: Sequence[Action] = ()) -> List[Action]:

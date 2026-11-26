@@ -322,11 +322,11 @@ class TextKey(_Str):
     # worker -> critic
     WORKER_FINAL = "worker_final"  # final reply, ready for review (WRK-8)
     WORKER_INTERMEDIATE = "worker_intermediate"  # job still running, not ready for review (JOB-3)
-    WORKER_TO_CRITIC = "worker_to_critic"  # a user chat's reply the user sent on (LAB-6)
+    WORKER_TO_CRITIC = "worker_to_critic"  # no longer sent: a user chat's reply stays with the user (kept for stored data)
     WORKER_FAILED = "worker_failed"  # not as work to review (REC-3)
     # between the others
     CRITIC_REPORT = "critic_report"  # critic's untagged text to the manager
-    DIRECT_MESSAGE_NOTICE = "direct_message_notice"  # shown to the critic as its own user's instruction (MSG-9)
+    DIRECT_MESSAGE_NOTICE = "direct_message_notice"  # the manager's message to a worker (MSG-9); no longer the user's chat or terminal words
     # labels
     LABEL_RETURNED = "label_returned"  # LAB-5, first time
     LABEL_BROKEN_PASSED = "label_broken_passed"  # LAB-5, second time: passed on, marked as broken
@@ -364,7 +364,7 @@ class TextKey(_Str):
     CHECKLIST_UNREADABLE = "checklist_unreadable"  # MS-2
     NOBODY_WATCHES = "nobody_watches"  # REC-10, after 2 failures
     JOB_NO_PROGRESS = "job_no_progress"  # JOB-6
-    JOBS_STOPPED = "jobs_stopped"  # the user closed a worker and its job, or its job was stopped for a terminal
+    JOBS_STOPPED = "jobs_stopped"  # no longer sent: the critic's reminder shows the worker's state (kept for stored data)
     # monitor
     MONITOR_CHECK = "monitor_check"
     MONITOR_REPORT = "monitor_report"  # supervisor to the critic
@@ -386,7 +386,7 @@ class TextKey(_Str):
     REM_ASK_AND_END = "rem_ask_and_end"
     REM_WRITING = "rem_writing"
     REM_CHECKLIST = "rem_checklist"  # to the critic: where its checklist file is (new session or new milestone)
-    REM_DISCUSSION_OVER = "rem_discussion_over"  # the discussion ended without being applied
+    REM_DISCUSSION_OVER = "rem_discussion_over"  # no longer sent; the discussion ended without being applied (kept for stored data)
     REM_NIGHT_OVER = "rem_night_over"
     # gates Orch opens, shown to the user
     GATE_PLAN = "gate_plan"
@@ -1347,8 +1347,8 @@ class Said:
 class TerminalRead(EngineEvent):
     """What was said in a terminal, read after it closed (TERM-2). Reported after the CLI is open again. A shared
     terminal's turns were ordinary turns already (routing sends their replies to the user), so there `said` has only
-    the user's lines. The terminal module records each reply in `said` with a ToUser, and tells the critic what the
-    user said to a worker (DIRECT_MESSAGE_NOTICE)."""
+    the user's lines. The terminal module records each reply in `said` with a ToUser; what the user said to a worker
+    stays with it (the critic is not told)."""
     said: Tuple[Said, ...] = ()
 
 
@@ -1487,7 +1487,7 @@ class ReopenMilestone(UserCommand):
 
 @dataclass(frozen=True)
 class SendToCritic(UserCommand):
-    """LAB-6: pass a worker's reply to the user on."""
+    """LAB-6: pass a worker's reply to the user on. No longer done: refused (routing._to_critic)."""
     handler: ClassVar[str] = "routing"
     message_id: str = ""
 
