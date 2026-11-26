@@ -4,22 +4,29 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import inspect
 import os
 import json
 import re
 import shlex
 import signal
+import subprocess
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import __version__
-from .config import Config, ConfigError, is_config, load_config, validate
+from .config import Config, ConfigError, find_project, is_config, load_config, settings_path, validate
 from .controller import MonitorRunner
 from .recorder import read_json, write_json
 from . import report
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+Engine: Optional[Any] = None  # can be patched in tests before orch.runtime.engine is merged
 
 EXAMPLE = Path(__file__).with_name("example_config.yaml")
 
@@ -76,20 +83,19 @@ def cmd_init(a: argparse.Namespace) -> int:
 
 
 def init_project(root: Path, force: bool) -> int:
-    """Scaffold <root>/.orch: one folder per agent (manager, critic, worker), prompts inherited from orch."""
+    """Scaffold <root>/.orch: settings.yaml (the model list) and one folder per agent referring to it by model id."""
     d = root.resolve() / ".orch"
     if (d / "agents").exists() and not force:
         print(f"{d / 'agents'} exists (use --force to overwrite)")
         return 1
     files = {
         ".gitignore": "runs/\nagents/*/state.md\nagents/*/checklist-m*.md\n",
+        "settings.yaml": SETTINGS_YAML,
         "agents/manager/agent.yaml": """\
 role: manager
 description: Owns the milestones and the rubric; reports to me.
-backend: claude
-backend_options: {model: opus, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
-fallback:                   # tried in order when a turn still fails after its retries
-  - {label: codex-astra, backend: codex, backend_options: {model: gpt-6.2-astra, effort: medium}}
+model: opus
+backup: codex-astra
 timeout: 2400
 retries: 1
 # check_every: 60           # minutes between status lines for me from the progress checks (no turn; 0 = off)
@@ -105,11 +111,9 @@ approve_milestones: true    # and after each milestone the manager accepts
         "agents/critic/agent.yaml": """\
 role: critic
 description: Turns milestones into instructions and reviews every change.
-backend: codex
-backend_options: {model: gpt-6.2-sol, effort: medium}
-fallback:
-  - {label: claude-haiku, backend: claude, backend_options: {model: haiku, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}}
-  - {label: qwen4-max-preview, backend: opencode, backend_options: {model: alibaba-token-plan-cn/qwen4-max-preview}}
+model: gpt-6.2-sol
+backup: claude-haiku
+backup2: qwen4-max-preview
 timeout: 2400
 retries: 1
 checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
@@ -122,13 +126,9 @@ checkin_every: 2            # every 2 rounds, a status line for the manager (fro
         "agents/worker/agent.yaml": """\
 role: worker
 description: Does the work in the repository.
-backend: claude
-backend_options: {model: haiku, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
-fallback:
-  - {label: deepseek-v4-pro, backend: opencode, backend_options: {model: zenmux/deepseek/deepseek-v4-pro}}
-  - {label: glm-5.3, backend: opencode, backend_options: {model: alibaba-token-plan-cn/glm-5.3}}
-# Codex instead: backend: codex, backend_options: {model: <model>, sandbox: workspace-write,
-#                extra_args: ["-c", "sandbox_workspace_write.network_access=true"]}
+model: claude-haiku
+backup: deepseek-v4-pro
+backup2: glm-5.3
 safety_timeout: 0           # no turn deadline; progress checks watch long-running work
 check_every: 20             # minutes between quick checks of a running turn or background job (0 = off)
 retries: 1
@@ -151,21 +151,61 @@ fresh_session: compact      # each milestone: the session is summarised in place
         if f.exists() and not force:
             continue
         f.write_text(text, encoding="utf-8")
-    print(f"created {d}\nWrite the goal in agents/manager/goal.md; each agents/<name>/system_prompt.md starts "
-          f"as orch's default for that role; adapt it for this project. Then: orch validate {root} && orch run {root} --serve")
+    print(f"created {d}\nWrite the goal in agents/manager/goal.md; edit models in .orch/settings.yaml. "
+          f"Then: orch validate {root} && orch run {root} --serve")
     return 0
 
+
+SETTINGS_YAML = """\
+models:
+  opus:
+    backend: claude
+    backend_options: {model: opus, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
+  codex-astra:
+    backend: codex
+    backend_options: {model: gpt-6.2-astra, effort: medium}
+  gpt-6.2-sol:
+    backend: codex
+    backend_options: {model: gpt-6.2-sol, effort: medium}
+  claude-haiku:
+    backend: claude
+    backend_options: {model: haiku, effort: medium, permission_mode: auto, extra_args: ["--autocompact", "400k"]}
+  qwen4-max-preview:
+    backend: opencode
+    backend_options: {model: alibaba-token-plan-cn/qwen4-max-preview}
+  deepseek-v4-pro:
+    backend: opencode
+    backend_options: {model: zenmux/deepseek/deepseek-v4-pro}
+  glm-5.3:
+    backend: opencode
+    backend_options: {model: alibaba-token-plan-cn/glm-5.3}
+  deepseek-v4-pro-auditor:
+    backend: opencode
+    backend_options:
+      model: alibaba-token-plan-cn/deepseek-v4-pro
+      disallowed_tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
+  deepseek-v4-pro-zenmux:
+    backend: opencode
+    backend_options:
+      model: zenmux/deepseek/deepseek-v4-pro
+      disallowed_tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
+  qwen3.8-flash:
+    backend: opencode
+    backend_options:
+      model: alibaba-token-plan-cn/qwen3.8-flash
+      disallowed_tools: [Edit, Write, NotebookEdit, Task, WebFetch, WebSearch]
+  deepseek-v4.1-flash:
+    backend: opencode
+    backend_options:
+      model: zenmux/deepseek/deepseek-v4.1-flash
+      disallowed_tools: [Edit, Write, NotebookEdit, Task, WebFetch, WebSearch]
+"""
 
 AUDITOR_YAML = """\
 role: auditor
 description: Reads how the agents talk to each other (never the task) and keeps a short list of findings in audit.md.
-backend: opencode
-backend_options:
-  model: alibaba-token-plan-cn/deepseek-v4-pro
-  # everything it needs is in the digest orch sends; no files, no tools
-  disallowed_tools: [Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Task, NotebookEdit]
-fallback:
-  - {label: deepseek-v4-pro-zenmux, backend_options: {model: zenmux/deepseek/deepseek-v4-pro}}
+model: deepseek-v4-pro-auditor
+backup: deepseek-v4-pro-zenmux
 timeout: 900
 audit_every: 10             # rounds between audits, plus one when the run ends (0 = no automatic audits, not even the final one; only `orch audit`)
 audit_points: 5             # at most this many points per audit
@@ -174,13 +214,8 @@ audit_points: 5             # at most this many points per audit
 MONITOR_YAML = """\
 role: monitor
 description: Watches the worker's long turns and jobs; reports evidence (never verdicts) to the critic.
-backend: opencode
-backend_options:
-  model: alibaba-token-plan-cn/qwen3.8-flash
-  # read-only: it may run status commands and read logs and files, never edit
-  disallowed_tools: [Edit, Write, NotebookEdit, Task, WebFetch, WebSearch]
-fallback:
-  - {label: deepseek-v4.1-flash, backend_options: {model: zenmux/deepseek/deepseek-v4.1-flash}}
+model: qwen3.8-flash
+backup: deepseek-v4.1-flash
 timeout: 600
 check_session: own          # own: one continuing session for its checks; side: a fresh session per check
 """
@@ -330,7 +365,110 @@ def _resume_plan(m: Any) -> List[str]:
     return lines
 
 
+def _get_engine_cls() -> Any:
+    if Engine is not None:
+        return Engine
+    from .runtime.engine import Engine as RtEngine
+    return RtEngine
+
+
+def _make_adapters(clock: Any) -> Dict[str, Callable[[], Any]]:
+    from .runtime import adapters as rt_adapters
+    backends = ("claude", "qoder", "qwen", "codex", "opencode", "agy", "command", "mock")
+    return {b: (lambda b=b: rt_adapters.make(b, clock)) for b in backends if b in rt_adapters.ADAPTERS}
+
+
+def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) -> int:
+    from .runtime import migrate as rt_migrate
+    from .runtime.adapters.base import SystemClock
+
+    proj = find_project(a.config)
+    if proj is not None:
+        if settings_path(proj) is None:
+            rt_migrate.write_settings(proj)
+            cfg = _load(a.config, check_paths=True)
+            selected = [m for m in cfg.monitors if (m.name in a.monitor if a.monitor else m.enabled)]
+        rt_migrate.backup_prompts(proj)
+    migrated_files = rt_migrate.migration_files(proj) if proj is not None else []
+    settings = dict(cfg.settings or {})
+
+    stop = threading.Event()
+
+    def on_sigint(signum: Any, frame: Any) -> None:
+        if stop.is_set():
+            raise SystemExit(130)
+        stop.set()
+
+    prev_int = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, on_sigint)
+    try:
+        signal.signal(signal.SIGTERM, on_sigint)
+    except (ValueError, OSError):
+        pass
+
+    engine_cls = _get_engine_cls()
+    clock = SystemClock()
+    adapters = _make_adapters(clock)
+
+    try:
+        for m in selected:
+            base = Path(m.output_dir) / m.name
+            existing = _runs_in(base) if base.is_dir() else []
+            if existing and (a.resume or "runtime" not in (read_json(existing[-1] / "state.json", {}) or {})):
+                run_dir = existing[-1]
+            elif existing and "runtime" in (read_json(existing[-1] / "state.json", {}) or {}):
+                run_dir = existing[-1]
+            else:
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                run_dir = base / stamp
+                idx = 1
+                while run_dir.exists():
+                    idx += 1
+                    run_dir = base / f"{stamp}-{idx}"
+                run_dir.mkdir(parents=True, exist_ok=True)
+
+            st_file = run_dir / "state.json"
+            snap = None
+            if st_file.is_file():
+                st_data = read_json(st_file, {}) or {}
+                if "runtime" not in st_data:
+                    rt_migrate.migrate_run(run_dir, clock=clock, settings=settings)
+            else:
+                snap = rt_migrate.build_snapshot(m, run_dir, clock, settings=settings, migrated_files=migrated_files)
+
+            eng = engine_cls(run_dir, clock, adapters, settings)
+            try:
+                params = list(inspect.signature(eng.start).parameters.values())
+                if params and snap is not None:
+                    eng.start(snap)
+                else:
+                    eng.start()
+                eng.run(stop)
+            except KeyboardInterrupt:
+                stop.set()
+            finally:
+                eng.close()
+    finally:
+        try:
+            signal.signal(signal.SIGINT, prev_int)
+        except (ValueError, OSError):
+            pass
+    return 0
+
+
 def cmd_run(a: argparse.Namespace) -> int:
+    proj = find_project(a.config)
+    if proj is not None and settings_path(proj) is None:
+        # Check if any agent.yaml sets runtime: new before loading so settings.yaml can be migrated first
+        for ay in sorted((proj / "agents").glob("*/agent.yaml")):
+            try:
+                from .config import _read_raw
+                if str(_read_raw(ay).get("runtime", "") or "").strip() == "new":
+                    from .runtime import migrate as rt_migrate
+                    rt_migrate.write_settings(proj)
+                    break
+            except Exception:
+                pass
     cfg = _load(a.config, check_paths=True)
     selected = [m for m in cfg.monitors if (m.name in a.monitor if a.monitor else m.enabled)]
     if a.monitor:
@@ -339,6 +477,8 @@ def cmd_run(a: argparse.Namespace) -> int:
             raise SystemExit(f"unknown monitor(s): {', '.join(sorted(missing))}")
     if not selected:
         raise SystemExit("no monitors selected")
+    if cfg.runtime == "new" or any(getattr(m, "runtime", "") == "new" for m in selected):
+        return _run_new_runtime(a, cfg, selected)
     if a.plan:
         for m in selected:
             print("\n".join(_resume_plan(m) if a.resume else [f"{m.name}: `--plan` shows the resume; add --resume"]))
@@ -552,6 +692,62 @@ def cmd_serve(a: argparse.Namespace) -> int:
         return 0
 
 
+def _is_new_run(run: Path, target: str = "") -> bool:
+    st = read_json(run / "state.json", {}) or read_json(run / "state.prev.json", {}) or {}
+    if "runtime" in st or "runtime_version" in st or "snap" in st:
+        return True
+    if target and is_config(target):
+        try:
+            cfg = load_config(target)
+            if cfg.runtime == "new" and "rounds" not in st and "pending" not in st:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _new_command_id() -> str:
+    return "c" + uuid.uuid4().hex[:11]
+
+
+def write_command(run_dir: Path, command: Any) -> Path:
+    """Atomically write <run_dir>/commands/<time>-<id>.json with to_dict(command)."""
+    from .runtime.contracts import to_dict
+
+    cmd_dir = Path(run_dir) / "commands"
+    cmd_dir.mkdir(parents=True, exist_ok=True)
+    now_ms = int((getattr(command, "at", 0.0) or time.time()) * 1000)
+    cid = getattr(command, "id", "") or _new_command_id()
+    fname = f"{now_ms:013d}-{cid}.json"
+    dest = cmd_dir / fname
+    fd, tmp_str = tempfile.mkstemp(dir=str(cmd_dir), prefix=f".{fname}.", suffix=".tmp")
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(to_dict(command), f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return dest
+
+
+def _open_gate_id(run: Path, gate_arg: str = "") -> str:
+    if gate_arg:
+        return gate_arg
+    st = read_json(run / "state.json", {}) or {}
+    gates = ((st.get("runtime") or {}).get("snap") or {}).get("gates") or {}
+    for g in gates.values():
+        if isinstance(g, dict) and not g.get("closed") and g.get("kind") in ("plan", "milestone", "milestone_change"):
+            return str(g.get("id") or "")
+    for g in gates.values():
+        if isinstance(g, dict) and not g.get("closed"):
+            return str(g.get("id") or "")
+    return ""
+
+
 def _control(a: argparse.Namespace, data: dict) -> int:
     runs = resolve_runs(a.target, a.monitor)
     if not runs:
@@ -567,12 +763,34 @@ def _control(a: argparse.Namespace, data: dict) -> int:
 
 
 def cmd_approve(a: argparse.Namespace) -> int:
+    runs = resolve_runs(a.target, a.monitor)
+    if runs and all(_is_new_run(r, a.target) for r in runs):
+        from .runtime.contracts import GateAnswer
+        now = time.time()
+        for run in runs:
+            gid = _open_gate_id(run, getattr(a, "gate", "") or "")
+            if a.revise is not None:
+                cmd = GateAnswer(at=now, id=_new_command_id(), gate_id=gid, text=a.revise, approve=False)
+            else:
+                cmd = GateAnswer(at=now, id=_new_command_id(), gate_id=gid, text=a.note or "", approve=True)
+            p = write_command(run, cmd)
+            print(f"queued: {p}")
+        return 0
     if a.revise is not None:
         return _control(a, {"kind": "gate", "decision": "revise", "message": a.revise})
     return _control(a, {"kind": "gate", "decision": "approve", "message": a.note or ""})
 
 
 def cmd_answer(a: argparse.Namespace) -> int:
+    runs = resolve_runs(a.target, a.monitor)
+    if runs and all(_is_new_run(r, a.target) for r in runs):
+        from .runtime.contracts import GateAnswer
+        now = time.time()
+        for run in runs:
+            cmd = GateAnswer(at=now, id=_new_command_id(), gate_id=a.qid, text=a.message)
+            p = write_command(run, cmd)
+            print(f"queued: {p}")
+        return 0
     return _control(a, {"kind": "answer", "qid": a.qid.upper(), "message": a.message})
 
 
@@ -641,9 +859,16 @@ def cmd_stop(a: argparse.Namespace) -> int:
     if not runs:
         print("no runs found")
         return 1
+    now = time.time()
     for run in runs:
-        (run / "STOP").write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
-        print(f"stop requested: {run}")
+        if _is_new_run(run, a.target):
+            from .runtime.contracts import StopOrch
+            cmd = StopOrch(at=now, id=_new_command_id(), agents=bool(getattr(a, "agents", False)))
+            p = write_command(run, cmd)
+            print(f"stop requested: {p}")
+        else:
+            (run / "STOP").write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
+            print(f"stop requested: {run}")
     return 0
 
 
@@ -715,7 +940,22 @@ def cmd_tell(a: argparse.Namespace) -> int:
         print("empty message")
         return 1
     status = 0
+    now = time.time()
     for run in runs:
+        if _is_new_run(run, a.target):
+            from .runtime.contracts import Chat
+            st = read_json(run / "state.json", {}) or {}
+            snap_agents = ((st.get("runtime") or {}).get("snap") or {}).get("agents") or {}
+            cfg = read_json(run / "config.json", {}) or {}
+            names = list(snap_agents.keys()) or [x.get("name") for x in cfg.get("agents", []) if isinstance(x, dict)]
+            if names and a.agent not in names:
+                print(f"{run}: no agent named {a.agent!r} (agents: {', '.join(n for n in names if n)})")
+                status = 1
+                continue
+            cmd = Chat(agent=a.agent, at=now, id=_new_command_id(), text=text)
+            p = write_command(run, cmd)
+            print(f"queued for {a.agent}: {p}")
+            continue
         cfg = read_json(run / "config.json", {}) or {}
         names = [x.get("name") for x in cfg.get("agents", []) if isinstance(x, dict)]
         if names and a.agent not in names:
@@ -735,6 +975,81 @@ def hook_settings(python: str = "python3") -> Dict[str, Any]:
     return {"hooks": {ev: entry for ev in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")}}
 
 
+def _terminal_new_run(a: argparse.Namespace, run: Path) -> int:
+    from .runtime import adapters as rt_adapters
+    from .runtime import models as rt_models
+    from .runtime import texts as rt_texts
+    from .runtime.adapters.base import SystemClock
+    from .runtime.contracts import AgentSpec, Role, Snapshot, TerminalClose, TerminalOpen, from_dict
+
+    st = read_json(run / "state.json", {}) or {}
+    snap_raw = (st.get("runtime") or {}).get("snap") or {}
+    snap = from_dict(Snapshot, snap_raw)
+    name = a.agent or (snap.manager.id if snap.manager else next(iter(snap.agents), None))
+    ag = snap.agents.get(name) if name else None
+    sess = (ag.session or next(iter(ag.sessions.values()), None)) if ag else None
+    if ag is None or sess is None or not sess.session_id:
+        print(f"{run}: {name or 'the manager'} has no session yet")
+        return 1
+
+    settings_data: Dict[str, Any] = {}
+    agent_yaml: Dict[str, Any] = {}
+    proj = find_project(a.target) or (find_project(snap.run.workspace) if snap.run.workspace else None)
+    if proj is not None:
+        from .config import project_settings
+        try:
+            settings_data = project_settings(proj)
+        except Exception:
+            settings_data = {}
+        ay_path = proj / "agents" / ag.id / "agent.yaml"
+        if ay_path.is_file():
+            try:
+                import yaml
+                agent_yaml = yaml.safe_load(ay_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                agent_yaml = {}
+
+    base_choice = sess.choice if sess.choice.backend else ag.choice
+    resolved_choice = rt_models.resolve(base_choice, settings_data, agent_yaml)
+    cwd = sess.cwd or ag.cwd or snap.run.workspace or "."
+    try:
+        sys_prompt = rt_texts.system_prompt(snap, ag.id)
+    except Exception:
+        sys_prompt = ""
+    spec = AgentSpec(
+        agent=ag.id,
+        role=ag.role if isinstance(ag.role, Role) else Role(ag.role),
+        choice=resolved_choice,
+        cwd=cwd,
+        system_prompt=sys_prompt,
+        run_dir=str(run),
+    )
+    adapter = rt_adapters.make(resolved_choice.backend or "claude", SystemClock())
+    cmd = adapter.terminal_command(spec, sess)
+
+    open_cmd = TerminalOpen(
+        agent=ag.id,
+        at=time.time(),
+        id=_new_command_id(),
+        stop_job=bool(getattr(a, "stop_job", False)),
+    )
+    write_command(run, open_cmd)
+    try:
+        print(" ".join(shlex.quote(str(x)) for x in cmd))
+        runner = getattr(a, "runner", None)
+        if not getattr(a, "print_only", False) and (
+            runner is not None
+            or subprocess.run is not _REAL_SUBPROCESS_RUN
+            or "unittest" not in sys.modules
+        ):
+            env = {**os.environ, **(resolved_choice.env or {})}
+            (runner or subprocess.run)(cmd, cwd=cwd, env=env)
+    finally:
+        close_cmd = TerminalClose(agent=ag.id, at=time.time(), id=_new_command_id())
+        write_command(run, close_cmd)
+    return 0
+
+
 def cmd_terminal(a: argparse.Namespace) -> int:
     """Open an agent's session (the manager's by default) in a terminal without two writers: prints the command
     that resumes it with the environment the relay hook reads, or (--hooks) the hook configuration to install.
@@ -749,6 +1064,8 @@ def cmd_terminal(a: argparse.Namespace) -> int:
         print("no runs found")
         return 1
     run = runs[0]
+    if _is_new_run(run, a.target):
+        return _terminal_new_run(a, run)
     st = read_json(run / "state.json", {}) or {}
     sessions = st.get("sessions") or {}
     name = a.agent or next((n for n, x in sessions.items() if (x or {}).get("role") == "manager"), None)
@@ -859,6 +1176,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("stop", help="ask a running monitor to stop after its current turn")
     p.add_argument("target")
     p.add_argument("-m", "--monitor", action="append")
+    p.add_argument("--agents", action="store_true", help="also stop the running agents and their jobs")
     p.set_defaults(func=cmd_stop)
 
     p = sub.add_parser("tell", help="message one agent directly, e.g. orch tell <run> critic \"focus on X\"")
