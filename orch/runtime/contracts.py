@@ -452,7 +452,8 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
     TextKey.REVIEW_RUBRIC_MISSING: ("milestone",),
     TextKey.REVIEW_SCORE_LOW: ("milestone", "score", "pass_score"),
-    TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer}]; unsent:
+    TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer, approve}]
+    #   (approve: True/False for plan, milestone and change gates, else None); unsent:
     #                                      [{to, body}]; decide_again: milestone title or ""
     TextKey.MILESTONE_CHANGE_REQUEST: ("milestones",),  # [{id, title, text, status}]
     TextKey.MILESTONE_CHANGE_UNREADABLE: ("problem",),
