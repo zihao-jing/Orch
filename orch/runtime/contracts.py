@@ -33,7 +33,8 @@ Holds
 Sending (MSG-6)
   - A message may go when it is `sendable` (waiting, no hold, sent_at 0) and its agent is not held. The store saves
     `rendered`, `sent_at` and attempts BEFORE Adapter.send(); SendFailed sets sent_at back to 0. Wherever sent_at
-    becomes 0, so does checked_at.
+    becomes 0, so does checked_at, except the MSG-5 resend after arrived() said False: it keeps checked_at, so the next
+    expiry fails the agent instead of sending again.
   - delivered = the CLI has it (Received). taken = its text entered the conversation: Received(taken=True) into the
     running turn, or a TurnStarted. answered = the turn that took it went on (next output) or started.
   - In doubt: when the CLI exited, or its session or process was replaced, every message to it that is waiting with
@@ -406,6 +407,7 @@ class TextKey(_Str):
     ASK_JOBS_DELETE = "ask_jobs_delete"
     ASK_JOB_TERMINAL = "ask_job_terminal"  # TERM-5
     ASK_FORCE_SWITCH = "ask_force_switch"  # MOD-6; `new_session`: a new conversation with a handover starts
+    SMOKE_TEST = "smoke_test"  # MOD-7: the short real turn of a smoke test
     SMOKE_FAILED = "smoke_failed"  # MOD-7
     SWITCH_PENDING = "switch_pending"
     COMMAND_REFUSED = "command_refused"  # `why`: a Refusal
@@ -498,6 +500,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.ASK_JOBS_DELETE: ("worker", "jobs"),
     TextKey.ASK_JOB_TERMINAL: ("agent", "jobs"),  # jobs empty: it is writing
     TextKey.ASK_FORCE_SWITCH: ("agent", "jobs", "new_session"),
+    TextKey.SMOKE_TEST: (),
     TextKey.SMOKE_FAILED: ("agent", "choice", "why"),
     TextKey.SWITCH_PENDING: ("agent", "choice"),
     TextKey.COMMAND_REFUSED: ("why",),
@@ -532,7 +535,6 @@ class Choice:
     options: Dict[str, Any] = field(default_factory=dict)
     env: Dict[str, str] = field(default_factory=dict)  # may hold keys: see `_stored`
     name: str = ""  # a backup's name (REC, MOD-3); "" for the main choice
-    retries: int = 5
 
     @property
     def session_key(self) -> str:
@@ -659,7 +661,8 @@ class Message:
     #                      Whichever turn takes it in also gets that turn's started_by, joined, jobs, triggers, keys
     #                      and draft (not a turn that took in the apply message), and not this message's own trigger
     #                      and key. A turn that starts while Agent.retry.turn is set continues that one, as if a message
-    #                      did. "": an ordinary message, with its own trigger and key
+    #                      did. "": an ordinary message, with its own trigger and key. Store: when it is taken, the
+    #                      messages the continued turn took in and left unanswered count as answered (MSG-5 ignores them)
     when_idle: bool = False  # goes out only while the recipient has no open turn and no message sent to it unanswered:
     #                          the discussion apply message, so it never joins a draft turn. Never in `holds`; the
     #                          dashboard shows that it waits
@@ -755,6 +758,7 @@ class Agent:
     lifecycle: Lifecycle = Lifecycle.OPEN  # [workers]
     status: AgentStatus = AgentStatus.IDLE  # the store derives it: Snapshot.status_of
     choice: Choice = field(default_factory=Choice)  # the current one; [recovery] (switch done)
+    choice_since: float = 0.0  # [store] when `choice` last changed (REC-5 counts return_after from it)
     choices: List[Choice] = field(default_factory=list)  # main first, then backups in order; [engine] from config
     actual_model: str = ""  # [fact] MOD-5
     caps: Caps = field(default_factory=Caps)  # [engine]
