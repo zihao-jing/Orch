@@ -245,13 +245,8 @@ class Engine:
 
     def _read_commands(self) -> bool:
         happened = False
-        paths = []
-        for path in self._command_dir().glob("*.json"):
-            try:
-                paths.append((path.stat().st_mtime_ns, path))
-            except FileNotFoundError:
-                continue
-        for _, path in sorted(paths):
+        # names are <time>-<id>.json and sort in the order they were written (orch.cli.write_command)
+        for path in sorted(self._command_dir().glob("*.json"), key=lambda p: p.name):
             try:
                 command = C.from_dict(C.UserCommand, json.loads(path.read_text(encoding="utf-8")))
                 if not isinstance(command, C.UserCommand):

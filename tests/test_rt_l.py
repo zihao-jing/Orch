@@ -277,9 +277,10 @@ class EngineTest(unittest.TestCase):
         cli, worker = self.cli()
         commands = self.path / "commands"
         commands.mkdir()
-        newer = commands / "a.json"
-        older = commands / "z.json"
-        for path, id, stamp in ((newer, "newer", 20), (older, "older", 10)):
+        # named <time ms>-<id>.json as orch.cli.write_command does; the name decides, not the file time
+        newer = commands / "0000000020000-a.json"
+        older = commands / "0000000010000-z.json"
+        for path, id, stamp in ((newer, "newer", 10), (older, "older", 20)):
             path.write_text(json.dumps(C.to_dict(C.Chat(worker.id, self.clock.now(), id, text=id))))
             os.utime(path, (stamp, stamp))
         engine = self.engine([worker])
