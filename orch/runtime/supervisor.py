@@ -241,7 +241,6 @@ class _Timers:
                 marks[w.worker] = _watch_failed(s, self.out, mon, w, "no_answer") if mon else replace(w, asked="")
         under_way = any(w.asked in s.messages and s.messages[w.asked].open for w in s.watch.values() if w.asked)
         if mon is not None and mon.is_open and not under_way and not _writing(s, mon):
-            items = [f"- [{'x' if done else ' '}] {text}" for step in s.checklist.steps for done, text in step.items]
             for w in s.workers:
                 if w.failed_why or w.stopped_by_user or w.id in marks and marks[w.id].asked:
                     continue
@@ -257,7 +256,7 @@ class _Timers:
                 m = self.out.add(Send, mon.id, TextKey.MONITOR_CHECK, {
                     "worker": w.id, "status": w.status, "minutes": minutes,
                     "assignment": w.assignment.line if w.assignment else "",
-                    "live_file": f"{s.run.run_dir}/live/{w.id}.jsonl", "items": items}, trigger=Trigger.MONITOR)
+                    "live_file": f"{s.run.run_dir}/live/{w.id}.jsonl"}, trigger=Trigger.MONITOR)
                 marks[w.id] = replace(watch, asked=m.id, checked_at=self.now)
                 break
         self.out.actions += [SetWatch(w) for w in marks.values()]
@@ -302,8 +301,7 @@ class _Timers:
         if self.now - since < s.settings.silence_after:
             return
         if sil.tries < s.settings.silence_tries:
-            m = self.out.message(mgr.id, TextKey.SILENCE_CHECK,
-                                 {"attempt": sil.tries + 1, "attempts": s.settings.silence_tries})
+            m = self.out.message(mgr.id, TextKey.SILENCE_CHECK, {})
             self.out.actions.append(AskManagerToCheck(message=m))
         else:  # the third try changed nothing: the user decides
             g = _op_gate(GateCause.SILENCE, "", TextKey.GATE_SILENCE, {"attempts": sil.tries}, self.now, GateKind.PAUSE)

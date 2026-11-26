@@ -134,7 +134,7 @@ class TestSilence(unittest.TestCase):
         for tries in (0, 1, 2):
             snap = snapshot(silence=Silence(tries=tries, asked_at=T0 - 100))
             m = assert_has(self, run_tick(snap), AskManagerToCheck, recipient="manager", key=TextKey.SILENCE_CHECK)
-            self.assertEqual(m.message.text.values, {"attempt": tries + 1, "attempts": 3})
+            self.assertEqual(m.message.text.values, {})
         snap = snapshot(silence=Silence(tries=3, asked_at=T0 - 100))
         acts = run_tick(snap)
         g = assert_has(self, acts, OpenGate, gate__kind=GateKind.PAUSE, gate__cause=GateCause.SILENCE).gate
@@ -508,12 +508,12 @@ class TestMonitor2(unittest.TestCase):
         self.assertEqual(len(find(acts, SetWatch)), 1)
         assert_none(self, acts, Send, key=TextKey.MONITOR_CHECK)
 
-    def test_REC_10_items_carry_their_marks(self):
+    def test_REC_10_the_monitor_gets_no_checklist(self):
         snap = self.snap()
         snap.checklist = Checklist("c.md", "d", [ChecklistStep("S", False, [(True, "a"), (False, "b")])])
         acts = run_tick(snap)
         c = assert_has(self, acts, Send, key=TextKey.MONITOR_CHECK).message
-        self.assertEqual(c.text.values["items"], ["- [x] a", "- [ ] b"])
+        self.assertNotIn("items", c.text.values)  # the monitor looks at the worker's run, not the critic's checklist
 
     def test_REC_10_a_lost_check_and_a_new_one_make_one_setwatch(self):
         snap = self.snap()

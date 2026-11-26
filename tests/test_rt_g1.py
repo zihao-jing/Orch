@@ -222,7 +222,7 @@ class TestDecision(unittest.TestCase):
         actions = pipeline(s, ev)
         self.assertEqual([g for g in find(actions, OpenGate) if g.gate.kind == "milestone"], [])
         low = assert_has(self, actions, Send, recipient="manager", key=K.REVIEW_SCORE_LOW)
-        self.assertEqual(low.message.text.values, {"milestone": "m1", "title": "Milestone m1",
+        self.assertEqual(low.message.text.values, {"milestone": "m1",
                                                    "score": 2.0, "pass_score": 3.0})
         self.assertFalse(ms_of(actions)[0].accepted)
 

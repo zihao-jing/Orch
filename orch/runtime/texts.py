@@ -173,7 +173,21 @@ def _worker_failed(t: _Text) -> str:
 
 def _broken_passed(t: _Text) -> str:
     who = t.fill("From {sender}, with") if t.role != Role.CRITIC or _is_worker(t, "sender") else "With"
-    return t.fill(who + " a label that could not be read ({label}: {problem}), so it is passed on as it is:\n\n{body}")
+    return t.fill(who + " a label that could not be read ({label}: {problem}), so it is passed on as it is:\n\n{body}") \
+        + "\n\nA whole label looks like this: " + _example(t)
+
+
+def _board(t: _Text) -> str:
+    """The golden board's path as the manager reads it: relative to the project."""
+    return _relative(t.snap, str(t.get("path") or ""))
+
+
+def _example(t: _Text) -> str:
+    """A whole label for the reader to copy: to the critic for the manager, to a worker for the critic."""
+    if t.role == Role.MANAGER:
+        return '<message to="critic">…</message>'
+    w = next((a.id for a in t.snap.by_role(Role.WORKER)), "worker-1")
+    return f'<message to="{w}">…</message>'
 
 
 def _is_worker(t: _Text, name: str) -> bool:
@@ -193,7 +207,7 @@ def _job_wakeup(t: _Text) -> str:
             for j in t.get("jobs") or []]
     one = len(done) < 2
     return (f"Your background {'job has' if one else 'jobs have'} ended: {', '.join(done)}. Check the result and "
-            "continue with what depended on it.")
+            "continue.")
 
 
 def _many(t: _Text) -> bool:
@@ -212,11 +226,11 @@ def _job_lost(t: _Text) -> str:
 
 
 def _session_return(t: _Text) -> str:
-    start = f"You are back in an earlier conversation. The work went on without it since {_when(t.get('since'))}."
-    if t.role == Role.WORKER:
-        return start + " Check the project's files, its git log and any running job of yours before you go on."
-    return start + (f" Your own turns since then are in `{_own_turns(t)}`; read those, the newest first, before you go "
-                    "on.")
+    start = (f"You are back in an earlier conversation. Since {_when(t.get('since'))} the work went on without it, in "
+             "another conversation of yours")
+    if t.role == Role.MANAGER:
+        return start + f"; its turns are in `{_own_turns(t)}`."
+    return start + "."
 
 
 def _own_turns(t: _Text) -> str:
@@ -233,15 +247,15 @@ def _session_fresh(t: _Text) -> str:
 
 def _handover_request(t: _Text, read: str, extra: str = "") -> str:
     lost = str(t.get("why")) == ErrorClass.SESSION_LOST.value
-    return t.fill(("{agent} goes on in a new conversation ({why}) that knows nothing so far. " if lost else
-                   "{agent} changes to another model ({why}) and starts a new conversation that knows nothing so far. ")
+    return t.fill(("{agent} goes on in a new conversation that knows nothing so far. " if lost else
+                   "{agent} changes to another model and starts a new conversation that knows nothing so far. ")
                   + extra + f"Read the current progress first ({read}), then write {{agent}} a short instruction to go on "
                   "with: where the work stands, what comes next, what holds. It replaces your last message to it if that "
                   "is still unanswered, so carry over what matters.")
 
 
 def _handover_critic(t: _Text) -> str:
-    return _handover_request(t, "your checklist, the files, its latest report",
+    return _handover_request(t, "your checklist, the files, the previous worker's latest report",
                              "Its assignment: {assignment}. " if t.get("assignment") else "")
 
 
@@ -256,8 +270,8 @@ def _milestone_start(t: _Text) -> str:
         if t.get("approved_plan") else ""
     return last + t.fill(
         "The milestone “{title}” starts now.\n\n{text}\n\n"
-        "Write {critic} its instruction, and set the rubric. I tell {critic} myself to keep its checklist in "
-        "`{checklist_path}`, so your instruction needs no path.")
+        "Set the rubric for yourself (it is never shown to {critic}) and write {critic} its instruction. Orch tells "
+        "{critic} where its checklist is (`{checklist_path}`).")
 
 
 def _checklist_complete(t: _Text) -> str:
@@ -324,20 +338,7 @@ def _monitor_check(t: _Text) -> str:
     if t.get("assignment"):
         out.append(t.fill("Its task: {assignment}"))
     if t.get("live_file"):
-        out.append(t.fill("What it writes now: `{live_file}`"))
-    items: List[str] = []
-    for item in t.get("items") or []:
-        m = re.match(r"^\s*(?:- )?\[([ xX])\]\s*", str(item))
-        plain, mark = str(item)[m.end():] if m else str(item), (m.group(1).lower() if m else "")
-        # as "item:<id>": digest, so that a session is shown an item again only when its mark changed (REC-10)
-        key = "item:" + hashlib.sha1(plain.encode("utf-8")).hexdigest()[:10]
-        if t.seen.get(key) != f"[{mark}]":
-            items.append(str(item).strip())
-            t.given[key] = f"[{mark}]"
-    if items:
-        first = not any(k.startswith("item:") for k in t.seen)
-        out.append(("The checklist:\n" if first else "Changed in the checklist:\n")
-                   + "\n".join(x if x.startswith("- ") else f"- {x}" for x in items))
+        out.append(t.fill("Its program's output so far, as it is written: `{live_file}` (JSON lines, newest last)."))
     return "\n\n".join(out)
 
 
@@ -345,7 +346,7 @@ def _monitor_report(t: _Text) -> str:
     first, _, rest = t.body.partition("\n")
     if first.strip(" .:").lower().replace("-", " ") in HEALTH.values():  # its first line is the status itself
         t.body = rest.strip()
-    return t.fill("Progress check on {worker}, {minutes} minutes into its run: {health}.\n\n{body}")
+    return t.fill("The monitor checked {worker}'s run, {minutes} minutes in, and finds it {health}. What it saw:\n\n{body}")
 
 
 def _detail(t: _Text) -> str:
@@ -354,8 +355,8 @@ def _detail(t: _Text) -> str:
 
 
 def _discussion_apply(t: _Text) -> str:
-    out = ("I am applying our discussion now. Write what we agreed on, one complete message for each recipient; it "
-           "replaces everything you drafted in the discussion. If nothing changes for someone, write them nothing.")
+    out = ("I am applying our discussion now. Write to the others what we agreed, one complete message to each who is "
+           "concerned. If nothing changes for someone, write them nothing.")
     d = t.snap.discussions.get(t.reader)
     if t.get("milestone_change") or (d is not None and d.milestone_change):
         out += " Include the whole new list of milestones in the numbered form."
@@ -379,7 +380,7 @@ def _labels(t: _Text) -> str:
     ids = list(t.get("workers") or [])
     to = " or ".join(f'<message to="{i}">…</message>' for i in ids)
     return (f"To a worker: {to}. " if ids else "") + ("Plain text goes to me; add <silent/> when nothing in the reply "
-                                                      "needs me.")
+                                                      "needs me, and <done/> when the work I asked for is finished.")
 
 
 def _workers(t: _Text) -> str:
@@ -388,7 +389,7 @@ def _workers(t: _Text) -> str:
         return "No worker is available at the moment."
     if n == 1:
         return f"1 worker is available: {t.value('workers')}."
-    return f"{n} workers are available. Split work only into parts that don't depend on each other; using one is fine."
+    return f"{n} workers are available: {t.value('workers')}."
 
 
 GATE_KINDS = {"question": "a question", "pause": "a pause", "plan": "the plan", "milestone": "a milestone",
@@ -406,8 +407,7 @@ def _gate(t: _Text, g: Any) -> str:
 
 
 def _golden_use(t: _Text) -> str:
-    return ("Write the golden board's rules that relate to the task into your instruction"
-            + (", and check finished work against them." if t.role == Role.CRITIC else "."))
+    return "Write the golden board's rules that matter for the current task into your instruction to the critic."
 
 
 def _force(t: _Text) -> str:
@@ -427,22 +427,25 @@ def _ask_terminal(t: _Text) -> str:
 TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     # to the critic
     K.WORKER_FINAL: _worker_final,
-    K.WORKER_INTERMEDIATE: lambda t: t.fill("From {worker}, " + ("jobs" if _many(t) else "job")
-                                            + " still running ({jobs}), not ready for review:\n\n{body}"),
+    K.WORKER_INTERMEDIATE: lambda t: t.fill("Job still running: {worker}'s " + ("jobs are" if _many(t) else "job is")
+                                            + " still running ({jobs}), so this is not ready for review. Its message:"
+                                            "\n\n{body}"),
     K.WORKER_TO_CRITIC: lambda t: t.fill("I asked {worker}: “{question}” It answered:\n\n{body}" if str(
         t.get("question") or "").strip() else "From {worker}, to me:\n\n{body}"),
     K.WORKER_FAILED: _worker_failed,
     K.DIRECT_MESSAGE_NOTICE: "I wrote to {worker} directly:\n\n{body}\n\nNo answer needed; go by it.",
     K.CHECKLIST_UNREADABLE: "I cannot read your checklist `{path}` ({problem}). Please put it in order.",
-    K.NOBODY_WATCHES: "The progress checks on {worker} keep failing, so nobody watches its runs. Look yourself when one "
-                      "takes long.",
+    K.NOBODY_WATCHES: lambda t: t.fill("The progress checks on {worker} keep failing, so nobody watches its runs. Look "
+                                       "yourself when one takes longer than ")
+                      + f"{round(t.snap.settings.frozen_after / 60)} minutes.",
     K.JOB_NO_PROGRESS: "{worker}'s job `{job}` has shown no progress for {minutes} minutes. Check whether it still makes "
                        "sense.",
     K.JOBS_STOPPED: "I stopped {worker}'s background work: {jobs}. No result will come from it.",
     K.MONITOR_REPORT: _monitor_report,
     # labels and workers, to whoever wrote them
-    K.LABEL_RETURNED: "Part of your reply went nowhere, because a label could not be read ({label}: {problem}). Write just "
-                      "that part again; the rest was passed on.",
+    K.LABEL_RETURNED: lambda t: t.fill("Part of your reply went nowhere, because a label could not be read ({label}: "
+                                       "{problem}). Write just that part again, with the whole label, for example ")
+                      + _example(t) + "; the rest was passed on.",
     K.LABEL_BROKEN_PASSED: _broken_passed,
     K.UNKNOWN_WORKER: _unknown_worker,
     K.NO_WORKERS: "{critic} has no worker to give work to, and only I can add one. Ask me.",
@@ -452,8 +455,8 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.RETRY_CONTINUE: "Your last turn was cut off by an error. Go on from where you stopped.",
     K.RESTART_CONTINUE: "Your program was restarted in the middle of your turn. Check where things stand and go on from "
                         "where you stopped; don't restart a job that still runs.",
-    K.MESSAGE_AGAIN: lambda t: "Your last turn was stopped before it was done. Check what is already done, then go on"
-                               + t.fill(" with this:\n\n{body}" if t.body else "."),
+    K.MESSAGE_AGAIN: lambda t: t.fill("{body}") if t.body else "Your last turn was stopped before it was done. Check "
+                                                               "what is already done, then go on.",
     K.SESSION_RETURN: _session_return,
     K.SESSION_FRESH: _session_fresh,
     K.HANDOVER_WRITE: "Your work continues in a new conversation that knows nothing of this one. Write the handover it "
@@ -461,26 +464,24 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                       "and what to watch out for. Reply with that text only, and start nothing new.",
     K.HANDOVER_REQUEST_CRITIC: _handover_critic,
     K.HANDOVER_REQUEST_MANAGER: lambda t: _handover_request(t, "the critic's checklist, the files, its latest report"),
-    K.HANDOVER_INSTRUCTION: "You take over this work in a new conversation. Check the current files and running jobs "
-                            "before you change anything.\n\n{body}",
+    K.HANDOVER_INSTRUCTION: "{body}",
     K.MANAGER_TAKEOVER: _manager_takeover,
     # to the manager
     K.CRITIC_REPORT: "From {critic}:\n\n{body}",
     K.PLAN_REQUEST: "My goal:\n\n{goal}\n\nPlease split it into milestones, as a numbered list with one milestone per "
-                    "line: “1. Short title — what has to be true when it is done”. Say which overall score out of 5 a "
-                    "milestone needs, and add a <summary> of what the plan covers. If I ask for changes, send the whole "
+                    "line: “1. Short title — what has to be true when it is done”. Add a <summary> of what the plan "
+                    "covers. If I ask for changes, send the whole "
                     "list again. Nothing starts before I approve it.",
     K.PLAN_LIST_MISSING: "I found no list of milestones in your reply. Please send it as a numbered list, one milestone "
                          "per line: “1. Short title — what has to be true when it is done”.",
     K.MILESTONE_START: _milestone_start,
-    K.SILENCE_CHECK: "Nothing is going on: nobody works, no job runs and no message waits (check {attempt} of {attempts}; "
-                     "after the last one the work pauses for me). Find out why, from the critic's checklist, its last report "
-                     "and the files, and write {critic} what to do so that the work goes on. Ask me or pause only if it "
-                     "really needs me.",
+    K.SILENCE_CHECK: "Nothing is going on: nobody works, no job runs and no message waits. Find out why, from the critic's "
+                     "checklist, its last message, the files and the state of the agents and their jobs, and write "
+                     "{critic} what to do so that the work goes on. Ask me only if it really needs me.",
     K.CHECKLIST_COMPLETE: _checklist_complete,
-    K.REVIEW_RUBRIC_MISSING: "The milestone “{title}” ({milestone}) has no rubric. Set one first, then score against it and decide.",
-    K.REVIEW_SCORE_LOW: "Your score of {score} out of 5 is below the {pass_score} we agreed on, so “{title}” is not "
-                        "accepted. Write {critic} what to fix and to update its checklist.",
+    K.REVIEW_RUBRIC_MISSING: "This milestone has no rubric yet. Set one first, then score against it and decide.",
+    K.REVIEW_SCORE_LOW: "Your score of {score} out of 5 is below the pass score of {pass_score}, so the milestone is not "
+                        "accepted. Write {critic} what to fix.",
     K.GATE_ANSWERS: _gate_answers,
     K.MILESTONE_CHANGE_REQUEST: _milestone_change,
     K.MILESTONE_CHANGE_UNREADABLE: "I could not read the new list of milestones ({problem}). Please send the whole list "
@@ -492,17 +493,21 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.REM_WORKER_LINE: _worker_line,
     K.REM_WORKERS: _workers,
     K.REM_LABELS: _labels,
-    K.REM_UNWATCHED: "Nobody watches the runs of {workers}; look yourself when one takes long.",
+    K.REM_UNWATCHED: lambda t: t.fill("Nobody watches the runs of {workers}; look yourself when one takes longer than ")
+                     + f"{round(t.snap.settings.frozen_after / 60)} minutes.",
     K.REM_GOLDEN_USE: _golden_use,
-    K.REM_GOLDEN_PATH: "The golden board is `{path}`; it is new to you or has changed, so read it.",
-    K.REM_GOLDEN_KEEP: "Keep the golden board (`{path}`) current: add my new lasting preferences and decisions, merge what "
-                       "overlaps, remove what no longer holds.",
-    K.REM_GOLDEN_SIZE: "The golden board (`{path}`) has {chars} characters; bring it below {limit} by merging and removing.",
+    K.REM_GOLDEN_PATH: lambda t: f"The golden board is `{_board(t)}`; it is new to you or has changed, so read and "
+                                 "maintain it.",
+    K.REM_GOLDEN_KEEP: lambda t: f"Keep the golden board (`{_board(t)}`) current, clean and brief: add my new lasting "
+                                 "preferences and decisions, merge what overlaps, remove what no longer holds.",
+    K.REM_GOLDEN_SIZE: lambda t: f"The golden board (`{_board(t)}`) has " + t.fill("{chars} characters; bring it below "
+                                                                                    "{limit} by merging and removing."),
     K.REM_MESSAGE_CRITIC: 'Only <message to="critic">…</message> reaches {critic}; write it as its user, about the work '
                           "alone.",
     K.REM_OPEN_GATES: lambda t: "Still waiting for me: " + "; ".join(f"“{_gate(t, g)}”" for g in t.get("gates") or [])
                                 + ". Don't ask again.",
-    K.REM_DISCUSSION: "We are in a discussion: what you write to others is only a draft until I apply it.",
+    K.REM_DISCUSSION: "We are in a discussion: write only to me. A message to others is not sent; when I apply the "
+                      "discussion, you write them what we agreed.",
     K.REM_DISCUSSION_OVER: "Our discussion is over and I did not apply it: what you drafted for others was not sent.",
     K.REM_NIGHT: "It is night mode and I am away: decide everything yourself and keep the work moving. Write each question "
                  "anyway, with your choice and why; I look at it later. A question then holds nothing back: write to "
@@ -510,7 +515,7 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.REM_NIGHT_OVER: "Night mode is over; questions wait for me again.",
     K.REM_CHECKLIST: lambda t: t.fill("{critic}'s checklist is `{path}`." if t.role == Role.MANAGER
                                       else "Keep your steps and checklist in `{path}`."),
-    K.REM_ASK_AND_END: "If you need an answer to go on, ask me in plain text and end your turn.",
+    K.REM_ASK_AND_END: "If you need an answer to go on, ask me concisely in plain text and end your turn.",
     K.REM_WRITING: lambda t: "\n".join(t.fill(str(x)) for x in t.get("rules") or []),
     # gates Orch opens, for the user
     K.GATE_PLAN: lambda t: "The plan is ready for your approval.\n\n" + _bullets(t.get("milestones")),
@@ -605,12 +610,28 @@ def system_prompt(snap: Snapshot, agent: str) -> str:
     """Role, protocol and writing rules of an agent. Orch's own files, never a project's copy (PRM-2)."""
     a = snap.agents[agent]
     values = {"critic": _Text(snap, TextRef(K.REM_MESSAGE_CRITIC), agent).critic,
-              "golden_board": f"The golden board (`{snap.golden.path}`)" if snap.golden.path else "The golden board",
+              "golden_board": f"The golden board (`{_relative(snap, snap.golden.path)}`)" if snap.golden.path
+              else "The golden board",
+              "checklist": _checklist_place(snap),
               "job_line": JOB_LINES.get(a.choice.backend, "Use your program's own background option to start one.")}
     parts = [_prompt(f"{a.role.value}.md", values), _prompt(f"protocol/{a.role.value}.md", values)]
     if a.role in (Role.MANAGER, Role.CRITIC, Role.WORKER):
         parts.append("How to write\n\n" + _fill(_bullets(writing_rules(a.role)), values))
     return "\n\n".join(p for p in parts if p) + "\n"
+
+
+def _relative(snap: Snapshot, path: str) -> str:
+    """A path inside the project, as the agents (who work in it) read it."""
+    ws = (snap.run.workspace or "").rstrip("/")
+    return path[len(ws) + 1:] if ws and path.startswith(ws + "/") else path
+
+
+def _checklist_place(snap: Snapshot) -> str:
+    """Where the critic's checklist is: one file per milestone, named by its position."""
+    path = snap.checklist.path or (snap.milestone.checklist_path if snap.milestone else "")
+    if path:
+        return f"`{_relative(snap, path)}` (a new file for each new instruction of mine; I tell you when it changes)"
+    return "a Markdown file I name in my first message"
 
 
 def _prompt(name: str, values: Dict[str, str]) -> str:

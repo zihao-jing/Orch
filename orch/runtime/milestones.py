@@ -370,9 +370,9 @@ class _Run:
     def accept(self, m: Milestone, t: C.Turn, r: C.Reply) -> None:
         s = self.snap.settings
         if not m.rubric:
-            return self.tell_manager(K.REVIEW_RUBRIC_MISSING, {"milestone": m.id, "title": m.title})
+            return self.tell_manager(K.REVIEW_RUBRIC_MISSING, {"milestone": m.id})
         if s.pass_score is not None and m.score is not None and m.score < s.pass_score:
-            return self.tell_manager(K.REVIEW_SCORE_LOW, {"milestone": m.id, "title": m.title,
+            return self.tell_manager(K.REVIEW_SCORE_LOW, {"milestone": m.id,
                                                           "score": m.score, "pass_score": s.pass_score})
         m = replace(m, accepted=True, summary=r.summary or r.untagged)
         self.put(m)

@@ -1,4 +1,5 @@
-"""Write docs/prompts-review.md: every prompt and text Orch's new runtime gives an agent or the user, filled in. Run: python3 tools/prompts_review.py"""
+"""Write docs/prompts-review.md (or the file given as the second argument): every prompt and text Orch's new runtime
+gives an agent or the user, filled in. Run: python3 tools/prompts_review.py [root] [out]"""
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -17,7 +18,6 @@ GROUPS = [
     ("To the critic", "critic", [
         (K.WORKER_FINAL, "A worker ends a turn with no job running: its reply goes to the critic for review."),
         (K.WORKER_INTERMEDIATE, "A worker ends a turn while a job it started still runs: passed on, not for review."),
-        (K.WORKER_TO_CRITIC, "No longer sent: a worker's reply to the user's chat stays with the user."),
         (K.WORKER_FAILED, "A worker's turn failed for good (after retries and backups)."),
         (K.DIRECT_MESSAGE_NOTICE, "The manager wrote to a worker: the critic is told (the user's chats are not)."),
         (K.LABEL_BROKEN_PASSED, "A message with a broken tag was returned once and came back broken: passed on, marked."),
@@ -25,7 +25,6 @@ GROUPS = [
         (K.CHECKLIST_UNREADABLE, "The critic's checklist file cannot be read or parsed."),
         (K.NOBODY_WATCHES, "The progress checks on a worker failed twice: nobody watches its runs."),
         (K.JOB_NO_PROGRESS, "A worker's job has shown no progress for the set time."),
-        (K.JOBS_STOPPED, "No longer sent: the critic's reminder shows a worker as stopped."),
         (K.MONITOR_REPORT, "The monitor found a worker's run off track or stopped (once per change, then hourly)."),
         (K.HANDOVER_REQUEST_CRITIC, "A worker moves to a new model or session: the critic writes its instruction."),
     ]),
@@ -34,17 +33,17 @@ GROUPS = [
         (K.PLAN_REQUEST, "The run starts with a goal and no plan."),
         (K.PLAN_LIST_MISSING, "The manager's plan has no milestone list Orch can read."),
         (K.MILESTONE_START, "The plan (or the previous milestone) is approved: the next milestone starts."),
-        (K.CHECKLIST_COMPLETE, "Every item on the critic's checklist is ticked: the manager reviews the milestone."),
+        (K.CHECKLIST_COMPLETE, "The critic ended a report with <done/>: the manager reviews the milestone."),
         (K.REVIEW_RUBRIC_MISSING, "The manager reviewed a milestone that has no rubric."),
         (K.REVIEW_SCORE_LOW, "The manager's ACCEPT scored below the pass score."),
         (K.GATE_ANSWERS, "The user answered one or more gates: all answers in one message."),
         (K.MILESTONE_CHANGE_REQUEST, "The user asked to change the milestones."),
         (K.MILESTONE_CHANGE_UNREADABLE, "The manager's changed milestone list cannot be read."),
-        (K.SILENCE_CHECK, "Nothing has happened for the silence time (2 min per try) and no one is writing."),
+        (K.SILENCE_CHECK, "Nothing has happened for the silence time (2 min per try, 3 tries; then Orch pauses the work)."),
         (K.NO_WORKERS, "The critic wrote to a worker but there is none: the manager should ask the user."),
         (K.HANDOVER_REQUEST_MANAGER, "The critic moves to a new model or session: the manager writes its instruction."),
         (K.MANAGER_TAKEOVER, "A new manager session starts: where the earlier turns are saved."),
-        (K.DISCUSSION_APPLY, "The user ends a discussion and applies it: the drafts become real messages."),
+        (K.DISCUSSION_APPLY, "The user applies a discussion: the agent now writes the others what was agreed."),
     ]),
     ("To any agent, about its own turn or session", "worker-1", [
         (K.LABEL_RETURNED, "The agent wrote a broken or unknown tag: returned to it once to fix."),
@@ -54,9 +53,9 @@ GROUPS = [
         (K.RESTART_CONTINUE, "The agent's program was restarted (silence or failure) in the same session."),
         (K.MESSAGE_AGAIN, "After a model switch: the unfinished message again, to the new model."),
         (K.SESSION_RETURN, "An earlier session is reopened: what happened since."),
-        (K.SESSION_FRESH, "A new session without a handover (e.g. the old one was lost)."),
+        (K.SESSION_FRESH, "The manager's new conversation at a milestone start, if set so (critic and workers get none)."),
         (K.HANDOVER_WRITE, "Before a switch: the old model writes a handover for its successor."),
-        (K.HANDOVER_INSTRUCTION, "The first message of the new session: the instruction and the handover."),
+        (K.HANDOVER_INSTRUCTION, "The first message of the new session: the old model's handover, or else the lead's instruction, as written."),
     ]),
     ("To the monitor", "monitor", [
         (K.MONITOR_CHECK, "Every `check_every` minutes while a worker writes or waits for a job."),
@@ -95,15 +94,20 @@ GROUPS = [
     ]),
 ]
 
+# kept so that stored messages still show, but never sent any more
+NOT_SENT = {K.WORKER_TO_CRITIC: "a worker's reply to the user's chat stays with the user",
+            K.JOBS_STOPPED: "the critic's worker line shows a worker as stopped",
+            K.REM_DISCUSSION_OVER: "an ended discussion needs no reminder"}
+
 REMINDERS = [
     # key, to whom, when
-    (K.REM_WORKER_LINE, "critic", "Every message: one line per worker."),
+    (K.REM_WORKER_LINE, "critic", "Every message: one line per worker, with its state and running jobs."),
     (K.REM_LABELS, "critic", "Every message: the tags it may use, with the worker ids."),
     (K.REM_WORKERS, "critic", "When the pool of workers changes; else 15% (only with 2+ workers)."),
     (K.REM_UNWATCHED, "critic", "25%, while a worker's checks have failed."),
     (K.REM_CHECKLIST, "critic, manager", "Once per session, and again when the checklist path changes."),
-    (K.REM_GOLDEN_PATH, "manager (critic only when no golden words)", "When the board is new to the session or changed."),
-    (K.REM_GOLDEN_USE, "manager (critic only when no golden words)", "With the line above, else 25%."),
+    (K.REM_GOLDEN_PATH, "manager", "When the board is new to the session or changed."),
+    (K.REM_GOLDEN_USE, "manager", "With the line above, else 25%."),
     (K.REM_GOLDEN_KEEP, "manager", "25%."),
     (K.REM_GOLDEN_SIZE, "manager", "Once when the board grows over the limit, then 25% while it stays over."),
     (K.REM_MESSAGE_CRITIC, "manager", "30%, not during a discussion."),
@@ -111,18 +115,17 @@ REMINDERS = [
     (K.REM_NIGHT, "manager", "When night mode starts, then 25%."),
     (K.REM_NIGHT_OVER, "manager", "Once when night mode ends."),
     (K.REM_DISCUSSION, "critic, manager", "When a discussion opens, then 40%."),
-    (K.REM_DISCUSSION_OVER, "critic, manager", "No longer sent."),
     (K.REM_ASK_AND_END, "worker", "10%."),
     (K.REM_WRITING, "manager, critic, worker", "25%: the first writing rule plus one at random."),
 ]
 
 
 BODY = {K.WORKER_FINAL: "«the worker's reply»", K.WORKER_INTERMEDIATE: "«the worker's reply»",
-        K.WORKER_TO_CRITIC: "«the worker's reply»", K.DIRECT_MESSAGE_NOTICE: "«what the user wrote»",
+        K.WORKER_TO_CRITIC: "«the worker's reply»", K.DIRECT_MESSAGE_NOTICE: "«what the manager wrote»",
         K.LABEL_BROKEN_PASSED: "«the sender's reply»", K.MONITOR_REPORT: "«the monitor's reply»",
-        K.MESSAGE_AGAIN: "«the unfinished message»", K.HANDOVER_INSTRUCTION: "«the instruction and the handover»",
+        K.MESSAGE_AGAIN: "«the unfinished message»", K.HANDOVER_INSTRUCTION: "«the handover or the instruction»",
         K.CRITIC_REPORT: "«the critic's plain text»", K.MILESTONE_CHANGE_REQUEST: "«the user's request»"}
-PATHS = {K.CHECKLIST_UNREADABLE: "/proj/.orch/checklist.md", K.REM_CHECKLIST: "/proj/.orch/checklist.md"}
+PATHS = {K.CHECKLIST_UNREADABLE: "/proj/.orch/runs/r1/checklist-1.md", K.REM_CHECKLIST: "/proj/.orch/runs/r1/checklist-1.md"}
 
 
 def vals(k):
@@ -134,6 +137,8 @@ def vals(k):
         v["agent"] = "critic"
     if "since" in v:
         v["since"] = time.time() - 3 * 3600
+    if k == K.REVIEW_SCORE_LOW:
+        v.update(score=4.0, pass_score=4.5)
     if k == K.COMMAND_REFUSED:
         v["why"] = "terminal_open"
     if k == K.REM_WRITING:
@@ -149,12 +154,14 @@ def block(text):
 def team():
     s = snapshot(workers=2, golden=C.GoldenBoard("/proj/.orch/golden.md", "d1", chars=100))
     s.agents["monitor"] = agent("monitor")
+    s.run = replace(s.run, workspace="/proj", run_dir="/proj/.orch/runs/r1")
+    s.checklist = replace(s.checklist, path="/proj/.orch/runs/r1/checklist-1.md")
     return s
 
 
 def main():
     s = team()
-    covered = {k for _, _, items in GROUPS for k, _ in items} | {k for k, _, _ in REMINDERS}
+    covered = {k for _, _, items in GROUPS for k, _ in items} | {k for k, _, _ in REMINDERS} | set(NOT_SENT)
     missing = [k.value for k in K if k not in covered]
     assert not missing, missing
     out = ["# Orch prompts for review", "",
@@ -164,7 +171,8 @@ def main():
            "## How an agent's input is made", "",
            "- **System prompt**, once per session: `prompts/<role>.md` + `prompts/protocol/<role>.md` + \"How to "
            "write\" (the `## All` and `## <role>` rules of `prompts/style.md`). The monitor gets no writing rules. "
-           "Placeholders: `{critic}` (the critic's name), `{golden_board}`, `{job_line}` (per program, §1.5). Put together "
+           "Placeholders: `{critic}` (the critic's name), `{golden_board}` (relative to the project), `{checklist}` (the "
+           "critic's checklist file), `{job_line}` (per program, §1.5). Put together "
            "in `orch/runtime/texts.py` `system_prompt()`. Folder: `orch/runtime/prompts/`.",
            "- **Each message**: Orch's text for the situation (§2; it wraps the sender's words where there are some), "
            "then one `<system-reminder>` block with the reminder lines due (§3). Words in `orch/runtime/texts.py` "
@@ -218,6 +226,9 @@ def main():
     out += ["Example: a worker's reply as the critic receives it (no random lines drawn):", "",
             block(texts.render(s2, replace(msg, text=C.TextRef(K.WORKER_FINAL, {"worker": "worker-1"}))).text), ""]
 
+    out += ["Texts no longer sent (kept only so that old messages still show): "
+            + "; ".join(f"`{k.value}`: {why}" for k, why in NOT_SENT.items()) + ".", ""]
+
     out += ["## 4. Texts shown to the user", "", "Not sent to agents. Shown in the dashboard.", ""]
     num = 0
     for title, reader, items in GROUPS:
@@ -236,7 +247,8 @@ def main():
             "- **`orch init --project`** writes `.orch/settings.yaml`, `agents/<role>/agent.yaml` and "
             "`agents/manager/goal.md` (\"Describe what you want done, and any decisions already made.\"). These are "
             "settings, not prompts.", ""]
-    (ROOT / "docs/prompts-review.md").write_text("\n".join(out))
+    dest = Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "docs/prompts-review.md"
+    dest.write_text("\n".join(out))
     print(len(out), "lines")
 
 

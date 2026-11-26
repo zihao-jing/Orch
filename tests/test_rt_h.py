@@ -105,6 +105,8 @@ class TestTexts(unittest.TestCase):
                                     [{**v[name][0], "answer": "B", "title": "Zzz"}] if isinstance(v[name], list) else 1234)
                 if key == TextKey.MONITOR_CHECK and name == "status":
                     v[name] = "waiting_job"
+                if name == "why" and key in (TextKey.HANDOVER_REQUEST_CRITIC, TextKey.HANDOVER_REQUEST_MANAGER):
+                    v[name] = "session_lost"  # the reason itself is not named; only a lost session reads differently
                 self.assertNotEqual(one, texts.words(C.TextRef(key, v), snapshot()), f"{key}: {name}")
 
     def test_PRM_1_critic_texts_name_nothing_above_it(self):
@@ -135,24 +137,26 @@ class TestTexts(unittest.TestCase):
         m = message("x1", "critic", "worker-1", "Started.", key=TextKey.WORKER_INTERMEDIATE,
                     values={"worker": "worker-1", "jobs": ["train.py"]})
         out = texts.render(snapshot(), m).text
-        self.assertIn("worker-1, job still running (`train.py`), not ready for review", out)
+        self.assertTrue(out.startswith("Job still running: worker-1's job is still running (`train.py`), so this is not "
+                                        "ready for review."), out)
 
     def test_REC_10_monitor_report_gives_the_status_once(self):
         out = texts._compose(texts._Text(snapshot(), C.TextRef(TextKey.MONITOR_REPORT, {
             "worker": "worker-1", "health": "off_track", "minutes": 9}), "critic", "off-track\nIt edits the docs."))
-        self.assertEqual(out, "Progress check on worker-1, 9 minutes into its run: off track.\n\nIt edits the docs.")
+        self.assertEqual(out, "The monitor checked worker-1's run, 9 minutes in, and finds it off track. What it saw:\n\n"
+                              "It edits the docs.")
 
     def test_MS_6_an_accept_below_the_agreed_score_goes_back(self):
-        out = texts.words(C.TextRef(TextKey.REVIEW_SCORE_LOW, {"milestone": "m1", "title": "Data", "score": 3.5,
-                                                               "pass_score": 4.0}),
+        out = texts.words(C.TextRef(TextKey.REVIEW_SCORE_LOW, {"milestone": "m1", "score": 3.5, "pass_score": 4.0}),
                           snapshot())
-        self.assertEqual(out, "Your score of 3.5 out of 5 is below the 4.0 we agreed on, so “Data” is not accepted. "
-                              "Write the critic what to fix and to update its checklist.")
+        self.assertEqual(out, "Your score of 3.5 out of 5 is below the pass score of 4.0, so the milestone is not "
+                              "accepted. Write the critic what to fix.")
 
     def test_SIL_3_silence_check(self):
-        out = texts.words(C.TextRef(TextKey.SILENCE_CHECK, {"attempt": 2, "attempts": 3}), snapshot())
-        for part in ("check 2 of 3", "Find out why", "write the critic", "pause only if it really needs me"):
+        out = texts.words(C.TextRef(TextKey.SILENCE_CHECK, {}), snapshot())
+        for part in ("Find out why", "the state of the agents and their jobs", "write the critic", "Ask me only"):
             self.assertIn(part, out)
+        self.assertNotIn("pause", out)  # Orch pauses the work itself after the last check
 
     def test_PRM_9_review_texts_full_once_per_session_then_short(self):
         snap = snapshot()
@@ -172,23 +176,21 @@ class TestTexts(unittest.TestCase):
                       "(`/run/rubric-1.md`)", out)
         self.assertTrue(out.endswith("Done when: The data is clean.\n\nStill running: `worker-1: train.py`."), out)
 
-    def test_REC_10_monitor_sees_the_checklist_once_then_only_changes(self):
+    def test_REC_10_the_monitor_sees_the_live_file_and_no_checklist(self):
         snap = snapshot(agent("monitor"))
-        v = {**values(TextKey.MONITOR_CHECK), "items": ["- [ ] Labels checked", "- [x] Files read"]}
-        m = message("x1", "monitor", key=TextKey.MONITOR_CHECK, values=v, body="")
+        m = message("x1", "monitor", key=TextKey.MONITOR_CHECK, values=values(TextKey.MONITOR_CHECK), body="")
         out = texts.render(snap, m)
-        self.assertIn("Labels checked", out.text)
+        self.assertIn("`/run/live.md`", out.text)
+        self.assertNotIn("checklist", out.text.lower())
         self.assertNotIn("system-reminder", out.text)
-        snap.agents["monitor"].session.given.update(out.given)
-        m.text.values["items"] = ["- [x] Labels checked", "- [x] Files read"]
-        out = texts.render(snap, m)
-        self.assertIn("Changed in the checklist:\n- [x] Labels checked", out.text)
-        self.assertNotIn("Files read", out.text)
 
     def test_SES_4_the_critic_and_workers_are_not_sent_into_others_turns(self):
         ref = C.TextRef(TextKey.SESSION_RETURN, {"turns_dir": "/run/rounds", "since": T0})
-        self.assertIn("/run/rounds/**/t*-critic.*.md", texts._compose(texts._Text(snapshot(), ref, "critic")))
-        self.assertNotIn("/run", texts._compose(texts._Text(snapshot(), ref, "worker-1")))
+        self.assertIn("/run/rounds/**/t*-manager.*.md", texts._compose(texts._Text(snapshot(), ref, "manager")))
+        for who in ("critic", "worker-1"):  # told what happened, never pointed into Orch's run folder
+            out = texts._compose(texts._Text(snapshot(), ref, who))
+            self.assertNotIn("/run", out)
+            self.assertIn("another conversation of yours", out)
 
 
 class TestPrompts(unittest.TestCase):
@@ -210,9 +212,8 @@ class TestPrompts(unittest.TestCase):
     def test_LAB_1_2_3_labels_per_role(self):
         p = self.prompts()
         names = lambda t: set(re.findall(r"<([a-z-]+)(?=[ >/])", t))  # noqa: E731
-        self.assertEqual(names(p["critic"]), {"message", "silent"})
-        self.assertEqual(names(p["manager"]), {"message", "question", "pause", "rubric", "score", "decision", "summary",
-                                               "state"})
+        self.assertEqual(names(p["critic"]), {"message", "silent", "done"})
+        self.assertEqual(names(p["manager"]), {"message", "question", "pause", "rubric", "score", "decision", "summary"})
         self.assertEqual(names(p["worker-1"]), set())
         self.assertNotRegex(p["critic"], r'to="(?!worker-1)')
         self.assertNotRegex(p["manager"], r'to="worker')  # allowed, never prompted
@@ -232,18 +233,20 @@ class TestPrompts(unittest.TestCase):
 
     def test_WRK_9_10_11_rules_are_in_the_prompts(self):
         p = self.prompts()
-        self.assertIn("parts that don't depend on each other", p["critic"])
         self.assertIn("one task at a time", p["critic"])  # WRK-8
-        for part in ("Files may change while you work", "Don't undo changes you didn't make", "git worktree",
-                     "merge your work back", "remove the worktree"):
-            self.assertIn(part, p["worker-1"])
+        self.assertNotIn("depend on each other", p["critic"])  # the manager decides how many workers to use
         self.assertRegex(p["worker-1"], r"ask me in plain text and end your turn. Don't guess")
+        self.assertIn("Never use nohup", p["worker-1"])
+        self.assertIn("How to write", p["worker-1"])
+        self.assertLess(len(p["worker-1"]), 1500)  # a worker gets very little system prompt
 
     def test_MS_7_PRM_8(self):
         p = self.prompts()
-        self.assertIn("never just to acknowledge", p["manager"])
-        self.assertIn("to update its checklist", p["manager"])
-        self.assertRegex(p["critic"], r"untick it when it no longer does, and make every problem or change I ask for")
+        self.assertIn("Don't check in on your own", p["manager"])
+        self.assertNotIn("checklist", p["manager"])  # the manager judges by its own rubric
+        self.assertIn("in night mode it starts at once", p["manager"])
+        self.assertRegex(p["critic"], r"untick it when it no longer does, and make every problem or change I\s+ask for")
+        self.assertIn("<done/>", p["critic"])
         self.assertIn("at most 3 lines", p["monitor"])
 
     def test_JOB_1_one_line_for_the_backend_of_the_worker(self):
@@ -327,7 +330,7 @@ class TestReminders(unittest.TestCase):
             "worker-1: idle for 12 min; assigned: Check the labels; you have not written to it since its last report",
             "worker-2: waiting for a job (`train.py`); nothing assigned yet",
             'To a worker: <message to="worker-1">…</message> or <message to="worker-2">…</message>. Plain text goes to me; '
-            "add <silent/> when nothing in the reply needs me.",
+            "add <silent/> when nothing in the reply needs me, and <done/> when the work I asked for is finished.",
             "</system-reminder>"]))
 
     def test_PRM_4_the_critic_gets_its_lines_with_every_message(self):
@@ -435,7 +438,7 @@ class TestReminders(unittest.TestCase):
 
     def test_WRK_11_PRM_4_worker_is_reminded_rarely(self):
         snap = snapshot()
-        n = sum("ask me in plain text" in texts.render(snap, message(f"x{i}", "worker-1")).text for i in range(2000))
+        n = sum("ask me concisely in plain text" in texts.render(snap, message(f"x{i}", "worker-1")).text for i in range(2000))
         self.assertTrue(120 < n < 300, n)
 
     def test_PRM_4_each_random_item_has_its_own_chance(self):

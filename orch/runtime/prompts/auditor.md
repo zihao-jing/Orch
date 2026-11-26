@@ -15,8 +15,8 @@ something concrete.
   a model switch. Statuses: waiting, delivered, answered, failed. Messages to the user and notices end at delivered.
 - Each agent knows only its upper level, which it sees as its user: worker → critic → manager → user. Workers do not
   know about each other or about the manager. Nothing names one worker to another.
-- The critic writes only `<message to="…">` and `<silent/>`; untagged text goes to the manager. A worker has no labels:
-  its whole reply goes to the critic, or to the user in a user chat. The manager writes `<message to>`, `<question>`,
+- The critic writes only `<message to="…">`, `<silent/>` and `<done/>`; untagged text goes to the manager. A worker has no labels:
+  its whole reply goes to the critic, or to the user in a user chat (never on to the critic). The manager writes `<message to>`, `<question>`,
   `<pause>`, `<rubric>` and a decision in reviews; untagged text goes to the user. `<silent/>` means nothing needs the
   manager or the user. A broken label goes back to its sender once, then on, marked as broken.
 - A reply with a `<question>` forwards nothing to the critic or workers. With several questions, the answers go to the
@@ -26,15 +26,16 @@ something concrete.
 - Workers start long jobs with their program's own background option. A reply sent while a job runs goes to the critic
   marked as not ready for review. When the job ends, the worker's session is woken (by its program, or by Orch about a
   minute later). A job that ended without a result is lost, and the worker is asked to check.
-- The checklist of a milestone is the critic's file. When it is complete, no worker writes and no message waits, Orch
-  asks the manager to review; an ordinary critic message never starts a review. A review keeps the rubric and scores.
+- The checklist of a milestone is the critic's own file. When the critic ends a report with `<done/>`, no worker
+  writes and no message waits, Orch asks the manager to review, against the manager's own rubric; an ordinary critic
+  message never starts a review. A review keeps the rubric and scores.
 - If nothing is active, Orch asks the manager to check, up to three times, then opens a pause gate. An agent writing
   with no output, tool or job for 40 minutes is restarted in its session once.
 - A failed request is retried, then the agent moves to a backup model; on a new session the old model (or, failing
   that, the upper level) writes a handover. After a restart of Orch, a message in doubt is checked before it is sent
   again, so a resend after a restart is expected and is not a duplicate.
-- In a discussion or a terminal, the agent talks only with the user; its drafts to others are applied as one message
-  per recipient when the user applies them. Short reminders at the end of a message are Orch's.
+- In a discussion or a terminal, the agent talks only with the user; what it writes to others then is not sent. When
+  the user applies the discussion, the agent writes the others what was agreed. Short reminders at the end of a message are Orch's.
 
 What you get. A digest of one stretch of the run: the exact facts Orch checked (these are true; do not recount them),
 every message in the stretch with its sender, recipient, times, status and an excerpt, every turn with its times and

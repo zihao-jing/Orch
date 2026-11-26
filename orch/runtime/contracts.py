@@ -448,10 +448,10 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.PLAN_REQUEST: ("goal",),
     TextKey.PLAN_LIST_MISSING: (),
     TextKey.MILESTONE_START: ("milestone", "title", "text", "checklist_path", "last_title", "approved_plan"),
-    TextKey.SILENCE_CHECK: ("attempt", "attempts"),
+    TextKey.SILENCE_CHECK: (),
     TextKey.CHECKLIST_COMPLETE: ("milestone", "text", "rubric_path", "jobs"),
-    TextKey.REVIEW_RUBRIC_MISSING: ("milestone", "title"),
-    TextKey.REVIEW_SCORE_LOW: ("milestone", "title", "score", "pass_score"),
+    TextKey.REVIEW_RUBRIC_MISSING: ("milestone",),
+    TextKey.REVIEW_SCORE_LOW: ("milestone", "score", "pass_score"),
     TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer, approve}]
     #   (approve: True/False for plan, milestone and change gates, else None); unsent:
     #                                      [{to, body}]; decide_again: milestone title or ""
@@ -461,7 +461,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.NOBODY_WATCHES: ("worker",),
     TextKey.JOB_NO_PROGRESS: ("worker", "job", "minutes"),
     TextKey.JOBS_STOPPED: ("worker", "jobs"),
-    TextKey.MONITOR_CHECK: ("worker", "status", "minutes", "assignment", "live_file", "items"),
+    TextKey.MONITOR_CHECK: ("worker", "status", "minutes", "assignment", "live_file"),
     TextKey.MONITOR_REPORT: ("worker", "health", "minutes"),
     TextKey.DISCUSSION_APPLY: ("request", "milestone_change"),  # request: the user's own words with Apply, or "";
     #   milestone_change: True when the discussion wanted one, so a reply after a later question is still read as a change

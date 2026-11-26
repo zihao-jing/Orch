@@ -53,11 +53,12 @@ class TestPageFiles(unittest.TestCase):
         self.assertEqual(used - listed, set())
 
     CLI_ONLY = {"TerminalOpen", "TerminalClose"}  # they come from `orch terminal`; the page shows its command
+    NO_CONTROL = {"SendToCritic"}  # refused: a chat with a worker stays between the user and the worker
 
     def test_UI_3_every_user_command_has_a_control(self):
         js = read("app.js") + read("logic.js")
         for name in user_commands():
-            if name in self.CLI_ONLY:
+            if name in self.CLI_ONLY or name in self.NO_CONTROL:
                 continue
             self.assertRegex(js, r"""["']%s["']""" % name, f"no control sends {name}")
 
@@ -876,8 +877,6 @@ class TestSmoke(unittest.TestCase):
     def test_UI_3_apply_and_end_a_discussion(self):
         self.run_scenario("discussion")
 
-    def test_UI_3_send_to_critic(self):
-        self.run_scenario("sendToCritic")
 
     def test_UI_3_terminal_notice_take_back_and_notices(self):
         self.run_scenario("terminalAndNotices")

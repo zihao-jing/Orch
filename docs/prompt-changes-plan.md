@@ -1,18 +1,18 @@
 # Prompt changes: your review comments, organised
 
-Source: your comments in [ ] in docs/prompts-review.md. Each line: what you asked → what I will change. "Code" means a change in Orch's logic; the others are text only. Items marked (Q) wait for your answer at the end.
+Source: your comments in [ ] in docs/prompts-review.md. Each line: what you asked → what changes. Status: all done; the result is docs/prompts-review-2.md (your commented file is left as it is).
 
 ## A. Changes in Orch's logic
 
 A1 Manager notes. Remove <state>, the notes file, its reminder (rem_state_edited) and the code behind them. The manager keeps its own context.
-A2 Wait after each milestone. After an accepted milestone Orch waits for you before the next one starts (a gate with "Start next milestone"), except in night mode. Today it waits only after the last one.
+A2 Wait after each milestone. Already so in the code (approve_milestones is on by default): after an accepted milestone Orch waits for your approval before the next one starts, except in night mode. Only the manager's prompt now says so.
 A3 Milestone review not based on the critic's checklist. The manager reviews against its own rubric and the work, never against the critic's checklist. The checklist is the critic's own working file: lighter rules, and Orch stops reading it closely. What then triggers the review (Q1).
 A4 Rubric. The <rubric> label stays, so that Orch can check each criterion is scored. Orch also saves it to a file in the run folder, and the review message gives that path instead of the whole rubric.
 A5 Your chats with a worker stay between you and it. A worker's reply to you is no longer sent on to the critic (worker_to_critic), and the critic is not told you wrote to it (direct_message_notice).
-A6 Stopped or closed workers. No message to the critic (jobs_stopped). Instead, the critic's reminder block always shows each worker's state (working, job running, idle, closed), and its system prompt says where to find it.
+A6 Stopped or closed workers. No message to the critic (jobs_stopped). The critic's reminder block already shows each worker's state and running jobs; its system prompt now says so.
 A7 Discussion. While a discussion is open, Orch holds back the manager's messages to others instead of keeping them as drafts. When you apply the discussion, the manager writes the messages then. The "drafts" wording and the "discussion over, not applied" reminder go.
 A8 Silence check. Orch pauses the work after the last check itself; the message to the manager no longer mentions it.
-A9 Model switch. Today the old model writes a handover and the critic (or manager) also writes an instruction, so the new session gets two texts. One is enough (Q2).
+A9 Model switch. Already one text in the code: the old model's handover when it can write one, else the lead's instruction. The new session now gets it as written, without Orch's preface.
 A10 An interrupted message sent again goes to the new model as it is, without the "Your last turn was stopped…" line.
 A11 Session texts. session_fresh and the handover_instruction preface go. session_return becomes short: "Work went on without this conversation since <time>, by <who>." plus the path of the session that went on, when there is one.
 A12 Golden board words the critic must not see (Q3).
@@ -96,3 +96,10 @@ Q1 The critic ends a report with <done/> when it thinks the milestone is finishe
 Q2 The old model's handover first; when the old model cannot write one (it failed, e.g. billing), the lead (the critic for a worker, the manager for the critic) writes the instruction.
 Q3 The critic never sees the golden board. The manager restates the rules that matter (the same wording is fine) in its instruction. The word check and golden_leak go. So B18 becomes: no golden board for the critic; rules come in the manager's instruction, and the critic passes the ones that matter on to workers.
 Q4 When the plan names no pass score, Orch uses 4.5.
+
+## Also changed while doing it
+
+- The dashboard's "Send to critic" button is gone (a chat with a worker stays with you).
+- The critic's label reminder names <done/>; the plan request no longer asks the manager for a pass score (Orch uses the setting, 4.5 by default).
+- The worker prompt lost the rules you did not mark as needed: "Do what I ask and no more", the report line, the pilot rule and the git worktree rule.
+- The auditor's description of the rules now matches the new behaviour (you skip that prompt, but the auditor judges by it).
