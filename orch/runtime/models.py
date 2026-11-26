@@ -81,7 +81,8 @@ def resolve(choice: Choice, settings: Dict[str, Any], agent_yaml: Dict[str, Any]
         own = _inline(y)
         same = own.backend == choice.backend and not y.get("model")
         env = own.env if same and own.session_key == choice.session_key else {**_own_env(y), **choice.env}
-        c = Choice(choice.backend, choice.provider, choice.model, options=own.options if same else {}, env=dict(env))
+        c = Choice(choice.backend, choice.provider, choice.model, options=own.options if same else dict(choice.options),
+                   env=dict(env))  # its own options (an executable, a permission mode) stay; keys are only in env
     c.provider, c.model, c.effort = choice.provider or c.provider, choice.model or c.model, choice.effort
     c.model_id, c.name = choice.model_id, choice.name
     return c

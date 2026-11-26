@@ -84,8 +84,7 @@ class Engine:
         for agent in self.store.snapshot().agents.values():
             if agent.proc:
                 try:
-                    choice = agent.switch.target if agent.switch and agent.switch.step in (
-                        C.SwitchStep.OPENING, C.SwitchStep.CONFIRMING) else self._session_choice(agent)
+                    choice = self._proc_choice(agent)
                     adapter = self._make_adapter(agent.id, choice)
                     attached[agent.id] = (adapter, agent.proc, adapter.reconnect(agent.proc))
                     self._remember_prompt(agent.id)
@@ -491,6 +490,20 @@ class Engine:
                     pass  # _probe has already reported the failure
 
     # Adapter lifecycle and facts
+
+    @staticmethod
+    def _proc_choice(agent: C.Agent) -> C.Choice:
+        """The choice the saved process runs on: during a switch, a process started after the new session was made is
+        the new one (whatever step was saved last), an older one is the old CLI."""
+        sw, proc = agent.switch, agent.proc
+        if sw and sw.step in (C.SwitchStep.PENDING, C.SwitchStep.TESTING):
+            return Engine._session_choice(agent)  # nothing new is open before OPENING
+        if sw and sw.new and proc and proc.started >= sw.new.started:
+            return sw.new.choice or sw.target
+        if sw and not sw.new and proc and (sw.step == C.SwitchStep.CONFIRMING
+                                           or sw.step == C.SwitchStep.OPENING and proc.started >= sw.step_at):
+            return sw.target  # OPENING saved, then the new CLI started; a crash before that leaves the old one
+        return Engine._session_choice(agent)
 
     @staticmethod
     def _session_choice(agent: C.Agent) -> C.Choice:
