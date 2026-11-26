@@ -144,3 +144,14 @@ class ViewerRefusesWithoutOrch(unittest.TestCase):
             self.assertFalse(r["ok"])
             self.assertIn("No Orch is running", r["shown"])
             self.assertFalse((Path(d) / "commands").exists())
+
+
+class ViewerCatalog(unittest.TestCase):
+    def test_a_saved_run_without_a_model_list_shows_the_settings_models(self):
+        from orch.runtime.board import Viewer
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".orch").mkdir()
+            (Path(d) / ".orch" / "settings.yaml").write_text(
+                "models:\n  gpt:\n    backend: codex\n    backend_options: {model: gpt-5.5, effort: high}\n")
+            self.assertEqual([m.id for m in Viewer(Path(d)).catalog(Path(d))], ["gpt"])
+            self.assertEqual(Viewer(Path(d)).catalog(Path(d) / "nowhere"), [])

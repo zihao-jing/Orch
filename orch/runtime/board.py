@@ -461,9 +461,22 @@ class Viewer:
             return self._snap
 
     def state(self) -> Dict[str, Any]:
-        out = public_state(self.snapshot())
+        snap = self.snapshot()
+        out = public_state(snap)
+        if not out.get("catalog") and snap.run.workspace:
+            out["catalog"] = to_dict(self.catalog(Path(snap.run.workspace)))
         out["viewer"] = {"orch_running": self.orch_running()}
         return out
+
+    def catalog(self, workspace: Path) -> List[Any]:
+        """A run saved before Orch kept its model list: the models of the project's settings file now."""
+        import yaml
+        from .models import catalog
+        try:
+            settings = yaml.safe_load((workspace / ".orch" / "settings.yaml").read_text(encoding="utf-8")) or {}
+            return catalog({"models": settings.get("models")}, {}) if isinstance(settings, dict) else []
+        except Exception:
+            return []
 
     def orch_running(self) -> bool:
         """Whether an Orch holds this run: the pid its run lock names is alive. Read only, so it never takes the lock
