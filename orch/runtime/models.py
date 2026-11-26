@@ -83,7 +83,7 @@ def resolve(choice: Choice, settings: Dict[str, Any], agent_yaml: Dict[str, Any]
         env = own.env if same and own.session_key == choice.session_key else {**_own_env(y), **choice.env}
         c = Choice(choice.backend, choice.provider, choice.model, options=own.options if same else {}, env=dict(env))
     c.provider, c.model, c.effort = choice.provider or c.provider, choice.model or c.model, choice.effort
-    c.model_id, c.name, c.retries = choice.model_id, choice.name, choice.retries
+    c.model_id, c.name = choice.model_id, choice.name
     return c
 
 
