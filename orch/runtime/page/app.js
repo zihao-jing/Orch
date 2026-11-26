@@ -539,29 +539,49 @@
   }
 
   // progress: milestones and the current checklist
+  // the checklist shown under the milestones: the current one's, or the one picked on a card
+  let ckPick = null;
+  function checklistList(ck) {
+    if (ck.error === "missing") return h("p", { class: "mute" }, "The critic has not written this checklist yet.");
+    if (ck.error) return h("p", { class: "mute" }, "The critic's checklist cannot be read.");
+    if (!(ck.steps || []).length) return h("p", { class: "mute" }, "The checklist has no steps yet.");
+    return h("ul", { class: "ck" }, ck.steps.map(step => [h("li", { class: "stepname" }, step.title),
+      step.items.map(item => h("li", { class: item[0] ? "done" : "open" },
+        h("span", { class: "bx", title: item[0] ? "Complete" : "To do" }, item[0] ? "✓" : "○"), h("span", {}, spanNodes(L.markdown(item[1])[0] ? L.markdown(item[1])[0].lines[0] : []))))]));
+  }
   function renderProgress() {
     const ms = S.milestones || [], ck = S.checklist || {};
-    paint($("progress"), JSON.stringify([ms, ck, listLimit("checklist")]), () => {
+    const cur = ms.find(m => m.status === "current");
+    const shown = ms.find(m => m.id === ckPick) || cur || ms.filter(m => m.status === "done").pop() || null;
+    paint($("progress"), JSON.stringify([ms, ck, shown && shown.id]), () => {
       if (!ms.length) return h("p", { class: "empty" }, "No milestones yet.");
       const [d, n] = L.progress(ck);
-      const out = [h("div", { class: "ms" }, ms.map(m => h("div", { class: "mscard" + (m.status === "current" ? " cur" : "") },
+      const out = [h("div", { class: "ms" }, ms.map(m => h("div", { class: "mscard" + (m.status === "current" ? " cur" : "") + (shown && shown.id === m.id ? " picked" : "") },
           h("div", { class: "mute small" }, L.MS_STATUS[m.status] || ""), h("div", { class: "t" }, m.title),
           m.status === "current" && n ? [h("div", { class: "bar" }, h("i", { style: "width:" + Math.round(100 * d / n) + "%" })), h("div", { class: "mute small" }, d + " of " + n + " done")] : null,
           m.score !== null && m.score !== undefined && m.status === "done" ? h("div", { class: "mute small" }, "Score " + m.score) : null,
           h("div", { class: "milestone-actions" },
-            m.text ? h("details", {}, h("summary", { class: "link" }, "Details"), md(m.text)) : null,
+            m.checklist_path && !(shown && shown.id === m.id) ? h("button", { type: "button", class: "link", on: { click: () => { ckPick = m.id; renderProgress(); } } }, "Checklist") : null,
+            m.text || (m.rubric || []).length ? h("details", {}, h("summary", { class: "link" }, "Details"), m.text ? md(m.text) : null,
+              (m.rubric || []).length ? [h("div", { class: "mute small" }, "Rubric"), h("ul", {}, m.rubric.map(r => h("li", {}, r)))] : null) : null,
             m.status === "done" ? h("button", { type: "button", class: "link", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen") : null))))];
-      if (ck.error) out.push(h("p", { class: "mute" }, "The critic's checklist is missing or cannot be read."));
-      const entries = (ck.steps || []).flatMap(step => (step.items.length ? step.items : [null]).map(item => ({ step, item })));
-      const { rows, remaining } = L.latest(entries, listLimit("checklist"));
-      if (rows.length) {
-        out.push(listMore("checklist", remaining, renderProgress), h("ul", { class: "ck" }, rows.map(({ step, item }, i) =>
-          [i === 0 || rows[i - 1].step !== step ? h("li", { class: "stepname" }, step.title) : null,
-            item ? h("li", { class: item[0] ? "done" : "open" }, h("span", { class: "bx", title: item[0] ? "Complete" : "To do" }, item[0] ? "✓" : "○"), h("span", {}, item[1])) : null])));
+      if (shown) {
+        const box = h("div", { class: "ck-box" }, h("div", { class: "ck-head" }, h("h3", {}, "Checklist"),
+          h("span", { class: "mute small" }, shown.title + (shown.status === "current" && n ? " · " + d + " of " + n + " done" : ""))));
+        if (shown.status === "current") box.append(checklistList(ck));
+        else {
+          const holder = h("div", {}, h("p", { class: "mute" }, "Loading…"));
+          box.append(holder);
+          cached("api/checklist?milestone=" + encodeURIComponent(shown.id))
+            .then(c => holder.replaceChildren(checklistList(c)))
+            .catch(() => holder.replaceChildren(h("p", { class: "mute" }, "Could not load this checklist.")));
+        }
+        out.push(box);
       }
       return out;
     });
   }
+
 
   // messages
   const messageFilter = () => ({ q: $("msearch").value, agent: $("mwho").value,
@@ -838,6 +858,29 @@
   }
 
   // model window
+  // a new worker: like the first one, or on a model of the catalog
+  async function addWorker() {
+    const cat = S.catalog || [], like = agentList().find(a => a.role === "worker" && a.lifecycle !== "deleted");
+    const likeModel = like ? L.shortModel(like.actual_model || like.choice.model || like.choice.label || "") : "";
+    const msel = h("select", { "aria-label": "Model" }, [h("option", { value: "" }, "Same as " + (like ? nm(like.id) : "the first worker") + (likeModel ? " (" + likeModel + ")" : ""))]
+      .concat(cat.map(m => h("option", { value: m.id }, m.label || m.model))));
+    const effWrap = h("div", { class: "field" });
+    const fillEff = () => {
+      const ef = msel.value ? L.efforts(cat, msel.value) : [];
+      const def = (cat.find(m => m.id === msel.value) || {}).default_effort;
+      const es = h("select", { "aria-label": "Effort" }, ef.map(e => h("option", { value: e }, e)));
+      if (def && ef.indexOf(def) >= 0) es.value = def;
+      effWrap.replaceChildren(...(ef.length ? [h("label", {}, "Effort"), es] : []));
+    };
+    msel.addEventListener("change", fillEff);
+    fillEff();
+    const body = h("div", {}, h("div", { class: "field" }, h("label", {}, "Model"), msel), effWrap,
+      cat.length ? null : h("p", { class: "mute small" }, "No other models are listed, so it starts like the first worker."));
+    const v = await modal("Add a worker", body, [{ label: "Add worker", value: "add", cls: "pri" }, { label: "Cancel", value: "" }]);
+    if (v !== "add") return;
+    const eff = effWrap.querySelector("select");
+    cmd("WorkerAdd", msel.value ? { model_id: msel.value, effort: eff ? eff.value : "" } : {}, $("addworker"));
+  }
   function openModel(id) {
     const build = () => {
       const a = S.agents[id]; if (!a) return h("p", {}, "This agent is gone.");
@@ -1025,7 +1068,7 @@
     $("stopbtn").addEventListener("click", stopStart);
     $("morebtn").addEventListener("click", more);
     $("runsbtn").addEventListener("click", runs);
-    $("addworker").addEventListener("click", ev => cmd("WorkerAdd", {}, ev.currentTarget));
+    $("addworker").addEventListener("click", addWorker);
     $("teamfold").addEventListener("click", () => setTeamFolded(!teamFolded));
     $("changems").addEventListener("click", changeMilestones);
     $("themebtn").addEventListener("click", () => {

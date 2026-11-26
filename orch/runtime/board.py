@@ -32,6 +32,8 @@ from ..boards import digest as text_digest
 from ..recorder import read_json
 from .contracts import (CONTRACT_VERSION, AgentStatus, Agent, Lifecycle, Message, MessageStatus, Role, RunInfo,
                         Snapshot, TextRef, UserCommand, from_dict, public_state, redact, reply_json, to_dict)
+from .golden import read_board
+from .milestones import read_checklist
 
 PAGE_DIR = Path(__file__).with_name("page")
 MAX_BODY = 1 << 20  # a command may carry a whole golden board or notes file
@@ -356,6 +358,19 @@ class Board:
         ws = str((st.get("run") or {}).get("workspace") or "")
         return self.text_file(str(Path(ws, p)) if p else "")
 
+    def checklist(self, milestone: str) -> Dict[str, Any]:
+        """The critic's checklist of one milestone, done ones too: its steps and items as read from the file now."""
+        st = self.state()
+        ms = next((m for m in st.get("milestones") or [] if m.get("id") == milestone), None)
+        if ms is None:
+            return {"error": "not found"}
+        p = str(ms.get("checklist_path") or "")
+        if not p:
+            return {"path": "", "steps": [], "complete": False, "error": "none"}
+        f = Path(p) if Path(p).is_absolute() else Path(str((st.get("run") or {}).get("workspace") or ""), p)
+        text = _read(f) if f.is_file() else None
+        return to_dict(read_checklist(p, text))
+
     def audit_notes(self) -> Dict[str, Any]:
         """The file run.audit_notes_path names (the one the auditor reads); nothing if the run names none."""
         p = str((self.state().get("run") or {}).get("audit_notes_path") or "")
@@ -437,7 +452,8 @@ class Viewer:
             if self._snap is None or key != self._key:
                 st = read_json(f, {}) or {}
                 if "runtime" in st:
-                    self._store = Store(self.run_dir, SystemClock(), readonly=True)
+                    self._store = Store(self.run_dir, SystemClock(), readonly=True, read_checklist=read_checklist,
+                                        read_board=read_board)   # as the engine reads them
                     self._snap = self._store.snapshot()
                 else:
                     self._store, self._snap = None, _old_snapshot(self.run_dir, st)
@@ -600,6 +616,9 @@ def _handler(board: Board):
                     self.events()
                 elif api == "golden":
                     self.js(board.golden())
+                elif api == "checklist":
+                    c = board.checklist(one("milestone"))
+                    self.js(c, 404 if c.get("error") == "not found" else 200)
                 elif api == "audit_notes":
                     self.js(board.audit_notes())
                 elif api == "audit":

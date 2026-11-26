@@ -30,6 +30,23 @@ class TestWorkers(unittest.TestCase):
         acts = decide(W, snap, event(WorkerAdd, snap, "", like="worker-9"))
         assert_has(self, acts, CommandReply, ok=False)
 
+    def test_WRK_2_a_new_worker_can_have_its_own_model_from_the_catalog(self):
+        settings = {"models": {"gpt": {"backend": "codex", "backend_options": {"model": "gpt-5.5", "effort": "high"}}}}
+        w = workers_module(settings)
+        snap = snapshot(workers=1)
+        acts = decide(w, snap, event(WorkerAdd, snap, "", model_id="gpt"))
+        add = assert_has(self, acts, AddWorker, like="worker-1")
+        self.assertEqual((add.agent.choice.backend, add.agent.choice.model_id), ("codex", "gpt"))
+        self.assertEqual(add.agent.choices[1:], snap.agents["worker-1"].choices[1:])   # the backups stay
+        saved = assert_has(self, acts, SaveChoice, agent=add.agent.id)
+        self.assertEqual(saved.choice.model_id, "gpt")
+        self.assertTrue(C.may_emit("workers", saved))
+        for bad in ({"model_id": "nope"}, ):
+            acts = decide(w, snap, event(WorkerAdd, snap, "", **bad))
+            assert_has(self, acts, CommandReply, ok=False)
+            assert_none(self, acts, AddWorker)
+        assert_none(self, decide(w, snap, event(WorkerAdd, snap, "")), SaveChoice)   # no model: like worker-1
+
     def test_WRK_2_only_workers_are_managed(self):
         snap = snapshot()
         acts = decide(W, snap, event(WorkerClose, snap, "critic"))

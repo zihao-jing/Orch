@@ -155,12 +155,17 @@ def catalog(settings: Dict[str, Any], listed: Dict[str, List[ModelInfo]]) -> Lis
 # ------------------------------------------------------------------------------------------------ the module
 
 
+def catalog_choices(settings: Optional[Dict[str, Any]]) -> Dict[str, Choice]:
+    """The models of the catalog by id, as Choices."""
+    models = config.parse_models((settings or {}).get("models"))
+    return {mid: _choice(e["backend"], e["backend_options"], e["env"], mid) for mid, e in models.items()}
+
+
 class _Module:
     name = "models"
 
     def __init__(self, settings: Dict[str, Any]):
-        models = config.parse_models((settings or {}).get("models"))
-        self.models = {mid: _choice(e["backend"], e["backend_options"], e["env"], mid) for mid, e in models.items()}
+        self.models = catalog_choices(settings)
 
     def decide(self, snap: Snapshot, event: Event, prior: Sequence[Action] = ()) -> List[Action]:
         if isinstance(event, ChooseModel):

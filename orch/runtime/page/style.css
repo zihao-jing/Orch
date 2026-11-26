@@ -36,8 +36,10 @@
 html, body { margin: 0; background: var(--page); color: var(--ink); font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { overflow-wrap: anywhere; }
 .wrap { max-width: 1440px; margin: 0 auto; padding: 0 clamp(16px, 3.3vw, 48px) 48px; }
-header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; padding: 6px 0; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
-.header-actions button.quiet { background: transparent; border-color: transparent; color: var(--ink2); padding: 5px 9px; }
+header { min-height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; padding: 4px 0; margin-bottom: 10px; border-bottom: 1px solid var(--line); }
+.header-actions button { min-height: 28px; height: 28px; padding-top: 0; padding-bottom: 0; }
+.header-actions .icon { width: 28px; }
+.header-actions button.quiet { background: transparent; border-color: transparent; color: var(--ink2); padding: 0 8px; }
 .header-actions button.quiet:hover { background: var(--panel); border-color: var(--line); }
 .header-actions button.quiet.on { color: var(--accent); border-color: var(--line); }
 .header-actions button.quiet.danger-text { color: var(--danger, #a33); }
@@ -46,7 +48,7 @@ header { min-height: 52px; display: flex; align-items: center; justify-content: 
 .header-actions { flex: none; flex-wrap: wrap; justify-content: flex-end; }
 #runstate { flex-wrap: wrap; color: var(--mute); }
 h1, h2, h3 { margin: 0; line-height: 1.25; }
-h1 { font-size: 19px; font-weight: 680; letter-spacing: -.025em; }
+h1 { font-size: 17px; font-weight: 680; letter-spacing: -.025em; }
 h2 { font-size: 15px; font-weight: 680; }
 h3 { font-size: 14px; font-weight: 660; }
 p { margin: 0 0 8px; }
@@ -200,7 +202,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .milestone-actions details[open] { flex: 1 1 100%; }
 .bar { height: 5px; background: var(--line); border-radius: 9px; overflow: hidden; }
 .bar > i { height: 100%; display: block; background: var(--accent); border-radius: 9px; }
-.ck { margin: 8px 0 0; padding: 0; list-style: none; }
+.mscard.picked { box-shadow: inset 0 0 0 1px var(--edge); }
+.ck-box { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ck-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.ck-head h3 { font-size: 13px; }
+.ck { margin: 4px 0 0; padding: 0; list-style: none; }
 .ck li { display: flex; gap: 7px; padding: 2px 0; }
 .ck .stepname { color: var(--ink2); font-weight: 650; padding-top: 6px; }
 .ck .bx { flex: 0 0 16px; text-align: center; color: var(--warn); }
@@ -284,7 +290,7 @@ dialog .acts { justify-content: flex-end; margin-top: 12px; }
 }
 @media (max-width: 600px) {
   .wrap { padding: 0 12px 30px; }
-  header { min-height: 44px; margin-bottom: 10px; }
+  header { min-height: 36px; margin-bottom: 8px; }
   .header-actions { flex-wrap: wrap; }
   .header-actions { gap: 5px; }
   .workspace { gap: 12px; }

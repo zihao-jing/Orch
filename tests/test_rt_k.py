@@ -468,11 +468,19 @@ global.SC = {
   },
   async header({assert, $, byText, click, lastPost, posts}) {
     await click($('nightbtn')); assert.deepStrictEqual([lastPost().type, lastPost().on], ['SetNight', true]);
-    await click($('addworker')); assert.strictEqual(lastPost().type, 'WorkerAdd');
+    await click($('addworker')); assert.ok($('dlg').open);   // the model to start it on
+    await click(byText($('dlg-a'), 'Add worker')); assert.strictEqual(lastPost().type, 'WorkerAdd');
     await click($('stopbtn')); assert.ok($('dlg').open);
     await click(byText($('dlg-a'), 'Stop agents')); assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StopAgents', []]);
     await click($('morebtn')); await click(byText($('dlg-a'), 'Update and restart'));
     await click(byText($('dlg-a'), 'Update')); assert.strictEqual(lastPost().type, 'UpdateOrch');
+  },
+  async addWorkerModel({assert, $, byText, click, lastPost}) {
+    await click($('addworker'));
+    const sel = $('dlg-b').all().find(e => e.tagName === 'SELECT');   // the first: the model
+    sel.value = 'alpha'; sel.fire('change');
+    await click(byText($('dlg-a'), 'Add worker'));
+    assert.deepStrictEqual([lastPost().type, lastPost().model_id, lastPost().effort], ['WorkerAdd', 'alpha', 'low']);
   },
   async closeOrch({assert, $, byText, click, lastPost}) {
     await click($('morebtn')); await click(byText($('dlg-a'), 'Close Orch and stop agents'));
@@ -680,10 +688,8 @@ global.SC = {
     }
     state.checklist.steps[0].items = Array.from({length: 22}, (_, i) => [false, 'Task number ' + (i + 1)]);
     await refresh();
-    assert.ok(!$('progress').all().some(el => el.tagName === 'SPAN' && el.textContent === 'Task number 1'));
+    assert.ok($('progress').textContent.includes('Task number 1'));   // the whole checklist, every step, is shown
     assert.ok($('progress').textContent.includes('Task number 22'));
-    await click(byText($('progress'), 'Show more'));
-    assert.ok($('progress').textContent.includes('Task number 1'));
     await click($('talkbtn'));
     assert.ok(!$('talklog').textContent.includes('Hello manager'));
     assert.ok($('talklog').textContent.includes('Conversation 27'));
@@ -722,7 +728,7 @@ global.SC = {
   async commandRetriesWithSameId({assert, $, click, posts, setReply}) {
     let n = 0;
     setReply(() => { if (n++ === 0) throw new Error('network'); return {ok: true, shown: 'Done.', choices: [], data: {}}; });
-    await click($('addworker')); await new Promise(r => setTimeout(r, 30));
+    await click($('addworker')); await click(byText($('dlg-a'), 'Add worker')); await new Promise(r => setTimeout(r, 30));
     assert.ok(posts.length >= 2 && posts[0].id === posts[1].id, 'same id again');
   },
 };
@@ -850,6 +856,9 @@ class TestSmoke(unittest.TestCase):
 
     def test_UI_3_header_controls(self):
         self.run_scenario("header")
+
+    def test_UI_3_add_worker_on_a_chosen_model(self):
+        self.run_scenario("addWorkerModel")
 
     def test_UI_3_close_orch_and_stop_agents(self):
         self.run_scenario("closeOrch")

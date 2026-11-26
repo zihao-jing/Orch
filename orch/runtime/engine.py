@@ -32,8 +32,8 @@ class Engine:
         self.factories, self.settings = adapters, settings
         self.strict = settings.get("strict_actions", modules is not None)
         if modules is None:
-            modules = [models.module(settings) if name == "models" else import_module(f".{name}", __package__).module()
-                       for name in C.MODULE_ORDER]
+            modules = [import_module(f".{name}", __package__).module(settings) if name in ("models", "workers")
+                       else import_module(f".{name}", __package__).module() for name in C.MODULE_ORDER]
         by_name = {m.name: m for m in modules}
         self.modules = [by_name[name] for name in C.MODULE_ORDER if name in by_name]
         self.store: Store

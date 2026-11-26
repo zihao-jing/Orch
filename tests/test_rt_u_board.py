@@ -110,3 +110,22 @@ class ViewerOrchRunning(unittest.TestCase):
             self.assertFalse(v.orch_running())
             lock.write_text("")
             self.assertFalse(v.orch_running())
+
+
+class BoardChecklist(unittest.TestCase):
+    """Any milestone's checklist can be read, done ones too."""
+
+    def test_a_done_milestone_checklist_is_read_from_the_workspace(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "ck.md").write_text("## Step 1: Hello\n- [x] greets\n- [ ] tests\n")
+
+            class R:
+                def state(self):
+                    return {"run": {"workspace": d}, "milestones": [
+                        {"id": "m1", "status": "done", "checklist_path": "ck.md"}, {"id": "m2", "checklist_path": ""}]}
+            b = Board(R(), Path(d))
+            c = b.checklist("m1")
+            self.assertEqual([s["title"] for s in c["steps"]], ["Step 1: Hello"])
+            self.assertEqual(c["steps"][0]["items"], [[True, "greets"], [False, "tests"]])
+            self.assertEqual(b.checklist("m2")["error"], "none")
+            self.assertEqual(b.checklist("m9")["error"], "not found")

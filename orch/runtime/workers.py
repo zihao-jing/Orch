@@ -6,12 +6,13 @@ next reminder (WRK-6).
 """
 from __future__ import annotations
 
+import copy
 import re
-from typing import Any, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from .contracts import (
     Action, Agent, AddWorker, CommandReply, Drop, DropReason, Event, JobsChoice, Lifecycle, Message, MessageStatus,
-    ORCH, Refusal, Role, Send,
+    ORCH, Refusal, Role, SaveChoice, Send,
     SetLifecycle, Snapshot, StopJob, Tell, TextKey, TextRef, Trigger, USER, WorkerAdd, WorkerClose, WorkerDelete,
     WorkerReopen, new_id)
 
@@ -19,9 +20,10 @@ NAME = "workers"
 _ASK = {WorkerClose: TextKey.ASK_JOBS_CLOSE, WorkerDelete: TextKey.ASK_JOBS_DELETE}
 
 
-def decide(snap: Snapshot, event: Event, prior: Sequence[Action] = ()) -> List[Action]:
+def decide(snap: Snapshot, event: Event, prior: Sequence[Action] = (),
+           models: Optional[Dict[str, Any]] = None) -> List[Action]:
     if isinstance(event, WorkerAdd):
-        return _add(snap, event)
+        return _add(snap, event, models)
     if isinstance(event, (WorkerClose, WorkerDelete)):
         return _end(snap, event)
     if isinstance(event, WorkerReopen):
@@ -47,7 +49,7 @@ def _next_id(snap: Snapshot) -> str:
     return f"worker-{max(nums, default=0) + 1}"
 
 
-def _add(snap: Snapshot, cmd: WorkerAdd) -> List[Action]:
+def _add(snap: Snapshot, cmd: WorkerAdd, models: Optional[Dict[str, Any]] = None) -> List[Action]:
     """WRK-2. Set up like worker `like`, or like the first one."""
     like = snap.agents.get(cmd.like) if cmd.like else next(iter(snap.by_role(Role.WORKER)), None)
     if like is None or like.role != Role.WORKER:
@@ -59,9 +61,32 @@ def _add(snap: Snapshot, cmd: WorkerAdd) -> List[Action]:
     if wid in snap.agents:
         return _refuse(cmd, Refusal.ALREADY)
     choices = [c for c in like.choices] or [like.choice]
+    picked = None
+    if cmd.model_id:
+        picked = _picked(snap, cmd, models or {})
+        if picked is None:
+            return _refuse(cmd, Refusal.UNKNOWN)
+        choices = [picked] + choices[1:]   # its own main model; the backups of `like` stay
     agent = Agent(wid, Role.WORKER, wid, like.cwd, "", like.fresh_session, Lifecycle.OPEN, choice=choices[0],
                   choices=list(choices))
-    return [AddWorker(agent, like.id), CommandReply(cmd.id, data={"agent": wid})]
+    acts: List[Action] = [AddWorker(agent, like.id)]
+    if picked is not None:
+        acts.append(SaveChoice(wid, picked))   # its agent.yaml names the chosen model
+    return acts + [CommandReply(cmd.id, data={"agent": wid})]
+
+
+def _picked(snap: Snapshot, cmd: WorkerAdd, models: Dict[str, Any]) -> Optional[Any]:
+    """The catalog model asked for, with its effort; None when it is not listed or the effort does not fit it."""
+    base = models.get(cmd.model_id)
+    if base is None:
+        return None
+    c = copy.deepcopy(base)
+    if cmd.effort:
+        info = next((m for m in snap.catalog if m.id == cmd.model_id), None)
+        if info is not None and cmd.effort not in info.efforts:
+            return None
+        c.effort = cmd.effort
+    return c
 
 
 def _end(snap: Snapshot, cmd: Any) -> List[Action]:
@@ -113,9 +138,13 @@ def _reopen(snap: Snapshot, cmd: WorkerReopen) -> List[Action]:
 class _Module:
     name = NAME
 
+    def __init__(self, settings: Optional[Dict[str, Any]] = None):
+        from .models import catalog_choices
+        self.models = catalog_choices(settings) if settings else {}   # for a new worker's own model
+
     def decide(self, snap: Snapshot, event: Event, prior: Sequence[Action] = ()) -> List[Action]:
-        return decide(snap, event, prior)
+        return decide(snap, event, prior, self.models)
 
 
-def module() -> _Module:
-    return _Module()
+def module(settings: Optional[Dict[str, Any]] = None) -> _Module:
+    return _Module(settings)

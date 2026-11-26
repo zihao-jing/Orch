@@ -1396,9 +1396,12 @@ class GateAnswer(UserCommand):
 
 @dataclass(frozen=True)
 class WorkerAdd(UserCommand):
-    """A new worker, set up like worker `like` ("": the first one). agent empty: the next free id."""
+    """A new worker, set up like worker `like` ("": the first one). agent empty: the next free id. model_id: a model of
+    the catalog for it (+ effort) instead of the one `like` has."""
     handler: ClassVar[str] = "workers"
     like: str = ""
+    model_id: str = ""
+    effort: str = ""
 
 
 @dataclass(frozen=True)
@@ -1767,9 +1770,9 @@ class SmokeTest(Action):
 
 @dataclass(frozen=True)
 class SaveChoice(Action):
-    """MOD-3, when a user's switch passed its smoke test. Store: choices[0]. Engine: models.save_choice into
-    agent.yaml."""
-    emitters: ClassVar[Tuple[str, ...]] = ("models",)
+    """MOD-3, when a user's switch passed its smoke test, or a new worker's own model (WRK-2). Store: choices[0].
+    Engine: models.save_choice into agent.yaml."""
+    emitters: ClassVar[Tuple[str, ...]] = ("models", "workers")
     agent: str = ""
     choice: Choice = field(default_factory=Choice)
 
@@ -2201,6 +2204,7 @@ def _load(tp: Any, v: Any) -> Any:
 # GET  /api/events                             server-sent: `state` {"rev"}, `live` {"agent", "n", "at", "k", "s"};
 #                                              n: the line's index, so after a reconnect the page asks /api/live from n+1
 # GET  /api/golden | /api/audit_notes          {"text", "digest", "path"}
+# GET  /api/checklist?milestone=ID            a Checklist: that milestone's, done ones too, as on disk now
 # GET  /api/audit                              {"report", "running"}: report = the reply part of the newest audit, redacted
 # GET  /api/runs                               {"runs": [{"id", "project", "status", "started", "old": bool}]}
 # GET  /api/run?id=                            an old run, as today's board state (UI-6)
