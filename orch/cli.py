@@ -717,6 +717,11 @@ def write_command(run_dir: Path, command: Any) -> Path:
     cmd_dir = Path(run_dir) / "commands"
     cmd_dir.mkdir(parents=True, exist_ok=True)
     now_ms = int((getattr(command, "at", 0.0) or time.time()) * 1000)
+    # names sort in the order written: never at or before a waiting command's time (same millisecond, clock step)
+    for p in cmd_dir.glob("*.json"):
+        head = p.name.split("-", 1)[0]
+        if head.isdigit():
+            now_ms = max(now_ms, int(head) + 1)
     cid = getattr(command, "id", "") or _new_command_id()
     fname = f"{now_ms:013d}-{cid}.json"
     dest = cmd_dir / fname
