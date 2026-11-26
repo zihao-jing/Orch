@@ -1,5 +1,5 @@
 """The writing rules: a project's own file (its `.orch/writing.md`, or a path) at the end of the manager's, critic's
-and workers' prompts. orch ships none: its general rules are in prompts/style-rules.md."""
+and workers' prompts. orch ships none: its general rules are in runtime/prompts/style.md."""
 import sys
 import tempfile
 import unittest

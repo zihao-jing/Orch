@@ -120,7 +120,7 @@ fresh_session: compact      # each milestone: summarise the session in place (th
 | **Model, effort, backend of one agent** | `backend`, `backend_options: {model, effort}` in that agent's `agent.yaml` |
 | Tool permissions | `backend_options.permission_mode` / `allowed_tools` in that agent's `agent.yaml` |
 | **An agent's prompt** | its `system_prompt.md` (missing: the role default in `orch/prompts/<role>.md`) |
-| **Writing rules** | orch's general rules are in `orch/prompts/style-rules.md` (by role). A project's own rules (tables, papers, …) go in `.orch/writing.md`; added at the end of the manager's, critic's and workers' system prompts and read again for each one, so an edit applies from the next system prompt. `writing:` in `manager/agent.yaml`: another path, or `off` |
+| **Writing rules** | orch's general rules are in `orch/runtime/prompts/style.md` (by role). A project's own rules (tables, papers, …) go in `.orch/writing.md`; added at the end of the manager's, critic's and workers' system prompts and read again for each one, so an edit applies from the next system prompt. `writing:` in `manager/agent.yaml`: another path, or `off` |
 | Project notes and preferences | its `memory.md` and `memory/*.md`, added after the prompt ("Things to keep in mind:"; HTML comments are ignored) |
 | Display names used in messages | `display_name:` in each `agent.yaml`; fills `{{manager}}`, `{{critic}}`, `{{worker}}` in the prompts |
 | Run-wide limit, approvals, minimum score | `manager/agent.yaml`: `max_rounds`, `approve_plan`, `approve_milestones`, `min_score`, `protocol`, `reminders` |

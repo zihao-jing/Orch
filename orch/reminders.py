@@ -37,7 +37,7 @@ ROLE_OF = {"manager": "manager", "verifier": "critic", "critic": "critic", "work
 # only its Boundaries section). Besides its schedule, it goes to an agent when the board changed (as a diff) or the
 # agent's session is new (in full); nothing while there is nothing to send
 GOLDEN_BOARD = "golden_board"
-STYLE_RULES = "style_rules"  # a few rules sampled from orch/prompts/style-rules.md, written at send time
+STYLE_RULES = "style_rules"  # a few rules sampled from a style file, written at send time
 GOLDEN_PRUNE = "golden_prune"  # the manager, once each time the board grows past its size limit (not in the registry)
 
 DEFAULTS: Dict[str, Dict[str, Any]] = {

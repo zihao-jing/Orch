@@ -92,7 +92,7 @@ class AgentConfig:
     prompt_vars: Dict[str, str] = field(default_factory=dict)  # {{manager}}, {{critic}}, {{worker}} in prompts
     protocol_path: str = ""  # managed mode: orch's fixed signals and boundaries for this role, added after the prompt
     writing_path: str = ""  # managed mode: the project's writing rules (its `.orch/writing.md` or a path), added after it
-    style_path: str = ""  # managed mode: the role's rules from orch/prompts/style-rules.md (or the project's), after that
+    style_path: str = ""  # old runtime only: a style file to add after that (none since the new runtime)
     # at each milestone start (managed mode): "compact" summarises the session in place (a new session when the
     # backend can't compact), "milestone" starts a new session, "never" keeps it; "" = the role's default (the critic
     # and workers compact, the manager keeps its session)
@@ -719,7 +719,7 @@ def _agent_folder(d: Path) -> Dict[str, Any]:
 
 def _writing_file(value: Any, base: Path, proj: Optional[Path]) -> str:
     """The writing rules file: "off" for none, a path as given, else the project's `.orch/writing.md` ('' without one:
-    orch's general rules are in prompts/style-rules.md, and the writing file is for a project's own kind of document)."""
+    orch's general rules are in runtime/prompts/style.md, and the writing file is for a project's own kind of document)."""
     v = str(value or "").strip()
     if v.lower() in ("off", "none", "false"):
         return ""
@@ -917,9 +917,6 @@ def load_config(path: str) -> Config:
                 a.protocol_path = str(PROMPTS_DIR / "protocol" / f"{proto}.md")
             if controller.mode == "managed" and controller.writing and a.role in ("manager", "verifier", "worker"):
                 a.writing_path = controller.writing
-            if controller.mode == "managed" and a.role in ("manager", "verifier", "worker"):
-                own = proj / "style-rules.md" if proj else None
-                a.style_path = str(own if own and own.is_file() else PROMPTS_DIR / "style-rules.md")
         m_runtime = "new"  # the only runtime (N); a `runtime:` key is still accepted
         from .runtime import migrate as rt_migrate
         for a in agents:
