@@ -721,6 +721,9 @@ def _handler(board: Board):
                         self.wfile.write(out)
                         self.wfile.flush()
                     time.sleep(TICK)
+                # a planned end: the page opens a new stream at once and shows no lost connection
+                self.wfile.write(b"event: bye\ndata: {}\n\n")
+                self.wfile.flush()
             except (BrokenPipeError, ConnectionError, TimeoutError, OSError):
                 pass
             finally:

@@ -3,6 +3,7 @@
 (function () {
   "use strict";
   const L = window.OrchLogic;
+  const LOST_AFTER = 4000;  // ms without the board before the lost banner
   const $ = id => document.getElementById(id);
 
   let S = null;                 // the last /api/state
@@ -211,6 +212,10 @@
     return r.json();
   }
   function setLost(on) { $("lost").hidden = !on; }
+  // the banner only when the board stays unreachable for a few seconds: a stream that ends and reopens is not a loss
+  let lostTimer = 0;
+  function lostSoon() { if (!lostTimer) lostTimer = setTimeout(() => { lostTimer = 0; setLost(true); }, LOST_AFTER); }
+  function found() { clearTimeout(lostTimer); lostTimer = 0; setLost(false); }
   let loading = false, again = false;
   async function loadState() {
     if (loading) { again = true; return; }
@@ -218,25 +223,25 @@
     try {
       const j = await getJson("api/state");
       S = j; offset = (j.now || Date.now() / 1000) - Date.now() / 1000;
-      setLost(false);
+      found();
       if (!old) {
         render();
         const version = JSON.stringify(S.messages);
         if (headVersion !== version) { headVersion = version; loadTimeline(); }
         loadSide(false);
       }
-    } catch (e) { setLost(true); }
+    } catch (e) { lostSoon(); }
     loading = false;
     if (again) { again = false; loadState(); }
   }
   function connect() {
     if (es) es.close();
-    try { es = new EventSource("api/events"); } catch (e) { setLost(true); setTimeout(connect, L.backoff(tries++)); return; }
+    try { es = new EventSource("api/events"); } catch (e) { lostSoon(); setTimeout(connect, L.backoff(tries++)); return; }
     es.onopen = () => {
       const reconn = connectedOnce;
       connectedOnce = true;
       tries = 0;
-      setLost(false);
+      found();
       loadState();
       if (reconn) {
         const seen = new Set(Object.keys(liveN).concat(Array.from(openAct)));
@@ -245,7 +250,8 @@
     };
     es.addEventListener("state", () => loadState());
     es.addEventListener("live", ev => { try { onLive(JSON.parse(ev.data)); } catch (e) { /* ignore a bad line */ } });
-    es.onerror = () => { es.close(); setLost(true); setTimeout(connect, L.backoff(tries++)); };
+    es.addEventListener("bye", () => connect());  // the server ends each stream after a while: open the next one now
+    es.onerror = () => { es.close(); lostSoon(); setTimeout(connect, L.backoff(tries++)); };
   }
   function onLive(d) {
     if (typeof d.n === "number") {

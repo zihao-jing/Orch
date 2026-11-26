@@ -471,6 +471,8 @@ global.SC = {
   async lostConnection({assert, $, sources, settle, setFail}) {
     assert.ok($('lost').hidden);
     setFail(true); sources[0].onerror(); await settle();
+    assert.ok($('lost').hidden, 'not at once: a reconnect may follow');
+    await new Promise(r => setTimeout(r, 20)); await settle();
     assert.ok(!$('lost').hidden, 'shown');
     setFail(false); await new Promise(r => setTimeout(r, 30)); await settle();
     const es = sources[sources.length - 1]; assert.ok(sources.length > 1, 'reconnects by itself');
@@ -478,7 +480,18 @@ global.SC = {
     assert.ok($('lost').hidden, 'recovered');
   },
   async lostWhenStateFails({assert, $, setFail, refresh}) {
-    setFail(true); await refresh(); assert.ok(!$('lost').hidden);
+    setFail(true); await refresh(); await new Promise(r => setTimeout(r, 20)); assert.ok(!$('lost').hidden);
+  },
+  async plannedStreamEnd({assert, $, sources, settle}) {
+    const n = sources.length;
+    sources[0].l.bye({data: '{}'}); await settle();
+    assert.ok(sources[0].closed, 'old stream closed');
+    assert.strictEqual(sources.length, n + 1, 'a new stream at once');
+    await new Promise(r => setTimeout(r, 20)); await settle();
+    assert.ok($('lost').hidden, 'no lost banner');
+    sources[sources.length - 1].onerror(); sources[sources.length - 1].onopen(); await settle();
+    await new Promise(r => setTimeout(r, 20)); await settle();
+    assert.ok($('lost').hidden, 'a reconnect that works in time shows nothing');
   },
   async header({assert, $, byText, click, lastPost, posts}) {
     await click($('nightbtn')); assert.deepStrictEqual([lastPost().type, lastPost().on], ['SetNight', true]);
@@ -851,6 +864,9 @@ class TestSmoke(unittest.TestCase):
 
     def test_lost_connection_is_shown_and_recovers(self):
         self.run_scenario("lostConnection")
+
+    def test_a_planned_stream_end_reconnects_without_the_lost_banner(self):
+        self.run_scenario("plannedStreamEnd")
 
     def test_lost_connection_when_the_state_cannot_be_read(self):
         self.run_scenario("lostWhenStateFails")

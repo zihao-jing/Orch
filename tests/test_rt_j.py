@@ -273,6 +273,20 @@ class TestServer(unittest.TestCase):
         r = call(self.port, "GET", "/api/turn?id=x1")[1]
         self.assertNotIn("abcdefgh12345", r["stderr"])
 
+    def test_a_stream_that_reaches_its_age_ends_with_bye(self):
+        """The page reconnects at once on `bye`, without the lost banner."""
+        old = B.SSE_MAX_AGE
+        B.SSE_MAX_AGE = 0.5
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.request("GET", "/api/events")
+            body = c.getresponse().read()
+            c.close()
+        finally:
+            B.SSE_MAX_AGE = old
+        self.assertTrue(body.startswith(b"event: state\n"))
+        self.assertTrue(body.endswith(b"event: bye\ndata: {}\n\n"), body[-60:])
+
     def test_safety_slow_state_does_not_block_other_clients(self):
         """A stuck SSE reader holds only its own thread."""
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
