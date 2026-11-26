@@ -180,6 +180,7 @@ class OpenCodeAdapter(BaseAdapter):
         self._asst: Dict[str, int] = {}
         self._texts: Dict[str, str] = {}
         self._tools: Dict[str, bool] = {}
+        self._tool_calls: Dict[str, str] = {}
         self._known: Dict[str, Job] = {}
         self._kind: Dict[str, str] = {}
         self._ended: Dict[str, Job] = {}
@@ -634,9 +635,9 @@ class OpenCodeAdapter(BaseAdapter):
             jid = job_id(self.agent, cli)
             code = md.get("exit")
             code = int(code) if isinstance(code, (int, float)) else None
-            label = (self._known.get(jid) or self._ended.get(jid) or Job(id=jid)).label
-            self._ended[jid] = Job(id=jid, agent=self.agent, label=label, state=JobState.ENDED, exit_code=code,
-                                   ended=_created(rec) / 1000.0)
+            prior = self._known.get(jid) or self._ended.get(jid) or Job(id=jid)
+            self._ended[jid] = Job(id=jid, agent=self.agent, label=prior.label, state=JobState.ENDED, exit_code=code,
+                                   ended=_created(rec) / 1000.0, command=prior.command)
             self._known.pop(jid, None)
             made.append((JobEnded, f"jobend:{cli}", {"job_id": jid, "exit_code": code}))
             if self._open:
@@ -671,22 +672,36 @@ class OpenCodeAdapter(BaseAdapter):
         tid = str(part.get("id") or fallback)
         state = part.get("state") if isinstance(part.get("state"), dict) else {}
         status = state.get("status")
-        if status in ("streaming", "running") and tid not in self._tools:
-            self._tools[tid] = True
-            made.append((ToolStart, f"toolstart:{tid}", {"tool_id": tid, "label": str(part.get("name") or "tool")}))
         inp, md = state.get("input"), state.get("metadata")
+        running = status in ("streaming", "running")
+        finished = status in ("completed", "error")
+        name = str(part.get("name") or "tool")
+        call = name + "\n" + json.dumps(inp, ensure_ascii=False, indent=2) if isinstance(inp, dict) else ""
+        first = tid not in self._tools
+        updated = bool(self._tools.get(tid) and call and call != self._tool_calls.get(tid))
+        if (running or finished) and (first or updated):
+            self._tools[tid] = True
+            if call:
+                self._tool_calls[tid] = call
+            detail = (inp.get("description") or inp.get("command") or inp.get("filePath")) if isinstance(inp, dict) else ""
+            label = name + (": " + " ".join(str(detail).split())[:200] if detail else "")
+            made.append((ToolStart, f"{'toolstart' if first else 'toolupdate'}:{tid}",
+                         {"tool_id": tid, "label": label, "call": call}))
         if isinstance(inp, dict) and inp.get("background") is True and isinstance(md, dict):  # JOB-2: a shell job
             cli = str(md.get("shellID") or "")
             jid = job_id(self.agent, cli)
             if cli and jid not in self._known and jid not in self._ended:
-                label = " ".join(str(inp.get("command") or inp.get("description") or cli).split())[:200]
+                command = str(inp.get("command") or "")
+                label = " ".join(str(command or inp.get("description") or cli).split())[:200]
                 t = part.get("time") if isinstance(part.get("time"), dict) else {}
                 started = (t.get("ran") or t.get("created") or at * 1000) / 1000.0
                 self._kind[jid] = "shell"
-                self._known[jid] = Job(id=jid, agent=self.agent, label=label, started=started, last_progress=started)
+                self._known[jid] = Job(id=jid, agent=self.agent, label=label, started=started,
+                                       last_progress=started, command=command)
                 made.append((JobStarted, f"jobstart:{cli}", {"job": self._known[jid]}))
-        if status in ("completed", "error") and self._tools.get(tid):
+        if finished and self._tools.get(tid):
             self._tools[tid] = False
+            self._tool_calls.pop(tid, None)
             made.append((ToolEnd, f"toolend:{tid}", {"tool_id": tid}))
         return made
 
@@ -772,11 +787,13 @@ class OpenCodeAdapter(BaseAdapter):
             if j.get("sessionID") != self.sid or j.get("status") != "running":
                 continue
             kind = j.get("kind")
+            command = ""
             if kind == "shell":
                 cli = str(j.get("shellID") or j.get("id"))
                 sh = self._shell(cli)
                 if not sh or sh.get("status") != "running":
                     continue
+                command = str(j.get("command") or sh.get("command") or "")
             elif kind == "subagent":
                 cli = str(j.get("id"))
                 if active is None:
@@ -788,9 +805,9 @@ class OpenCodeAdapter(BaseAdapter):
                 continue
             jid = job_id(self.agent, cli)
             started = ((j.get("time") or {}).get("started") or 0) / 1000.0
-            label = " ".join(str(j.get("command") or j.get("agent") or cli).split())[:200]
+            label = " ".join(str(command or j.get("agent") or cli).split())[:200]
             self._kind[jid] = kind
-            jobs.append(Job(id=jid, agent=self.agent, label=label, started=started, last_progress=started))
+            jobs.append(Job(id=jid, agent=self.agent, label=label, started=started, last_progress=started, command=command))
         return jobs
 
     def jobs(self) -> List[Job]:
@@ -805,7 +822,8 @@ class OpenCodeAdapter(BaseAdapter):
             if sh and sh.get("status") in ENDED_SHELL and isinstance(sh.get("exit"), (int, float)):
                 t = sh.get("time") if isinstance(sh.get("time"), dict) else {}
                 self._ended[jid] = Job(id=jid, agent=self.agent, label=job.label, state=JobState.ENDED,
-                                       exit_code=int(sh["exit"]), ended=(t.get("completed") or 0) / 1000.0)
+                                       exit_code=int(sh["exit"]), ended=(t.get("completed") or 0) / 1000.0,
+                                       command=job.command)
                 self._known.pop(jid)
         return running + [j for j in self._ended.values() if j.id not in ids]
 

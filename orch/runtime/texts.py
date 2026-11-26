@@ -517,6 +517,9 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.REM_CHECKLIST: lambda t: t.fill("{critic}'s checklist is `{path}`." if t.role == Role.MANAGER
                                       else "Keep your steps and checklist in `{path}`."),
     K.REM_ASK_AND_END: "If you need an answer to go on, ask me concisely in plain text and end your turn.",
+    K.REM_CRITIC_BOUNDARY: 'Write directly to each worker as its lead, without headings such as "Instructions". '
+                           "Give decisions as your own: state what to do and what changed, without mentioning me, "
+                           "our conversation, who approved the work, or other workers.",
     K.REM_WRITING: lambda t: "\n".join(t.fill(str(x)) for x in t.get("rules") or []),
     # gates Orch opens, for the user
     K.GATE_PLAN: lambda t: "The plan is ready for your approval.\n\n" + _bullets(t.get("milestones")),

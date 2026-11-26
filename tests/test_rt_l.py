@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from rt_helpers import C, CLAUDE, T0, agent, snapshot
 from orch.runtime.adapters.mock import ALL_CAPS, FakeClock, MockAdapter, MockCLI, Reply
+from orch.runtime.board import Board
 from orch.runtime.engine import Engine
 
 
@@ -71,6 +72,30 @@ class EngineTest(unittest.TestCase):
                 self.assertTrue(engine.step())
                 self.assertEqual(len(cli.sent), 2)
                 engine.close()
+
+    def test_activity_is_readable_while_a_turn_is_running(self):
+        cli, worker = self.cli()
+        cli.script(Reply("", after=5))
+        engine = self.engine([worker])
+        board = Board(engine, self.path)
+        self.assertTrue(self.chat(engine, "write")["ok"])
+        call = 'Read draft\n{"filePath":"draft.md"}'
+        cli.emit(C.ToolStart, 1, tool_id="read-1", label="Read draft", call=call)
+        cli.emit(C.Text, 1, text="Draft")
+        cli.emit(C.Text, 2, text="ing the plan")
+        cli.emit(C.Text, 2, text="")
+        self.clock.advance(1)
+        engine.step()
+        first = board.live(worker.id, 0)
+        self.assertEqual([(x["k"], x["s"]) for x in first["items"]], [("tool", "Read draft"), ("text", "Draft")])
+        self.assertEqual((first["items"][0]["tool_id"], first["items"][0]["call"]), ("read-1", call))
+        self.clock.advance(1)
+        engine.step()
+        rows = first["items"] + board.live(worker.id, first["next"])["items"]
+        turn = engine.store.snapshot().turns[worker.id]
+        self.assertEqual(turn.status, C.TurnStatus.RUNNING)
+        self.assertEqual({x["turn"] for x in rows}, {turn.id})
+        self.assertEqual("".join(x["s"] for x in rows if x["k"] == "text"), "Drafting the plan")
 
     def test_MSG_2_hold_wins_over_send_then_later_release_sends_once(self):
         cli, worker = self.cli()

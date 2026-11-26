@@ -384,6 +384,7 @@ class TextKey(_Str):
     REM_DISCUSSION = "rem_discussion"
     REM_NIGHT = "rem_night"
     REM_ASK_AND_END = "rem_ask_and_end"
+    REM_CRITIC_BOUNDARY = "rem_critic_boundary"
     REM_WRITING = "rem_writing"
     REM_CHECKLIST = "rem_checklist"  # to the critic: where its checklist file is (new session or new milestone)
     REM_DISCUSSION_OVER = "rem_discussion_over"  # no longer sent; the discussion ended without being applied (kept for stored data)
@@ -478,6 +479,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.REM_DISCUSSION: (),
     TextKey.REM_NIGHT: (),
     TextKey.REM_ASK_AND_END: (),
+    TextKey.REM_CRITIC_BOUNDARY: (),
     TextKey.REM_WRITING: ("rules",),
     TextKey.REM_CHECKLIST: ("path",),
     TextKey.REM_DISCUSSION_OVER: (),
@@ -623,7 +625,7 @@ class Job:
     """A background job. [fact] unless marked."""
     id: str  # "<agent>/<the CLI's id>" (base.job_id)
     agent: str = ""
-    label: str = ""  # the command, one line
+    label: str = ""  # short, one-line label for status and reminders
     started: float = 0.0
     state: JobState = JobState.RUNNING  # LOST: [supervisor]
     exit_code: Optional[int] = None
@@ -634,6 +636,7 @@ class Job:
     stopped_by_user: bool = False  # [workers], [terminal], [engine] (stop agents): JOB-7 does not wake
     last_progress: float = 0.0  # last sign of progress, where the CLI shows one
     reported: bool = False  # [supervisor] no progress was reported (JOB-6)
+    command: str = ""  # full command when the CLI exposes it, for the dashboard
 
     @property
     def open(self) -> bool:
@@ -1208,6 +1211,7 @@ class ToolStart(AgentEvent):
     """Store: last_output, Agent.tools."""
     tool_id: str = ""
     label: str = ""
+    call: str = ""  # tool name and arguments, when the adapter can read them
 
 
 @dataclass(frozen=True)
@@ -2180,7 +2184,8 @@ def _load(tp: Any, v: Any) -> Any:
 # GET  /api/message?id=                        {"message": Message with rendered}
 # GET  /api/turn?id=                           today's turn file (old runs too)
 # GET  /api/live?agent=&from=<n>               {"items": [{"n", "at", "k": "text"|"tool", "s"}], "next": n}: the lines of
-#                                              <run_dir>/live/<agent>.jsonl, which the engine writes
+#                                              <run_dir>/live/<agent>.jsonl, which the engine writes. New lines also
+#                                              carry "turn", to join consecutive text fragments from the same turn.
 # GET  /api/events                             server-sent: `state` {"rev"}, `live` {"agent", "n", "at", "k", "s"};
 #                                              n: the line's index, so after a reconnect the page asks /api/live from n+1
 # GET  /api/golden | /api/audit_notes          {"text", "digest", "path"}

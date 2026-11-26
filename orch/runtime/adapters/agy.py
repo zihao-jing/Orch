@@ -328,13 +328,16 @@ class AgyAdapter(BaseAdapter):
         if kind == "tool":
             name, info = str(s.get("tool_name", "")), s.get("tool_info") or {}
             if state == "ACTIVE":
-                return [(ToolStart, {"tool_id": idx, "label": _command_line(name, info)})]
+                args = info.get("parameters")
+                call = name + "\n" + json.dumps(args, ensure_ascii=False, indent=2) if args is not None else ""
+                return [(ToolStart, {"tool_id": idx, "label": _command_line(name, info), "call": call})]
             if state == "DONE":
                 out: List[Tuple[type, Dict[str, Any]]] = [(ToolEnd, {"tool_id": idx})]
                 m = re.search(re.escape(self.conv) + r"/task-\d+", str(info.get("output") or "")) if self.conv else None
                 if name == "run_command" and m:  # an async command: its task id is in the result
                     job = Job(id=job_id(self.agent, m.group(0)), agent=self.agent,
-                              label=_command_line(name, info), started=now)
+                              label=_command_line(name, info), started=now,
+                              command=str((info.get("parameters") or {}).get("CommandLine") or ""))
                     self.job_map[job.id] = job
                     out.insert(0, (JobStarted, {"job": job}))
                 return out

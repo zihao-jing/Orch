@@ -13,7 +13,7 @@ from importlib import import_module
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Union
 
 import yaml
 
@@ -249,7 +249,7 @@ class Engine:
 
     # Event and command handling
 
-    def _event(self, event: C.Event) -> bool:
+    def _event(self, event: C.Event, *, record_live: bool = False) -> bool:
         ev = self.store.begin(event)
         if ev is None:
             return False
@@ -268,7 +268,27 @@ class Engine:
             prior.extend(self._engine_command(ev, snap))
         self._perform(self.store.apply(ev, prior))
         self._write_rubrics(snap.run.run_dir, prior)
+        if record_live and isinstance(ev, (C.Text, C.ToolStart)):
+            turn = snap.turns.get(ev.agent)
+            if turn and turn.status == C.TurnStatus.RUNNING:
+                self._write_live(ev, turn.id)
         return True
+
+    def _write_live(self, event: Union[C.Text, C.ToolStart], turn_id: str) -> None:
+        kind, text = ("text", event.text) if isinstance(event, C.Text) else ("tool", event.label)
+        if not text:
+            return
+        item = {"at": event.at, "k": kind, "s": C.redact(text), "turn": turn_id}
+        if isinstance(event, C.ToolStart):
+            item.update(tool_id=event.tool_id, call=C.redact(event.call))
+        directory = self.run_dir / "live"
+        try:
+            directory.mkdir(exist_ok=True)
+            fd = os.open(directory / f"{event.agent}.jsonl", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                f.write(json.dumps(item) + "\n")
+        except OSError as exc:
+            LOG.debug("Could not write live activity for %s: %s", event.agent, exc)
 
     def _write_rubrics(self, run_dir: str, actions: Sequence[C.Action]) -> None:
         """MS-12: each milestone's rubric is kept in its own file, which the critic reads; written when it differs from
@@ -675,7 +695,7 @@ class Engine:
                     self._check_jobs(name, adapter, ev.key)
             if isinstance(ev, (C.TurnStarted, C.TurnEnded, C.ProcessExited)):
                 self._awaiting_turn.discard(name)
-            happened = self._event(ev) or happened
+            happened = self._event(ev, record_live=not catching_up) or happened
             if isinstance(ev, C.SessionChanged) and ev.change == C.SessionChange.COMPACTED:
                 self._release_compact(name, ev.key)
             if isinstance(ev, C.ProcessExited):

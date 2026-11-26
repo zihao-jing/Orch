@@ -400,7 +400,7 @@ class _Change:
     def _add_job(self, job: Job, agent: str, at: float) -> None:
         if job.id in self.s.jobs or job.id in self.store.old_jobs:
             return
-        j = replace(job, agent=job.agent or agent, started=job.started or at)
+        j = replace(job, agent=job.agent or agent, started=job.started or at, command=redact(job.command))
         self.s.jobs[j.id] = j
         self.owned.add((id(self.s.jobs), j.id))
         if j.state != JobState.RUNNING:
@@ -430,6 +430,8 @@ class _Change:
             if j is None:
                 self._add_job(seen, a.id, at)
                 continue
+            if not j.command and seen.command:
+                j.command = redact(seen.command)
             j.last_progress = max(j.last_progress, seen.last_progress)
             if (j.state == JobState.RUNNING and seen.state != JobState.RUNNING) or \
                     (j.state == JobState.LOST and seen.state == JobState.ENDED):

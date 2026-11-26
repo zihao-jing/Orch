@@ -359,7 +359,7 @@ async function fetchStub(url, opt) {
   if (url.startsWith('api/run?')) return json({tl_items: [{ts: '2026-01-01T10:00:00', from: 'manager', to: 'critic', text: 'old words'}], chat: [], agents: [{name: 'manager', role: 'manager', called: 'Manager'}, {name: 'worker-1', role: 'worker'}], tl_groups: []});
   if (url.startsWith('api/live')) return json(liveReply(url));
   if (url.startsWith('api/message?')) return json({message: {rendered: 'SENT TEXT'}});
-  if (url.startsWith('api/turn')) return json({input: 'TURN INPUT', output: 'WHOLE REPLY', system_prompt: 'SYSTEM INSTRUCTIONS'});
+  if (url.startsWith('api/turn')) return json({input: 'TURN INPUT\nSecond paragraph', output: 'WHOLE REPLY', system_prompt: 'SYSTEM INSTRUCTIONS'});
   if (url.startsWith('api/messages')) {
     const p = new URLSearchParams(url.split('?')[1]);
     const levels = (p.get('levels') || '').split(',');
@@ -411,14 +411,40 @@ const ctx = {assert, $, clipboard, byText, click, lastPost, posts, gets, type, s
 
 SCENARIOS_JS = r"""
 global.SC = {
-  async board({assert, $, pageText, created}) {
+  async board({assert, $, created, getState, refresh, byText, click}) {
     const t = $('team').textContent;
     assert.ok(t.includes('Worker 1') && t.includes('Writing'), t);       // UI-1: status of each agent
     assert.ok(t.includes('Waiting for job') || t.includes('Closed'), t);
-    assert.ok(t.includes('fix the parser'), 'assignment');
-    assert.ok(t.includes('1.0 actual'), 'the model the CLI reports');
     assert.ok($('title').textContent === 'demo');
     assert.ok(!created.has('IMG') && !created.has('SCRIPT'), 'no element made from text');
+    const s = getState(), assignment = s.agents['worker-1'].assignment;
+    s.messages[assignment.message_id] = {id: assignment.message_id, sender: 'critic', recipient: 'worker-1',
+      seq: 10, created: s.now - 600, status: 'answered', body: 'Fix the parser.\n\nPreserve the last comparison in the report.'};
+    await refresh();
+    const card = $('team').all().find(el => el.className.startsWith('agent status-row-') && el.textContent.includes('Worker 1'));
+    const fold = card.all().find(el => el.className === 'agent-sum');
+    const panel = card.all().find(el => el.className === 'agent-body');
+    const buttons = card.all().filter(el => el.tagName === 'BUTTON' && el.textContent === '…');
+    assert.strictEqual(buttons.length, 1);
+    assert.ok(panel.hidden);
+    await click(buttons[0]);
+    assert.ok($('dlg').open && $('dlg-h').textContent.includes('Worker 1'));
+    assert.ok(panel.hidden, 'opening details leaves the sidebar folded');
+    assert.ok($('dlg-b').textContent.includes('1.0 actual'), 'the model the CLI reports');
+    for (const view of [card, $('dlg-b')]) {
+      const tag = view.all().find(el => el.className === 'assignment-tag');
+      assert.ok(tag && tag.textContent === '→' && tag.attrs['aria-label'] === 'Last assignment');
+    }
+    assert.ok($('dlg-b').textContent.includes('Preserve the last comparison in the report.'));
+    await click(byText($('dlg-a'), 'Close'));
+    assert.ok(!$('dlg').open);
+    await click(fold);
+    assert.ok(!panel.hidden && !$('dlg').open && panel.textContent.includes('1.0 actual'));
+    await click(buttons[0]);
+    assert.ok(!panel.hidden && $('dlg').open, 'the window also opens from an unfolded card');
+    await click(byText($('dlg-a'), 'Close'));
+    await click(fold);
+    assert.ok(panel.hidden);
   },
   async messages({assert, $, pageText, created}) {
     const m = $('messages').textContent;                                 // UI-2
@@ -516,19 +542,23 @@ global.SC = {
   },
   async workerControls({assert, $, byText, click, lastPost}) {
     const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
-    await click(byText(card, 'Close')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['WorkerClose', 'worker-1']);
+    await click(byText(card, '…'));
+    await click(byText($('dlg-b'), 'Close worker')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['WorkerClose', 'worker-1']);
+    await click(byText($('dlg-a'), 'Close'));
     const card2 = $('team').all().filter(e => e.className.startsWith('agent')).find(c => c.textContent.includes('Worker 2'));
-    await click(byText(card2, 'Reopen')); assert.strictEqual(lastPost().type, 'WorkerReopen');
-    await click(byText(card2, 'Delete')); await click(byText($('dlg-a'), 'Delete')); assert.strictEqual(lastPost().type, 'WorkerDelete');
+    await click(byText(card2, '…'));
+    await click(byText($('dlg-b'), 'Reopen worker')); assert.strictEqual(lastPost().type, 'WorkerReopen');
+    await click(byText($('dlg-b'), 'Delete worker')); await click(byText($('dlg-a2'), 'Delete')); assert.strictEqual(lastPost().type, 'WorkerDelete');
   },
   async jobChoice({assert, $, byText, click, lastPost, posts, setReply}) {
     let n = 0;
     setReply(b => n++ === 0 ? {ok: false, shown: 'A job is running.', text: null, data: {}, choices: [{label: 'Let it finish', set: {jobs: 'finish'}}, {label: 'Stop it', set: {jobs: 'stop'}}]}
                             : {ok: true, shown: '', choices: [], data: {}});
     const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
-    await click(byText(card, 'Close'));
-    assert.ok($('dlg').open && $('dlg-b').textContent.includes('A job is running.'));
-    await click(byText($('dlg-a'), 'Stop it'));
+    await click(byText(card, '…'));
+    await click(byText($('dlg-b'), 'Close worker'));
+    assert.ok($('dlg2').open && $('dlg-b2').textContent.includes('A job is running.'));
+    await click(byText($('dlg-a2'), 'Stop it'));
     assert.strictEqual(posts.length, 2); assert.strictEqual(lastPost().jobs, 'stop');
     assert.notStrictEqual(posts[0].id, posts[1].id);
   },
@@ -575,7 +605,8 @@ global.SC = {
   },
   async models({assert, $, click, byText, lastPost, type}) {
     const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
-    await click(byText(card, 'Model'));
+    await click(byText(card, '…'));
+    await click(byText($('dlg-b'), 'Model'));
     assert.ok($('dlg').open); const body = $('dlg-b');
     assert.ok(body.textContent.includes('Alpha') && body.textContent.includes('Backups'));
     const sels = body.all().filter(e => e.tagName === 'SELECT'); assert.strictEqual(sels.length, 2, 'model and effort');
@@ -588,24 +619,24 @@ global.SC = {
   },
   async switchPending({assert, $, click, byText, lastPost}) {
     const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
-    assert.ok(card.textContent.includes('switch pending'));
-    await click(byText(card, 'Model'));
+    assert.ok(card.textContent.includes('Switching model'));
+    await click(byText(card, '…'));
+    await click(byText($('dlg-b'), 'Model'));
     assert.ok($('dlg-b').textContent.includes('Switch pending'));
     await click(byText($('dlg-b'), 'Switch now')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['ForceSwitch', 'worker-1']);
   },
   async teamFold({assert, $, click}) {
-    // each agent is one folded line; the whole team folds into a strip of dots and comes back with one agent open
     const cards = () => $('team').all().filter(e => e.className.split(' ').includes('agent'));
     const n = cards().length;
-    assert.ok(n >= 3 && cards().every(c => !c.open));
+    assert.ok(n >= 3);
     await click($('teamfold'));
     assert.ok($('workspace').className.includes('team-folded'));
     const rail = $('team').all().filter(e => e.className === 'rail-agent');
     assert.strictEqual(rail.length, n);
     assert.strictEqual(cards().length, 0);
     await click(rail[2]);
-    assert.ok(!$('workspace').className.includes('team-folded'));
-    assert.strictEqual(cards().filter(c => c.open).length, 1);
+    assert.ok($('workspace').className.includes('team-folded'));
+    assert.ok($('dlg').open && $('dlg-h').textContent.includes('Worker 1'));
   },
   async golden({assert, $, click, byText, lastPost, type, settle}) {
     const card = $('goldcard'); card.open = true; card.fire('toggle'); await settle();
@@ -718,26 +749,123 @@ global.SC = {
     await click(byText($('oldnote'), 'Back to the current run'));
     assert.ok($('team').textContent.includes('Worker 1'));
   },
-  async liveActivity({assert, $, sources, settle}) {
-    sources[0].l.live({data: JSON.stringify({agent: 'worker-1', n: 3, at: 5, k: 'text', s: 'now reading files'})}); await settle();
-    assert.ok($('team').textContent.includes('now reading files'));
+  async toolsInsideWriting({assert, $, sources, settle, refresh, getState, setLiveReply}) {
+    const state = getState(), turn = 'r001-t02-manager';
+    state.agents.manager.status = 'writing';
+    state.turns.manager = {id: turn, status: 'running', started: state.now - 2};
+    const event = (n, k, s, extra) => ({agent: 'manager', turn, n, at: state.now - 1, k, s, ...extra});
+    setLiveReply(() => ({items: [event(1, 'tool', 'Recorded read label')], more: false}));
+    await refresh();
+    const row = kind => $('messages').children.find(el => el.dataset.message === kind + ':' + turn);
+    const tools = () => row('writing').all().filter(e => e.className === 'writing-tool-line');
+    assert.ok(!row('input'));
+    const input = row('writing').all().find(el => el.className === 'writing-input');
+    assert.ok(input.open);
+    assert.strictEqual(input.querySelector('pre').textContent, 'TURN INPUT\nSecond paragraph');
+    assert.ok(row('writing').children[1].textContent.includes('Waiting for text'));
+    assert.deepStrictEqual(tools().map(e => e.attrs.title), ['Recorded read label']);
+    assert.ok(!$('team').all().some(el => el.tagName === 'BUTTON' && el.textContent === 'Activity'));
+
+    const stream = (...args) => sources[0].l.live({data: JSON.stringify(event(...args))});
+    stream(2, 'tool', 'Read', {tool_id: 'read-1'});
+    stream(3, 'tool', 'Read', {tool_id: 'read-1', call: 'read\n{"path":"/tmp/the plan.md"}'});
+    await settle();
+    assert.ok(!$('messages').children.some(el => el.dataset.message?.startsWith('tool:')));
+    assert.deepStrictEqual(tools().map(e => e.attrs.title), ['Recorded read label', 'read: /tmp/the plan.md']);
+    stream(4, 'text', 'Draft reply');
+    await settle();
+    assert.ok(input.open, 'input stays readable while the reply streams');
+    assert.strictEqual(row('writing').all().find(e => e.className === 'writing-text').textContent, 'Draft reply');
   },
-  async liveReconnectAndReset({assert, $, sources, gets, settle, setLiveReply}) {
-    sources[0].l.live({data: JSON.stringify({agent: 'worker-1', n: 3, at: 5, k: 'text', s: 'line three'})}); await settle();
-    assert.ok($('team').textContent.includes('line three'));
-    setLiveReply(url => ({items: [{n: 4, at: 6, k: 'text', s: 'line four'}], next: 5}));
-    sources[0].onerror(); await new Promise(r => setTimeout(r, 20)); await settle();
-    const es1 = sources[sources.length - 1];
-    es1.onopen(); await settle();
-    assert.ok(gets.some(u => u === 'api/live?agent=worker-1&from=4'), 'fetched from last n + 1: ' + gets.join(', '));
-    assert.ok($('team').textContent.includes('line four') && $('team').textContent.includes('line three'));
-    setLiveReply(url => ({reset: true, items: [{n: 1, at: 7, k: 'text', s: 'after reset'}], next: 2}));
-    es1.onerror(); await new Promise(r => setTimeout(r, 20)); await settle();
-    const es2 = sources[sources.length - 1];
-    es2.onopen(); await settle();
-    assert.ok(gets.some(u => u === 'api/live?agent=worker-1&from=5'), 'fetched from 5 before reset');
-    assert.ok($('team').textContent.includes('after reset'));
-    assert.ok(!$('team').textContent.includes('line three') && !$('team').textContent.includes('line four'), 'cleared on reset');
+  async milestoneReviewTables({assert, $, refresh, getState}) {
+    const state = getState();
+    const table = (criterion, finding) => '| Criterion | Score | Finding |\n|---|---:|---|\n| ' + criterion + ' | 5/5 | ' + finding + ' |';
+    state.gates.review = {id: 'review', kind: 'milestone', agent: 'manager', opened: state.now, closed: 0, options: [],
+      text: [table('Quality', 'Earlier finding'), 'Recommendation: start Q1 only.',
+        table('Quality', 'Revised finding'), table('Readiness', 'Independent check')].join('\n\n'),
+      summary: 'Review complete.'};
+    await refresh();
+    assert.strictEqual($('needs').all().filter(el => el.tagName === 'TABLE').length, 2);
+    const text = $('needs').textContent;
+    assert.ok(text.includes('Revised finding') && !text.includes('Earlier finding'));
+    assert.ok(text.includes('Recommendation: start Q1 only.') && text.includes('Independent check') && text.includes('Review complete.'));
+  },
+  async jobDetails({assert, $, byText, click, refresh, getState, posts}) {
+    const state = getState(), job = state.jobs['worker-1/j7'];
+    job.label = 'long command preview';
+    job.command = '# ' + 'x'.repeat(230) + '\nnpm test';
+    await refresh();
+    const preview = () => $('team').all().find(e => e.className === 'job-preview');
+    assert.ok(preview() && preview().textContent.includes('npm test'));
+    const card = () => $('team').all().find(e => e.className.startsWith('agent status-row-') && e.textContent.includes('Worker 1'));
+    await click(byText(card(), '…'));
+    assert.ok($('dlg').open && $('dlg-h').textContent.includes('Worker 1'));
+    assert.strictEqual($('dlg-b').querySelector('pre').textContent, job.command);
+
+    job.state = 'ended'; job.ended = state.now; job.exit_code = 0;
+    await refresh();
+    assert.ok($('dlg').open && !$('dlg-b').querySelector('pre'), 'ended jobs disappear from the window');
+    assert.ok(!preview(), 'a finished job is removed from the worker card');
+    await click(byText($('dlg-a'), 'Close'));
+    assert.strictEqual(posts.length, 0, 'opening details never controls the job');
+  },
+  async liveReplyInMessages({assert, $, sources, gets, settle, refresh, getState, setLiveReply, click}) {
+    const state = getState(), turn = 'r001-t02-manager';
+    const line = (n, s, extra) => ({agent: 'manager', n, k: 'text', s, turn, ...extra});
+    state.agents.manager.status = 'writing';
+    state.turns.manager = {id: turn, status: 'running', started: state.now - 1};
+    setLiveReply(url => url.endsWith('&before=5') ?
+      {items: [line(3, 'unrelated prior turn', {turn: 'r001-t01-manager'}), line(4, 'Draft')], more: false} :
+      {items: [line(5, ' plan')], more: true});
+    await refresh();
+    const writing = () => $('messages').children.find(row => row.dataset.message === 'writing:' + turn);
+    const row = writing();
+    const body = () => row.all().find(e => e.className === 'writing-text');
+    assert.ok(row && row.open);
+    assert.strictEqual($('messages').children[0], row);
+    assert.ok(row.children[0].textContent.includes('Writing'));
+    assert.strictEqual(body().textContent, 'Draft plan');
+    assert.ok(gets.includes('api/live?agent=manager&tail=500&before=5'));
+    await click($('talkbtn'));
+    const talkWriting = () => $('talklog').all().find(el => el.dataset.message === 'writing:' + turn);
+    assert.ok(talkWriting().textContent.includes('Draft plan') && talkWriting().textContent.includes('TURN INPUT'));
+
+    const stream = item => sources[0].l.live({data: JSON.stringify(item)});
+    stream(line(6, ' evolving'));
+    stream(line(6, ' evolving'));
+    stream(line(7, 'tool label', {k: 'tool'}));
+    await settle();
+    assert.strictEqual(writing(), row, 'streaming preserves the open row');
+    assert.strictEqual(body().textContent, 'Draft plan evolving');
+    assert.ok(row.textContent.includes('tool label'));
+    assert.ok(talkWriting().textContent.includes('Draft plan evolving') && talkWriting().textContent.includes('tool label'));
+    await click($('talkclose'));
+
+    setLiveReply(url => url.includes('tail=500') ?
+      {items: [line(4, 'Draft'), line(5, ' plan'), line(6, ' evolving'), line(8, ' again')], more: false} :
+      {items: [], next: 9});
+    sources[0].l.bye();
+    sources[1].onopen();
+    await settle();
+    assert.strictEqual(body().textContent, 'Draft plan evolving again');
+    await click($('talkbtn'));
+    assert.ok(talkWriting().textContent.includes('Draft plan evolving again'));
+    $('talkwho').value = 'critic'; $('talkwho').fire('change');
+    assert.ok(!talkWriting());
+    $('talkwho').value = 'manager'; $('talkwho').fire('change');
+    assert.ok(talkWriting());
+
+    state.agents.manager.status = 'idle';
+    state.turns.manager.status = 'ok';
+    state.messages.final = {id: 'final', seq: 50, created: state.now, sender: 'manager', recipient: 'user',
+      turn, status: 'delivered', body: 'Final plan for review.'};
+    await refresh();
+    assert.strictEqual(writing(), undefined);
+    const final = $('messages').children.find(el => el.dataset.message === 'final');
+    assert.ok(final && final.open && final.children[1].textContent.includes('Final plan for review.'));
+    assert.ok(!$('messages').textContent.includes('tool label') && !$('messages').textContent.includes('Draft plan evolving'));
+    assert.ok(!talkWriting() && !$('talklog').textContent.includes('tool label'));
+    assert.strictEqual($('talklog').textContent.split('Final plan for review.').length, 2);
   },
   async commandRetriesWithSameId({assert, $, click, posts, setReply}) {
     let n = 0;
@@ -941,11 +1069,17 @@ class TestSmoke(unittest.TestCase):
     def test_UI_6_old_runs_are_read_only(self):
         self.run_scenario("oldRuns")
 
-    def test_UI_1_live_activity_line(self):
-        self.run_scenario("liveActivity")
+    def test_tools_stream_inside_the_writing_row(self):
+        self.run_scenario("toolsInsideWriting")
 
-    def test_UI_1_live_reconnect_and_reset(self):
-        self.run_scenario("liveReconnectAndReset")
+    def test_milestone_review_replaces_an_earlier_copy_of_the_same_score_table(self):
+        self.run_scenario("milestoneReviewTables")
+
+    def test_job_details_show_the_command_and_follow_the_running_job(self):
+        self.run_scenario("jobDetails")
+
+    def test_writing_reply_streams_in_the_message_list_and_becomes_the_final_reply(self):
+        self.run_scenario("liveReplyInMessages")
 
     def test_a_command_is_sent_again_with_the_same_id(self):
         self.run_scenario("commandRetriesWithSameId")

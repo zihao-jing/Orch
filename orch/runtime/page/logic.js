@@ -191,11 +191,10 @@
     return t;
   }
 
-  function jobLine(j, now) {
-    const label = j.label || "job";
-    if (j.state === "running") return label + " (running " + duration(now - j.started) + ")";
-    if (j.state === "lost") return label + " (lost)";
-    return label + " (ended" + (j.exit_code ? ", exit " + j.exit_code : "") + ")";
+  function jobStatus(j, now) {
+    if (j.state === "running") return "Running · " + duration(now - j.started);
+    if (j.state === "lost") return "Lost";
+    return "Ended" + (j.exit_code == null ? "" : " · exit " + j.exit_code);
   }
 
   // the controls of one worker; a deleted worker shows nothing
@@ -362,7 +361,7 @@
 
   const api = {
     STATUS, GATE_KIND, MS_STATUS, NOTE_KEYS, plainName, agentName, clock, stamp, ago, duration, shownOf, messageText,
-    messageStatus, messageTone, isNotice, agentTags, jobLine, workerActions, sortedMessages, mergeMessages, talkLog,
+    messageStatus, messageTone, isNotice, agentTags, jobStatus, workerActions, sortedMessages, mergeMessages, talkLog,
     openGates, answeredWaiting, gateAnswer, newId, backoff, applyChoice, efforts, markdown, preview,
     progress, LEVELS, MESSAGE_PAGE, LIST_PAGE, messageLevel, latest, pageQuery, shortModel, characterSize,
     messageException, awaitsAnswer, statusHint, groupReplies,

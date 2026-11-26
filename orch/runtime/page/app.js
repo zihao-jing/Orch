@@ -10,8 +10,10 @@
   let offset = 0;               // server time minus browser time, seconds
   let old = null;               // an earlier run being read ({id, state})
   let es = null, tries = 0, connectedOnce = false;     // the event stream
-  const live = {}, liveN = {}, liveMore = {}, liveLoaded = new Set();
-  const openMsgs = new Set(), openAct = new Set(), openFolds = new Set(), pages = new Map();
+  const writing = new Map();     // one live reply per agent; never part of the message ledger
+  const turnActivity = new Map(); // latest turn for each agent
+  const openDeliveries = new Map();  // keep a reply open when its live row is replaced
+  const openMsgs = new Set(), openFolds = new Set(), pages = new Map();
   const detail = new Map();
   let timeline = { rows: [], remaining: 0, limit: L.MESSAGE_PAGE, busy: false, queued: false };
   let headVersion = "";
@@ -147,6 +149,22 @@
   function busy(b, on) { if (b) { b.disabled = on; if (on) b.setAttribute("aria-busy", "true"); else b.removeAttribute("aria-busy"); } }
 
   // ------------------------------------------------------------------------------------------------ dialogs
+  function dismissOnBackdrop(layer, close) {
+    let startedOutside = false;
+    function outside(ev) {
+      if (ev.target !== layer) return false;
+      if (layer.tagName !== "DIALOG") return true; // Talk's backdrop is a separate element.
+      const rect = layer.getBoundingClientRect();
+      return ev.clientX < rect.left || ev.clientX >= rect.right || ev.clientY < rect.top || ev.clientY >= rect.bottom;
+    }
+    layer.addEventListener("pointerdown", ev => { startedOutside = ev.button === 0 && outside(ev); });
+    layer.addEventListener("pointercancel", () => { startedOutside = false; });
+    layer.addEventListener("click", ev => {
+      const dismiss = startedOutside && outside(ev);
+      startedOutside = false;
+      if (dismiss) close();
+    });
+  }
   // buttons: [{label, value, cls}] -> the value pressed, or the value a body control gave to close(); null when
   // closed otherwise. body may be a function(close). A second dialog opens over the first (a question in a window).
   function modal(title, body, buttons, refresh) {
@@ -243,10 +261,7 @@
       tries = 0;
       found();
       loadState();
-      if (reconn) {
-        const seen = new Set(Object.keys(liveN).concat(Array.from(openAct)));
-        seen.forEach(id => loadLive(id, null, id in liveN ? liveN[id] + 1 : 0));
-      }
+      if (reconn && !old && S) syncWriting(true);
     };
     es.addEventListener("state", () => loadState());
     es.addEventListener("live", ev => { try { onLive(JSON.parse(ev.data)); } catch (e) { /* ignore a bad line */ } });
@@ -254,57 +269,9 @@
     es.onerror = () => { es.close(); lostSoon(); setTimeout(connect, L.backoff(tries++)); };
   }
   function onLive(d) {
-    if (typeof d.n === "number") {
-      if (d.agent in liveN && d.n <= liveN[d.agent]) return;
-      liveN[d.agent] = d.n;
-    }
-    const list = live[d.agent] || (live[d.agent] = []);
-    list.push(d);
-    if (list.length > listLimit("activity:" + d.agent)) { list.shift(); liveMore[d.agent] = true; }
-    paintActivity(d.agent);
-  }
-
-  function paintActivity(id) {
-    const list = live[id] || [], last = list[list.length - 1];
-    document.querySelectorAll('[data-live="' + id + '"]').forEach(e => { e.textContent = last ? L.preview(last.s, 110) : ""; });
-    document.querySelectorAll('[data-livelog="' + id + '"]').forEach(box => {
-      const signature = JSON.stringify([list, liveMore[id]]);
-      paint(box, signature, () => [
-        liveMore[id] ? h("button", { type: "button", class: "link", on: { click: () => {
-          const key = "activity:" + id;
-          pages.set(key, listLimit(key) + L.LIST_PAGE);
-          loadLive(id, "older");
-        } } }, "Show more") : null,
-        list.length ? h("div", { class: "livelog" }, list.map(x => (x.k === "tool" ? "> " : "") + x.s + "\n"))
-          : h("p", { class: "empty" }, "No activity recorded."),
-      ]);
-    });
-  }
-  async function loadLive(id, mode, fromN) {
-    const paging = mode === "older";
-    const list = live[id] || [];
-    const from = fromN !== undefined ? fromN : (id in liveN ? liveN[id] + 1 : 0);
-    const tail = paging || (mode === "open" && !liveLoaded.has(id));
-    const params = tail ? "&tail=" + L.LIST_PAGE + (paging && list.length ? "&before=" + list[0].n : "") : "&from=" + from;
-    try {
-      const j = await getJson("api/live?agent=" + encodeURIComponent(id) + params);
-      const seen = live[id] || [];
-      const previous = j.reset || (!tail && from === 0) ? [] :
-        tail && !paging ? seen.filter(x => x.n >= j.next) : seen;
-      const byIndex = new Map(previous.concat(j.items || []).map(x => [x.n, x]));
-      const sorted = [...byIndex.values()].sort((a, b) => a.n - b.n);
-      const page = L.latest(sorted, listLimit("activity:" + id));
-      live[id] = page.rows;
-      if (tail && !paging) liveLoaded.add(id);
-      if (!paging && (j.next > 0 || j.reset)) {
-        liveN[id] = j.reset ? j.next - 1 : Math.max(liveN[id] ?? -1, j.next - 1);
-      }
-      if (tail || j.reset) liveMore[id] = !!j.more;
-      if (page.remaining) liveMore[id] = true;
-      paintActivity(id);
-    } catch (e) {
-      if (mode) toast("Could not load activity.");
-    }
+    if (d.k !== "text" && d.k !== "tool") return;
+    const reply = writing.get(d.agent);
+    if (reply) addWritingEvents(reply, [d]);
   }
 
   // --------------------------------------------------------------------------------------------- rendering
@@ -323,6 +290,7 @@
     if (!S) return;
     $("oldnote").hidden = true;
     ["header-actions", "message-filters", "resources", "changems", "addworker", "notices"].forEach(id => { $(id).hidden = false; });
+    syncWriting();
     renderHeader(); renderNotices(); renderNeeds(); renderTeam(); renderProgress(); renderMessages();
     renderTalk(); renderSide();
     if (modalRefresh) modalRefresh();
@@ -369,14 +337,50 @@
   function msList(list) {
     return h("ol", {}, list.map(m => h("li", {}, h("b", {}, m.title), m.text ? " - " + L.preview(m.text, 200) : "")));
   }
+  function planText(text, milestones) {
+    const box = h("div", { class: "md" });
+    const blocks = L.markdown(text), titles = new Set(milestones.map(m => m.title));
+    for (const block of blocks) {
+      if (block.t !== "ol") continue;
+      block.items = block.items.map(item => {
+        const [first, ...rest] = item;
+        if (first?.t !== "text") return item;
+        const title = first.s.split(/\s+[—–-]\s+|:\s+/, 1)[0].trimEnd();
+        if (!titles.has(title)) return item;
+        return [{ t: "b", s: title }, { t: "text", s: first.s.slice(title.length) }, ...rest];
+      });
+    }
+    mdInto(box, blocks);
+    return box;
+  }
+  function reviewText(text) {
+    const box = h("div", { class: "md" }), blocks = L.markdown(text), latest = new Map();
+    const words = parts => parts.map(x => x.s).join("").trim().toLowerCase();
+    const keys = blocks.map((b, i) => {
+      if (b.t !== "table" || !b.rows.length) return null;
+      const head = b.head.map(words), score = head.findIndex(x => /^(score|rating|评分|得分|分数)$/.test(x));
+      if (score < 1) return null;
+      const key = JSON.stringify([head, b.rows.map(row => [words(row[0]), words(row[score])])]);
+      latest.set(key, i);
+      return key;
+    });
+    mdInto(box, blocks.filter((_, i) => keys[i] === null || latest.get(keys[i]) === i));
+    return box;
+  }
   function gateCard(g) {
     const key = "gate:" + g.id, box = h("div", { class: "gate" });
     box.append(h("div", { class: "k" }, L.GATE_KIND[g.kind] || "Needs you", g.agent ? " - " + nm(g.agent) : ""));
     const w = L.shownOf(g.words);
-    if (w) box.append(md(w));
-    if (g.text) box.append(md(g.text));
+    if (g.kind === "plan") {
+      // The original reply, parsed milestones, and generated notice describe the same plan.
+      if (g.text) box.append(planText(g.text, g.new || []));
+      else if ((g.new || []).length) box.append(msList(g.new));
+      else if (w) box.append(md(w));
+    } else {
+      if (w) box.append(md(w));
+      if (g.text) box.append(g.kind === "milestone" ? reviewText(g.text) : md(g.text));
+    }
     if (g.summary) box.append(h("div", { class: "rec" }, md(g.summary)));
-    if (g.kind === "plan" && (g.new || []).length) box.append(msList(g.new));
     if (g.kind === "milestone_change") {
       box.append(h("div", { class: "side2" }, h("div", {}, h("h3", {}, "Now"), msList(g.old || [])), h("div", {}, h("h3", {}, "Proposed"), msList(g.new || []))));
     }
@@ -420,94 +424,143 @@
     return h("button", { type: "button", class: "link term", title: command,
       "aria-label": "Copy the terminal command for " + nm(a.id), on: { click: () => copyCommand(command) } }, "Terminal");
   }
-  function menu(title) {
-    const panel = h("div", { class: "menu-items" });
-    const summary = h("summary", { class: "icon", "aria-label": title, title }, "⋯");
-    const node = h("details", { class: "menu" }, summary, panel);
-    panel.addEventListener("click", () => { node.open = false; summary.focus(); });
-    return [node, panel];
-  }
-  // which agents are unfolded, and whether the whole team panel is folded: kept in this browser
   const openAgents = new Set((() => { try { return JSON.parse(store.get("orch-team-open") || "[]"); } catch (e) { return []; } })());
   let teamFolded = store.get("orch-team-folded") === "1";
-  function saveOpenAgents() { store.set("orch-team-open", JSON.stringify(Array.from(openAgents))); }
-  function agentSummaryState(a, t) {
-    // the one word that matters most on the folded line
+  function agentSummaryState(a) {
     if (a.status === "failed") return "Failed";
     if (a.switch && a.switch.step && ["done", "failed"].indexOf(a.switch.step) < 0) return "Switching model";
     if (a.status === "writing") return "Writing";
     if (a.status === "waiting_job") return "Job running";
     if (a.status === "closed") return "Closed";
-    return a.last_output ? "Idle " + L.ago(a.last_output, t) : "Idle";
+    return "Idle";
   }
+  function activityAge(at, now) {
+    return now - at < 60 ? L.duration(now - at) + " ago" : L.ago(at, now);
+  }
+  function lastActivity(a) {
+    const at = a.last_output || a.writing_since;
+    return at ? h("span", { class: "agent-last-active", data: { ago: at }, title: "Last activity" },
+      activityAge(at, nowSrv())) : null;
+  }
+  function assignmentText(a) {
+    if (!a.assignment) return "";
+    const original = (S.messages || {})[a.assignment.message_id];
+    return (original && L.messageText(original)) || a.assignment.line;
+  }
+  function assignmentTag() {
+    return h("span", { class: "assignment-tag", role: "img", "aria-label": "Last assignment", title: "Last assignment" }, "→");
+  }
+  function activeJobs(id) {
+    return Object.values(S.jobs || {}).filter(j => j.agent === id &&
+      (j.state === "running" || (j.state === "lost" && !j.woke && !j.stopped_by_user)))
+      .sort((x, y) => x.started - y.started);
+  }
+  function agentStatusDot(a, jobs) {
+    const running = a.status === "waiting_job" ||
+      ((a.status === "writing" || a.status === "idle") && jobs.some(j => j.state === "running"));
+    return h("span", { class: "dot status-" + a.status + (running ? " job-running" : ""), "aria-hidden": "true" });
+  }
+  function agentModel(a) { return a.actual_model || (a.choice && (a.choice.model || a.choice.label)) || ""; }
   function agentCard(a) {
-    const t = nowSrv(), name = nm(a.id), role = ROLE[a.role] || "", status = L.STATUS[a.status] || "";
-    const model = a.actual_model || (a.choice && (a.choice.model || a.choice.label)) || "";
-    const box = h("details", { class: "agent status-row-" + a.status + (a.status === "closed" ? " closed" : "") });
-    box.open = openAgents.has(a.id);
-    box.addEventListener("toggle", () => {
-      if (box.open) openAgents.add(a.id); else openAgents.delete(a.id);
-      saveOpenAgents();
-    });
-    box.append(h("summary", { class: "agent-sum", title: name + ": " + status + (model ? " · " + model : "") },
-      h("span", { class: "dot status-" + a.status, "aria-hidden": "true" }),
-      h("span", { class: "agent-name" }, name),
-      role.toLowerCase() !== name.toLowerCase().replace(/[ -]?\d+$/, "") ? h("span", { class: "agent-role" }, role) : null,
-      h("span", { class: "agent-state" }, agentSummaryState(a, t)),
-      a.waiting ? h("span", { class: "agent-count", title: a.waiting + " message(s) wait for " + name }, String(a.waiting)) : null));
-    const body = h("div", { class: "agent-body" });
-    box.append(body);
-    const [actions, items] = menu("More actions for " + name);
-    body.append(h("div", { class: "agent-meta" },
+    const name = nm(a.id), role = ROLE[a.role] || "", status = L.STATUS[a.status] || "", model = agentModel(a);
+    const jobs = activeJobs(a.id), job = jobs[jobs.length - 1];
+    const opened = openAgents.has(a.id), panelId = "agent-summary-" + a.id;
+    const panel = h("div", { class: "agent-body", id: panelId });
+    panel.hidden = !opened;
+    const fold = h("button", { type: "button", class: "agent-sum", title: name + ": " + status + (model ? " · " + model : ""),
+      "aria-expanded": String(opened), "aria-controls": panelId, on: { click: () => {
+        const open = panel.hidden;
+        if (open) openAgents.add(a.id); else openAgents.delete(a.id);
+        store.set("orch-team-open", JSON.stringify(Array.from(openAgents)));
+        fold.setAttribute("aria-expanded", String(open));
+        panel.hidden = !open;
+      } } },
+        h("span", { class: "agent-fold-mark", "aria-hidden": "true" }),
+        agentStatusDot(a, jobs),
+        h("span", { class: "agent-name" }, name),
+        role.toLowerCase() !== name.toLowerCase().replace(/[ -]?\d+$/, "") ? h("span", { class: "agent-role" }, role) : null,
+        h("span", { class: "agent-state" }, agentSummaryState(a), lastActivity(a)),
+        a.waiting ? h("span", { class: "agent-count", title: a.waiting + " message(s) wait for " + name }, String(a.waiting)) : null);
+    const tags = L.agentTags(a, S), assignment = assignmentText(a);
+    panel.append(h("div", { class: "agent-meta" },
       model ? h("span", { class: "model-name", title: model }, L.shortModel(model)) : null,
-      h("span", { class: "agent-when" }, status,
-        a.last_output ? [" · ", h("span", { data: { ago: a.last_output }, title: "Last activity" }, L.ago(a.last_output, t))] : null)));
+      h("span", { class: "agent-when" }, status)));
+    if (tags.length) panel.append(h("div", { class: "agent-line tags" }, tags.join(" · ")));
+    if (assignment) panel.append(h("div", { class: "agent-line inline-assignment" },
+      assignmentTag(), h("span", { class: "assignment-preview" }, assignment)));
+    if (a.status === "failed" && a.failed_why) panel.append(h("div", { class: "agent-line danger-text" }, a.failed_why));
+    panel.append(agentActions(a));
+    return h("div", { class: "agent status-row-" + a.status + (a.status === "closed" ? " closed" : "") },
+      fold,
+      job ? h("div", { class: "agent-job-preview" }, h("span", { class: "label" }, jobs.length === 1 ? "Job" : jobs.length + " jobs"),
+        h("span", { class: "job-preview" }, job.command || job.label || job.id)) : null,
+      h("button", { type: "button", class: "icon agent-details-button", title: "Open " + name + " details",
+        "aria-label": "Open " + name + " details", "aria-haspopup": "dialog", on: { click: () => openAgent(a.id) } }, "…"),
+      panel);
+  }
+  function agentDetails(a, assignment, jobs, refresh, close) {
+    const t = nowSrv(), status = L.STATUS[a.status] || "", model = agentModel(a);
+    const body = h("div");
+    body.append(h("div", { class: "agent-meta" },
+      model ? h("span", { class: "model-name" }, model) : null,
+      h("span", { class: "agent-when" }, status, (a.last_output || a.writing_since) ? [" · ", lastActivity(a)] : null)));
     const tags = L.agentTags(a, S);
     if (tags.length) body.append(h("div", { class: "agent-line tags" }, tags.join(" · ")));
-    if (a.assignment && a.assignment.line) body.append(h("div", { class: "agent-line assignment", title: a.assignment.line },
-      h("span", { class: "label" }, a.open_report || S.finished ? "Last assignment" : "Assignment"), a.assignment.line));
+    if (assignment) body.append(h("div", { class: "agent-line assignment" },
+      assignmentTag(), md(assignment)));
     if (a.status === "failed" && a.failed_why) body.append(h("div", { class: "agent-line danger-text" }, a.failed_why));
-    const last = (live[a.id] || []).slice(-1)[0];
-    body.append(h("div", { class: "agent-line live-preview", data: { live: a.id } }, last ? L.preview(last.s, 110) : ""));
     if (a.waiting) {
-      const why = a.holds.map(x => ({ terminal: "a terminal is open", "switch": "model is being switched", turn: "it is writing", send_failed: "sending failed", stopped: "stopped by you" }[x])).filter(Boolean);
+      const why = (a.holds || []).map(x => ({ terminal: "a terminal is open", "switch": "model is being switched", turn: "it is writing", send_failed: "sending failed", stopped: "stopped by you" }[x])).filter(Boolean);
       body.append(h("div", { class: "agent-line" }, a.waiting + " message(s) waiting", why.length ? " · " + why.join(", ") : ""));
     }
-    const jobs = Object.values(S.jobs || {}).filter(j => j.agent === a.id && (j.state === "running" || (!j.woke && !j.stopped_by_user)));
     const jobKey = "jobs:" + a.id, shownJobs = L.latest(jobs, listLimit(jobKey));
-    shownJobs.rows.forEach(j => body.append(h("div", { class: "agent-line job" }, h("span", { class: "label" }, "Job"), L.jobLine(j, t))));
-    add(body, listMore(jobKey, shownJobs.remaining, renderTeam));
-    const controls = h("div", { class: "agent-actions" });
-    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "link", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
-    controls.append(h("button", { type: "button", class: "link", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"));
+    shownJobs.rows.forEach(j => body.append(h("div", { class: "job-detail" },
+      h("h4", {}, "Job · ", h("span", { data: j.state === "running" ? { jobstart: j.started } : null }, L.jobStatus(j, t))),
+      h("p", { class: "detail-hint" }, "Job ID: ", h("code", {}, j.id),
+        j.started ? " · Started " + new Date(j.started * 1000).toLocaleString() : ""),
+      h("pre", {}, j.command || j.label || "No command recorded."),
+      !j.command && j.label && j.label.length >= 160 ?
+        h("p", { class: "detail-hint" }, "This job has only a saved preview; the original command may be longer.") : null)));
+    add(body, listMore(jobKey, shownJobs.remaining, refresh));
+    body.append(agentActions(a, close));
+    return body;
+  }
+  function agentActions(a, close) {
+    const name = nm(a.id), controls = h("div", { class: "agent-actions" });
+    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "link", title: "Talk to " + name,
+      on: { click: () => close ? close("talk") : openTalk(a.id) } }, "Talk"));
+    controls.append(h("button", { type: "button", class: "link", title: "Choose the model for " + name,
+      on: { click: () => close ? close("model") : openModel(a.id) } }, "Model"));
     if (a.role !== "monitor" && a.lifecycle === "open") controls.append(terminalLink(a));
-    body.append(controls);
-    const activity = h("div", { class: "activity-body", data: { livelog: a.id }, hidden: !openAct.has(a.id) });
-    controls.append(h("button", { type: "button", class: "link", title: "Show this agent’s recent output and tools",
-      on: { click: ev => {
-        activity.hidden = !activity.hidden;
-        ev.currentTarget.textContent = activity.hidden ? "Activity" : "Hide activity";
-        if (activity.hidden) openAct.delete(a.id);
-        else { openAct.add(a.id); paintActivity(a.id); loadLive(a.id, "open"); }
-      } } }, openAct.has(a.id) ? "Hide activity" : "Activity"));
-    body.append(activity);
-    if (a.role === "worker") L.workerActions(a).forEach(type => (type === "WorkerReopen" ? controls : items).append(h("button", { type: "button",
-      class: { WorkerDelete: "danger-text", WorkerReopen: "link" }[type] || "",
+    if (a.role === "worker") L.workerActions(a).forEach(type => controls.append(h("button", { type: "button",
+      class: type === "WorkerDelete" ? "link danger-link" : "link",
       title: { WorkerClose: "Close this worker and keep its session", WorkerReopen: "Reopen this worker in its saved session", WorkerDelete: "Permanently remove this worker from the team" }[type],
       on: { click: ev => workerAct(type, a, ev.currentTarget) } },
-      { WorkerClose: "Close", WorkerReopen: "Reopen", WorkerDelete: "Delete" }[type])));
+      { WorkerClose: "Close worker", WorkerReopen: "Reopen worker", WorkerDelete: "Delete worker" }[type])));
     if (a.lifecycle === "open") controls.append(a.stopped_by_user
       ? h("button", { type: "button", class: "link", title: "Resume this agent in its saved session", on: { click: act("StartAgents", { agents: [a.id] }) } }, "Start")
       : h("button", { type: "button", class: "link danger-link", title: "Stop this agent and its jobs", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
-    if (items.children.length) controls.append(actions);   // Close and Delete stay behind ⋯
-    return box;
+    return controls;
+  }
+  async function openAgent(id) {
+    const box = h("div", { class: "agent-detail" });
+    let close;
+    const refresh = () => {
+      const a = agents()[id], jobs = activeJobs(id), assignment = a && assignmentText(a);
+      paint(box, JSON.stringify([a, assignment, jobs, listLimit("jobs:" + id), a && L.agentTags(a, S)]), () => a && a.lifecycle !== "deleted"
+        ? agentDetails(a, assignment, jobs, refresh, close) : h("p", {}, "This agent is no longer on the team."));
+    };
+    const result = await modal(nm(id) + " details", done => { close = done; refresh(); return box; },
+      [{ label: "Close", value: "" }], refresh);
+    if (result === "talk") openTalk(id);
+    if (result === "model") openModel(id);
   }
   function railDot(a) {
-    // the folded team panel: one dot per agent, its name and state in the tooltip; a click unfolds that agent
-    const name = nm(a.id), st = agentSummaryState(a, nowSrv());
+    const at = a.last_output || a.writing_since;
+    const name = nm(a.id), st = agentSummaryState(a) + (at ? " · " + activityAge(at, nowSrv()) : "");
     return h("button", { type: "button", class: "rail-agent", title: name + ": " + st, "aria-label": name + ": " + st,
-      on: { click: () => { openAgents.add(a.id); saveOpenAgents(); setTeamFolded(false); } } },
-      h("span", { class: "dot status-" + a.status, "aria-hidden": "true" }), h("span", { class: "rail-initial" }, railLabel(a)));
+      "aria-haspopup": "dialog", on: { click: () => openAgent(a.id) } },
+      agentStatusDot(a, activeJobs(a.id)), h("span", { class: "rail-initial" }, railLabel(a)));
   }
   function railLabel(a) {
     const n = (a.id.match(/(\d+)$/) || [])[1];
@@ -536,8 +589,8 @@
     fb.title = teamFolded ? "Show the team" : "Fold the team into a narrow strip";
     fb.setAttribute("aria-label", fb.title);
     fb.textContent = teamFolded ? "‹" : "›";
-    const sig = JSON.stringify([teamFolded, list, S.jobs, S.terminals, S.discussions, S.finished, t, list.map(a => listLimit("jobs:" + a.id))]);
-    if (paint($("team"), sig, () => teamFolded ? list.map(railDot) : list.map(agentCard))) openAct.forEach(paintActivity);
+    const sig = JSON.stringify([teamFolded, list, S.jobs, t, teamFolded ? [] : list.map(a => [assignmentText(a), L.agentTags(a, S)])]);
+    paint($("team"), sig, () => teamFolded ? list.map(railDot) : list.map(agentCard));
     if (!list.length) $("team").textContent = "No agents yet.";
   }
 
@@ -606,6 +659,178 @@
   // messages
   const messageFilter = () => ({ q: $("msearch").value, off: [...hiddenWho], notes: $("orch-notes").checked });
 
+  function syncWriting(reconnect = false) {
+    const current = new Set();
+    for (const a of agentList()) {
+      const turn = (S.turns || {})[a.id];
+      if (!turn?.id) continue;
+      current.add(a.id);
+      let reply = turnActivity.get(a.id);
+      if (!reply || reply.turn !== turn.id) {
+        if (writing.has(a.id)) finishWriting(writing.get(a.id));
+        reply = { id: "writing:" + turn.id, turn: turn.id, sender: a.id, created: turn.started || a.writing_since,
+          chunks: new Map(), tools: new Map(), toolLines: [], body: "",
+          timelineView: { open: true, inputOpen: true }, talkView: { open: true, inputOpen: true } };
+        turnActivity.set(a.id, reply);
+      }
+      if (a.status === "writing" && turn.status === "running" && !reply.delivered) {
+        writing.set(a.id, reply);
+        if (reply.input === undefined) loadWritingInput(reply);
+        if (reconnect || !reply.loaded) loadWritingEvents(reply);
+      } else if (writing.has(a.id)) {
+        finishWriting(reply);
+      }
+      reply.model = a.actual_model || (a.choice || {}).label;
+    }
+    for (const id of turnActivity.keys()) {
+      if (current.has(id)) continue;
+      if (writing.has(id)) finishWriting(writing.get(id));
+      turnActivity.delete(id);
+    }
+  }
+
+  function finishWriting(reply) {
+    writing.delete(reply.sender);
+    if (reply.timelineView.paint && reply.timelineView.open && reply.body) openDeliveries.set(reply.sender, reply.turn);
+  }
+
+  async function loadWritingInput(reply) {
+    if (reply.inputLoading) return;
+    reply.inputLoading = true;
+    try {
+      const turn = await getJson("api/turn?id=" + encodeURIComponent(reply.turn));
+      reply.input = turn.input || "";
+    } catch (e) { /* retry when the state next updates */ }
+    finally { reply.inputLoading = false; }
+    if (!old && writing.get(reply.sender) === reply) {
+      paintWritingViews(reply, "paintInput");
+      if ($("msearch").value.trim()) renderMessages();
+    }
+  }
+
+  async function loadWritingEvents(reply) {
+    if (reply.loading) return;
+    reply.loading = true;
+    try {
+      const path = "api/live?agent=" + encodeURIComponent(reply.sender) + "&tail=500";
+      const items = [];
+      let before = 0;
+      do {
+        const page = await getJson(path + (before ? "&before=" + before : ""));
+        if (writing.get(reply.sender) !== reply) return;
+        items.push(...page.items);
+        const oldest = page.items[0];
+        before = page.more && oldest?.turn === reply.turn ? oldest.n : 0;
+      } while (before > 0);
+      addWritingEvents(reply, items);
+      reply.loaded = true;
+    } catch (e) { /* incoming live fragments still work; retry on the next state refresh */ }
+    finally { reply.loading = false; }
+  }
+
+  function writingToolLine(label, call) {
+    let line = call || label || "Tool call";
+    // Most adapters save the tool name and structured arguments; Codex saves the command itself.
+    const split = call.indexOf("\n");
+    if (split > 0) {
+      try {
+        const args = JSON.parse(call.slice(split + 1));
+        if (args && typeof args === "object") {
+          const name = call.slice(0, split);
+          const fields = args.command || [args.pattern || args.query, args.filePath || args.file_path || args.path || args.url].filter(Boolean).join(" · ");
+          const what = fields || (Object.keys(args).length ? JSON.stringify(args) : "");
+          line = what ? name + ": " + what : label || name;
+        }
+      } catch (e) { /* a multiline command has no JSON arguments to decode */ }
+    }
+    line = line.replace(/\s+/g, " ").trim();
+    return line.length > 2000 ? line.slice(0, 2000) + "…" : line;
+  }
+
+  function addWritingEvents(reply, items) {
+    if (writing.get(reply.sender) !== reply) return;
+    let textChanged = false, toolsChanged = false;
+    for (const item of items) {
+      if (item.turn !== reply.turn || !Number.isInteger(item.n)) continue;
+      if (item.k === "text" && !reply.chunks.has(item.n)) {
+        reply.chunks.set(item.n, item.s);
+        textChanged = true;
+      } else if (item.k === "tool") {
+        const id = item.tool_id ? "id:" + item.tool_id : item.n, prev = reply.tools.get(id);
+        const first = Math.min(item.n, prev?.first ?? item.n);
+        if (!prev || item.n > prev.n || first < prev.first) {
+          const newer = !prev || item.n >= prev.n;
+          reply.tools.set(id, { first, n: newer ? item.n : prev.n, label: (newer ? item.s : prev.label) || item.s,
+            call: (newer ? item.call || prev?.call : prev.call || item.call) || "" });
+          toolsChanged = true;
+        }
+      }
+    }
+    if (!textChanged && !toolsChanged) return;
+    if (textChanged) {
+      reply.body = [...reply.chunks].sort((a, b) => a[0] - b[0]).map(x => x[1]).join("");
+    }
+    if (toolsChanged) {
+      reply.toolLines = [...reply.tools.values()].sort((a, b) => a.first - b.first).map(x => writingToolLine(x.label, x.call));
+    }
+    if (!old) {
+      paintWritingViews(reply, "paint");
+      if ($("msearch").value.trim()) renderMessages();
+    }
+  }
+
+  function paintWritingViews(reply, method) {
+    reply.timelineView[method]?.();
+    if ($("talk").hidden || who !== reply.sender) return;
+    const log = $("talklog"), near = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+    reply.talkView[method]?.();
+    if (near) log.scrollTop = log.scrollHeight;
+  }
+
+  function writingRow(reply, view = reply.timelineView) {
+    const preview = h("span", { class: "pv" });
+    const tools = h("div", { class: "writing-tools" }), body = h("div", { class: "writing-text" });
+    const row = h("details", { class: "msg writing-msg", data: { message: reply.id } },
+      h("summary", {}, h("span", { class: "tm" }, L.stamp(reply.created, nowSrv())),
+        h("span", { class: "route" }, h("b", {}, nm(reply.sender))), preview,
+        h("span", { class: "st-slot" }, h("span", { class: "st wait" }, "Writing")),
+        reply.model ? h("span", { class: "by", title: reply.model }, L.shortModel(reply.model)) : null),
+      h("div", { class: "fb" }, writingInput(reply, view), tools, body));
+    row.open = view.open;
+    let rendered = null, renderedTools = null;
+    view.paint = () => {
+      preview.textContent = row.open ? "" : L.preview(reply.body || reply.toolLines[reply.toolLines.length - 1]) || "Waiting for text…";
+      if (row.open && renderedTools !== reply.toolLines) {
+        const top = tools.scrollTop, follow = tools.scrollHeight - top - tools.clientHeight < 20;
+        tools.replaceChildren(...reply.toolLines.map(line => h("div", { class: "writing-tool-line", title: line },
+          h("span", {}, "Tool"), line)));
+        tools.hidden = !reply.toolLines.length;
+        tools.scrollTop = follow ? tools.scrollHeight : top;
+        renderedTools = reply.toolLines;
+      }
+      if (row.open && rendered !== reply.body) {
+        body.replaceChildren(reply.body ? md(reply.body) : h("p", { class: "empty" }, "Waiting for text…"));
+        rendered = reply.body;
+      }
+    };
+    row.addEventListener("toggle", () => { view.open = row.open; view.paint(); });
+    view.paint();
+    return row;
+  }
+
+  function writingInput(reply, view) {
+    const body = h("div");
+    const section = h("details", { class: "writing-input" }, h("summary", {}, "Input"), body);
+    section.open = view.inputOpen;
+    view.paintInput = () => {
+      const empty = reply.input === undefined ? "Loading input…" : "No input was recorded for this turn.";
+      body.replaceChildren(reply.input ? h("pre", {}, reply.input) : h("p", { class: "empty" }, empty));
+    };
+    section.addEventListener("toggle", () => { view.inputOpen = section.open; });
+    view.paintInput();
+    return section;
+  }
+
   function cached(path) {
     if (!detail.has(path)) {
       detail.set(path, getJson(path).catch(error => { detail.delete(path); throw error; }));
@@ -642,12 +867,14 @@
     const sized = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const facts = [meta.model ? "Written by " + L.shortModel(meta.model) : "",
       sized ? L.characterSize(meta.input_chars) + " characters in, " + L.characterSize(meta.output_chars) + " out" : ""].filter(Boolean);
+    const renderText = !run && m.turn && Object.values(S.gates || {}).some(g => g.kind === "milestone" && g.source_turn === m.turn)
+      ? reviewText : md;
     // one output that wrote several messages: each with whom it went to and how it stands
     const texts = m.parts ? m.parts.map(p => h("div", { class: "part" },
         h("div", { class: "part-head" }, h("span", {}, "→ " + toNames(named, [p.recipient].concat(p.also || []))),
           h("span", { class: "st " + L.messageTone(p) + (L.messageException(p) ? "" : " plain") }, L.messageException(p) || L.messageStatus(p))),
-        md(L.messageText(p))))
-      : [md(L.messageText(m))];
+        renderText(L.messageText(p))))
+      : [renderText(L.messageText(m))];
     const fb = h("div", { class: "fb" }, texts,
       facts.length ? h("p", { class: "detail-hint", title: meta.model || "" }, facts.join(" · ")) : null);
     if (m.turn) {
@@ -733,10 +960,31 @@
     $("show-all").hidden = remaining <= L.MESSAGE_PAGE;
     $("remaining").textContent = remaining + " older";
     $("message-count").textContent = ready ? (remaining ? shown + " of " + total : shown + (shown === 1 ? " message" : " messages")) : "Loading…";
-    if (!ready) return;
     // the newest on top; older pages load below
-    patchRows($("messages"), L.groupReplies(rows.slice().reverse()), m => msgRow(m), m =>
-      JSON.stringify([m, nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
+    const stored = L.groupReplies(rows.slice().reverse());
+    for (const m of stored) {
+      const reply = writing.get(m.sender);
+      if (reply && reply.turn === m.turn) {
+        reply.delivered = true;
+        finishWriting(reply);
+      }
+      if (m.turn && openDeliveries.get(m.sender) === m.turn) {
+        openMsgs.add(m.id);
+        openDeliveries.delete(m.sender);
+      }
+    }
+    const q = $("msearch").value.trim().toLowerCase();
+    const matches = text => !q || String(text || "").toLowerCase().includes(q);
+    const extra = [];
+    for (const reply of writing.values()) {
+      if (hiddenWho.has(reply.sender)) continue;
+      if (matches(reply.body) || matches(reply.input) || reply.toolLines.some(matches)) extra.push(reply);
+    }
+    if (!ready && !extra.length) return;
+    const list = extra.length ? extra.concat(stored).sort((a, b) => (b.created || 0) - (a.created || 0)) : stored;
+    patchRows($("messages"), list, m => m.chunks ? writingRow(m) : msgRow(m), m =>
+      m.chunks ? JSON.stringify([m.id, nm(m.sender), m.model]) :
+        JSON.stringify([m, nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
   }
 
   async function requestTimeline(filter, limit, before) {
@@ -831,9 +1079,11 @@
     const all = L.talkLog(messages(), who, mgrId && mgrId.id);
     const talkKey = "talk-history:" + who;
     const { rows: log, remaining } = L.latest(all, listLimit(talkKey));
-    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), remaining, who, !!disc, disc && disc.phase]);
+    const current = writing.get(who);
+    const live = current && !all.some(m => m.sender === who && m.turn === current.turn) ? current : null;
+    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), remaining, who, !!disc, disc && disc.phase, live?.id, live?.model]);
     const box = $("talklog"), near = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-    const changed = paint(box, sig, () => log.length ? [listMore(talkKey, remaining, () => {
+    const changed = paint(box, sig, () => log.length || live ? [listMore(talkKey, remaining, () => {
       const height = box.scrollHeight, top = box.scrollTop;
       renderTalk();
       box.scrollTop = top + box.scrollHeight - height;
@@ -842,7 +1092,11 @@
       return h("div", { class: "cm" + (me ? " me" : "") + (L.isNotice(m) ? " note" : "") },
         h("div", { class: "w" }, (me ? "You" : nm(m.sender)) + " - " + L.stamp(m.created, nowSrv()) + (me ? " - " + L.messageStatus(m) : "")),
         h("div", { class: "b" }, md(L.messageText(m))));
-    })] : h("p", { class: "empty" }, "Nothing yet. Write below."));
+    }), live ? writingRow(live, live.talkView) : null] : h("p", { class: "empty" }, "Nothing yet. Write below."));
+    if (force && live && !changed) {
+      live.talkView.paintInput();
+      live.talkView.paint();
+    }
     const fresh = force || box._who !== who;   // just opened, or another agent: start at the newest
     box._who = who;
     if (changed && (near || fresh)) box.scrollTop = box.scrollHeight;
@@ -1060,6 +1314,8 @@
 
   // ------------------------------------------------------------------------------------------------ wiring
   function wire() {
+    for (const d of [$("dlg"), $("dlg2")]) dismissOnBackdrop(d, () => d.close());
+    dismissOnBackdrop($("talk"), closeTalk);
     $("talkbtn").addEventListener("click", () => openTalk());
     $("talkclose").addEventListener("click", closeTalk);
     $("talksend").addEventListener("click", sendTalk);
@@ -1092,7 +1348,14 @@
     wireFilters();
     $("goldcard").addEventListener("toggle", () => { if ($("goldcard").open) loadSide(true); });
     $("auditcard").addEventListener("toggle", () => { if ($("auditcard").open) loadSide(true); });
-    setInterval(() => { document.querySelectorAll("[data-ago]").forEach(e => { e.textContent = L.ago(Number(e.dataset.ago), nowSrv()); }); }, 15000);
+    setInterval(() => {
+      const t = nowSrv();
+      document.querySelectorAll("[data-ago]").forEach(e => { e.textContent = activityAge(Number(e.dataset.ago), t); });
+    }, 1000);
+    setInterval(() => {
+      const t = nowSrv();
+      document.querySelectorAll("[data-jobstart]").forEach(e => { e.textContent = L.jobStatus({ state: "running", started: Number(e.dataset.jobstart) }, t); });
+    }, 15000);
     setInterval(loadState, 20000);
     window.addEventListener("online", () => { connect(); loadState(); });
   }

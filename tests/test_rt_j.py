@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rt_helpers import *  # noqa: F401,F403
 from orch.runtime import board as B
@@ -143,6 +144,22 @@ class TestServer(unittest.TestCase):
             self.assertEqual(call(self.port, "GET", "/api/state", None, {"Host": h})[0], 403, h)
         self.assertEqual(call(self.port, "GET", "/api/state", None,
                               {"Origin": "http://evil.example"})[0], 403)
+
+    def test_configured_vscode_preview_can_open_and_control_the_local_board(self):
+        proxy = "https://preview.example"
+        with patch.dict("os.environ", {"VSCODE_PROXY_URI": proxy + "/proxy/{{port}}/"}):
+            rt, _, server, port = make(self.tmp.name)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        headers = {"Host": "preview.example"}
+        self.assertEqual(call(port, "GET", "/", headers=headers)[0], 200)
+        command = {"type": "WorkerClose", "id": "preview", "agent": "worker-1"}
+        self.assertEqual(call(port, "POST", "/api/command", command,
+                              {**headers, "Origin": proxy})[0], 200)
+        self.assertEqual(call(port, "POST", "/api/command", command,
+                              {**headers, "Origin": "https://other.example"})[0], 403)
+        self.assertEqual(call(port, "GET", "/", headers={"Host": "other.example"})[0], 403)
+        self.assertEqual(len(rt.got), 1)
 
     def test_J6_live_lines_have_index_and_next(self):
         """J6: every live item carries its line index `n`; `next` is the index after the last line returned."""

@@ -535,7 +535,11 @@ def _live_item(line: str) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(d, dict) or d.get("k") not in ("text", "tool"):
         return None
-    return {"at": d.get("at", 0), "k": d["k"], "s": str(d.get("s", ""))}
+    item = {"at": d.get("at", 0), "k": d["k"], "s": str(d.get("s", ""))}
+    for key in ("turn", "tool_id", "call"):
+        if isinstance(d.get(key), str):
+            item[key] = d[key]
+    return item
 
 
 def _old_snapshot(rd: Path, st: Dict[str, Any]) -> Snapshot:
@@ -579,7 +583,7 @@ class _Server(ThreadingHTTPServer):
         pass  # a client that went away mid-request; the details could hold anything
 
 
-def _handler(board: Board):
+def _handler(board: Board, preview_host: str = ""):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         timeout = 15  # a client that stops sending or reading ends its own thread
@@ -601,10 +605,9 @@ def _handler(board: Board):
             self.send(code, json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"), "application/json")
 
         def allowed(self) -> bool:
-            """No other web page may drive the dashboard: the Host must name this computer or loopback (DNS
-            rebinding), on every bind, and a request from another origin is refused."""
+            """Accept local hosts and the configured preview host. Refuse requests from other origins."""
             host = self.headers.get("Host") or ""
-            if not _host_ok(host):
+            if not _host_ok(host) and not (preview_host and host.lower() == preview_host):
                 return False
             origin = self.headers.get("Origin")
             return not origin or urlparse(origin).netloc.lower() == host.lower()
@@ -771,10 +774,15 @@ def _handler(board: Board):
 def serve(board: Board, host: str = "127.0.0.1", port: int = 8765) -> Tuple[ThreadingHTTPServer, str]:
     """Start the dashboard in a background thread; returns (server, url). Port 0: any free one; else the next free
     one (up to 20 tries). `server.shutdown()` stops it."""
+    preview_host = ""
+    if host in _LOOPBACK:
+        preview = urlparse(os.environ.get("VSCODE_PROXY_URI", ""))
+        if preview.scheme in ("http", "https") and preview.hostname and preview.username is None:
+            preview_host = preview.netloc.lower()
     last: Optional[Exception] = None
     for p in ([0] if port == 0 else range(port, port + 20)):
         try:
-            srv = _Server((host, p), _handler(board))
+            srv = _Server((host, p), _handler(board, preview_host))
             break
         except OSError as e:
             last = e

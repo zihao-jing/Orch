@@ -13,7 +13,6 @@
 ## Critic
 
 - Give the conclusion, not the story of how you got there.
-- Write to a worker in a natural voice, as its lead, without headings such as "Instructions".
 
 ## Worker
 

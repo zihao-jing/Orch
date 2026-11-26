@@ -680,8 +680,10 @@ class CodexAdapter(BaseAdapter):
         t.last_item = iid or t.last_item
         if typ == "commandExecution":
             if not done:
-                t.cmds[iid] = (str(item.get("command", "")), str(item.get("processId", "")))
-                self._emit(ToolStart, f"ts:{iid}", tool_id=iid, label=" ".join(str(item.get("command", "")).split())[:160])
+                command = str(item.get("command") or "")
+                t.cmds[iid] = (command, str(item.get("processId", "")))
+                self._emit(ToolStart, f"ts:{iid}", tool_id=iid, label=" ".join(command.split())[:160] or "Shell",
+                           call=command)
             else:
                 t.cmds.pop(iid, None)
                 self._emit(ToolEnd, f"te:{iid}", tool_id=iid)
@@ -713,7 +715,7 @@ class CodexAdapter(BaseAdapter):
         for iid, (command, process) in list(t.cmds.items()):
             if iid in running or (process and process in running):
                 job = Job(job_id(self.agent, iid), self.agent, " ".join(command.split())[:200],
-                          started=self.clock.now())
+                          started=self.clock.now(), command=command)
                 self._jobs[iid] = job
                 self._emit(JobStarted, f"job:{iid}:start", job=job)
             else:
@@ -838,10 +840,11 @@ class CodexAdapter(BaseAdapter):
                         continue
                     state = JobState.ENDED
                 if iid not in self._jobs:
-                    self._jobs[iid] = Job(job_id(self.agent, iid), self.agent, " ".join(str(it.get("command", "")).split())[:200],
+                    command = str(it.get("command") or "")
+                    self._jobs[iid] = Job(job_id(self.agent, iid), self.agent, " ".join(command.split())[:200],
                                           started=self.clock.now(), state=state,
                                           exit_code=it.get("exitCode") if state == JobState.ENDED else None,
-                                          ended=self.clock.now() if state == JobState.ENDED else 0.0)
+                                          ended=self.clock.now() if state == JobState.ENDED else 0.0, command=command)
 
     # --------------------------------------------------------------------------------------------- sending
 
@@ -926,9 +929,9 @@ class CodexAdapter(BaseAdapter):
         for iid, e in listed.items():
             job = self._jobs.get(iid)
             if job is None or job.state != JobState.RUNNING:
+                command = str(e.get("command") or "")
                 job = self._jobs[iid] = Job(job_id(self.agent, iid), self.agent,
-                                            " ".join(str(e.get("command", "")).split())[:200],
-                                            started=self.clock.now())
+                                            " ".join(command.split())[:200], started=self.clock.now(), command=command)
             out.append(job)
         out += [j for iid, j in self._jobs.items() if j.state != JobState.RUNNING]
         return out

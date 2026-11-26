@@ -592,8 +592,10 @@ class ClaudeAdapter(BaseAdapter):
             return []
         self._bg.add(tid)
         use = e.get("tool_use_id", "")
-        label = (self._cmds.get(use) or e.get("description") or tid).replace("\n", " ")[:200]
-        job = Job(job_id(self._agent, tid), self._agent, label, started=self._stamps.get(use) or self.clock.now())
+        command = self._cmds.get(use, "")
+        label = (command or e.get("description") or tid).replace("\n", " ")[:200]
+        job = Job(job_id(self._agent, tid), self._agent, label, started=self._stamps.get(use) or self.clock.now(),
+                  command=command)
         self._tasks[job.id] = job
         return [self._ev(JobStarted, job=job)]
 
@@ -695,7 +697,9 @@ class ClaudeAdapter(BaseAdapter):
                 use = str(b.get("id", ""))
                 self._stamps[use] = stamp
                 self._tool_use(use, b)
-                out.append(self._ev(ToolStart, tool_id=use, label=_label(b)))
+                args = b.get("input")
+                call = str(b.get("name") or "tool") + "\n" + json.dumps(args, ensure_ascii=False, indent=2) if args is not None else ""
+                out.append(self._ev(ToolStart, tool_id=use, label=_label(b), call=call))
         return out
 
     def _tool_use(self, use: str, block: Dict[str, Any]) -> None:
@@ -948,8 +952,9 @@ class QwenAdapter(ClaudeAdapter):
         if not m or use not in self._pending:
             return []
         jid = job_id(self._agent, m.group(1))
-        job = Job(jid, self._agent, self._pending.pop(use).replace("\n", " ")[:200],
-                  started=self._stamps.get(use) or self.clock.now())
+        command = self._pending.pop(use)
+        job = Job(jid, self._agent, command.replace("\n", " ")[:200],
+                  started=self._stamps.get(use) or self.clock.now(), command=command)
         self._qseen.add(jid)
         self._tasks[jid] = job
         return [self._ev(JobStarted, job=job)]
@@ -969,8 +974,9 @@ class QwenAdapter(ClaudeAdapter):
             if code is None:
                 m = _EXIT_CODE.search(str(s.get("error", "")))
                 code = int(m.group(1)) if m else (0 if state == "completed" else None)
-            job = Job(job_id(self._agent, s["id"]), self._agent, str(s.get("command", ""))[:200],
-                      started=_epoch(s.get("startTime")))
+            command = str(s.get("command") or "")
+            job = Job(job_id(self._agent, s["id"]), self._agent, command.replace("\n", " ")[:200],
+                      started=_epoch(s.get("startTime")), command=command)
             if state == "running":
                 pid = int(s.get("pid") or 0)
                 if not (pid and _running(pid, 0)):

@@ -641,13 +641,19 @@ class TestItems(Base):
         """Item 5: JobStarted uid is jobstart:<shellID>; a foreground tool starts no job."""
         a, _ = self.started()
         self.user("x0123456789ab")
+        command = "# " + "x" * 220 + "\nsleep 5"
         self.reply("", content=[
             {"type": "tool", "id": "t1", "name": "shell", "state": {"status": "running", "input": {
-                "command": "sleep 5", "background": True}, "metadata": {"shellID": "sh_r"}}},
+                "command": command, "background": True}, "metadata": {"shellID": "sh_r"}}},
             {"type": "tool", "id": "t2", "name": "shell", "state": {"status": "running", "input": {
                 "command": "ls"}, "metadata": {"shellID": "sh_no"}}}])
-        js = self.of(self.drain(a), JobStarted)
+        events = self.drain(a)
+        js = self.of(events, JobStarted)
         self.assertEqual([(j.job.id, j.uid) for j in js], [("worker-1/sh_r", "jobstart:sh_r")])
+        self.assertEqual(js[0].job.command, command)
+        self.assertEqual(len(js[0].job.label), 200)
+        start = [e for e in self.of(events, ToolStart) if e.tool_id == "t1"][0]
+        self.assertEqual(json.loads(start.call.split("\n", 1)[1]), {"command": command, "background": True})
 
     def test_item6_known_job_missing_from_the_list_ends_on_exit_and_a_404_gives_nothing(self):
         """Item 6: exited with an exit code gives an ended job; a 404 leaves the known job alone."""

@@ -26,6 +26,7 @@ CHANCES: Dict[TextKey, float] = {
     TextKey.REM_ASK_AND_END: 0.1,
     TextKey.REM_WRITING: 0.25,
     TextKey.REM_GOLDEN_SIZE: 0.25,  # only while the board stays over its limit
+    TextKey.REM_CRITIC_BOUNDARY: 0.25,
 }
 
 # messages that ask for nothing but a text to pass on
@@ -89,6 +90,8 @@ def _critic(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: Di
     for w in snap.workers:
         out.append(TextRef(TextKey.REM_WORKER_LINE, worker_line(snap, w, message)))
     out.append(TextRef(TextKey.REM_LABELS, {"workers": workers}))
+    if due[TextKey.REM_CRITIC_BOUNDARY]:
+        out.append(TextRef(TextKey.REM_CRITIC_BOUNDARY))
     pool = ",".join(workers)
     if seen.get("workers") != pool:
         out.append(TextRef(TextKey.REM_WORKERS, {"workers": workers}))
