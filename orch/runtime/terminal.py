@@ -66,12 +66,7 @@ class _Module:
                                    choices=({"label": "stop", "set": {"stop_job": True}},))]
         out: List[C.Action] = []
         if ends and jobs:
-            out += [C.StopJob(j.id) for j in jobs]
-            critic = snap.critic
-            if a.role == Role.WORKER and critic and critic.is_open:  # the critic must not wait for a lost result
-                msg = C.Message(C.new_id(NAME, ev), C.ORCH, critic.id, needs_answer=False, trigger=Trigger.ORCH,
-                                text=TextRef(K.JOBS_STOPPED, {"worker": a.id, "jobs": [j.label for j in jobs]}))
-                out.append(C.Tell(msg))
+            out += [C.StopJob(j.id) for j in jobs]  # no notice to the critic: its reminder shows the worker's state
         out += [C.HoldAgent(a.id, HoldReason.TERMINAL),
                 C.OpenTerminal(C.Terminal(a.id, snap.now, shared=a.caps.shares_terminal), command_id=ev.id),
                 C.CommandReply(ev.id)]
@@ -84,28 +79,20 @@ class _Module:
         return [C.CloseTerminal(ev.agent), C.CommandReply(ev.id)]
 
     def read(self, snap: Snapshot, ev: C.TerminalRead) -> List[C.Action]:
-        """TERM-2, 3: the CLI is open again. Release the agent's messages; record each reply for the user; tell the
-        critic what the user said to a worker (MSG-9)."""
+        """TERM-2, 3: the CLI is open again. Release the agent's messages; record each reply for the user. What the user
+        typed to a worker stays between the two: the critic is not told (no DIRECT_MESSAGE_NOTICE any more)."""
         a = snap.agents.get(ev.agent)
         if a is None:
             return []
         out: List[C.Action] = []
         n = 0
-        critic = snap.critic
         for said in ev.said:
             text = said.text.strip()
-            if not text:
+            if not text or said.by != a.id:
                 continue
-            if said.by == a.id:
-                msg = C.Message(C.new_id(NAME, ev, n), a.id, C.USER, body=text, needs_answer=False,
-                                trigger=Trigger(a.role.value))
-                out.append(C.ToUser(msg))
-            elif a.role == Role.WORKER and critic and critic.is_open:
-                msg = C.Message(C.new_id(NAME, ev, n), C.USER, critic.id, body=text, needs_answer=False,
-                                trigger=Trigger.USER_CHAT, text=TextRef(K.DIRECT_MESSAGE_NOTICE, {"worker": a.id}))
-                out.append(C.Tell(msg))
-            else:
-                continue
+            msg = C.Message(C.new_id(NAME, ev, n), a.id, C.USER, body=text, needs_answer=False,
+                            trigger=Trigger(a.role.value))
+            out.append(C.ToUser(msg))
             n += 1
         if HoldReason.TERMINAL in a.holds:
             out.append(C.ReleaseAgent(a.id, HoldReason.TERMINAL))

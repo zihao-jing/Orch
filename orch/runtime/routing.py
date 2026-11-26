@@ -197,8 +197,8 @@ def _refuse(cmd: Any, why: Refusal) -> List[Action]:
 
 
 def _chat(snap: Snapshot, cmd: Chat) -> List[Action]:
-    """The user writes to an agent: at once (MSG-1); the critic is shown a message to a worker (MSG-9). Gates stay
-    open and the chat closes none (GATE-5)."""
+    """The user writes to an agent: at once (MSG-1). A chat with a worker stays between the two: the critic is not told.
+    Gates stay open and the chat closes none (GATE-5)."""
     a = snap.agents.get(cmd.agent)
     if a is None:
         return _refuse(cmd, Refusal.UNKNOWN)
@@ -210,38 +210,14 @@ def _chat(snap: Snapshot, cmd: Chat) -> List[Action]:
         return _refuse(cmd, Refusal.WRONG_ROLE)
     out = _Out(cmd)
     out.add(Send, out.message(USER, a.id, cmd.text.strip(), trigger=Trigger.USER_CHAT))
-    if a.role == Role.WORKER and snap.critic:
-        _notice(out, snap, a.id, cmd.text.strip())
     out.actions.append(CommandReply(cmd.id))
     return out.actions
 
 
 def _to_critic(snap: Snapshot, cmd: SendToCritic) -> List[Action]:
-    """LAB-6: the user passes a worker's reply on."""
-    m = snap.messages.get(cmd.message_id)
-    if m is None or m.sender not in snap.agents or m.recipient != USER or snap.agents[m.sender].role != Role.WORKER:
-        return _refuse(cmd, Refusal.UNKNOWN)
-    if snap.critic is None:
-        return _refuse(cmd, Refusal.UNKNOWN)
-    if any(x.key == TextKey.WORKER_TO_CRITIC and x.turn == m.turn and x.sender == m.sender and x.drop is None
-           for x in snap.messages.values()):
-        return _refuse(cmd, Refusal.ALREADY)
-    out = _Out(cmd)
-    out.add(Send, out.message(m.sender, snap.critic.id, m.body, TextKey.WORKER_TO_CRITIC,
-                              {"worker": m.sender, "question": _asked(snap, m)}, Trigger.WORKER, turn=m.turn))
-    out.actions.append(CommandReply(cmd.id))
-    return out.actions
-
-
-def _asked(snap: Snapshot, reply: Message) -> str:
-    """The user's chat message the reply answers."""
-    turn = snap.turns.get(reply.sender)
-    ids = (turn.started_by + turn.joined) if turn and turn.id == reply.turn else []
-    chats = [snap.messages[i] for i in ids if i in snap.messages and snap.messages[i].sender == USER]
-    if not chats:
-        chats = [x for x in snap.messages.values()
-                 if x.sender == USER and x.recipient == reply.sender and x.seq < reply.seq]
-    return chats[-1].body if chats else ""
+    """LAB-6 is no longer done: a worker's reply to the user's chat stays with the user, so nothing goes to the
+    critic and nothing waits for it. The command is refused, so an old dashboard button gets an answer."""
+    return _refuse(cmd, Refusal.NOT_POSSIBLE)
 
 
 class _Module:

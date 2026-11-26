@@ -18,13 +18,14 @@ PROMPTS = Path(__file__).with_name("prompts")
 CHANCES: Dict[TextKey, float] = {
     TextKey.REM_GOLDEN_USE: 0.25,
     TextKey.REM_GOLDEN_KEEP: 0.25,
-    TextKey.REM_MESSAGE_CRITIC: 0.6,  # also REM_OPEN_GATES
+    TextKey.REM_MESSAGE_CRITIC: 0.3,  # also REM_OPEN_GATES
     TextKey.REM_WORKERS: 0.15,
     TextKey.REM_UNWATCHED: 0.25,
-    TextKey.REM_DISCUSSION: 0.25,
+    TextKey.REM_DISCUSSION: 0.4,
     TextKey.REM_NIGHT: 0.25,
     TextKey.REM_ASK_AND_END: 0.1,
     TextKey.REM_WRITING: 0.25,
+    TextKey.REM_GOLDEN_SIZE: 0.25,  # only while the board stays over its limit
 }
 
 # messages that ask for nothing but a text to pass on
@@ -122,7 +123,7 @@ def _manager(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: D
         if me.state_edited:
             out.append(TextRef(TextKey.REM_STATE_EDITED, {"path": me.state_file}))
     over = g.chars > snap.settings.golden_limit > 0
-    if over and seen.get("golden_size") != "over":
+    if over and (seen.get("golden_size") != "over" or due[TextKey.REM_GOLDEN_SIZE]):  # once, then by chance while over
         out.append(TextRef(TextKey.REM_GOLDEN_SIZE, {"path": g.path, "chars": g.chars,
                                                      "limit": snap.settings.golden_limit}))
         given["golden_size"] = "over"
@@ -170,8 +171,7 @@ def _discussion(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen
             given["discussion"] = mark
         return True
     if seen.get("discussion"):
-        out.append(TextRef(TextKey.REM_DISCUSSION_OVER))
-        given["discussion"] = ""
+        given["discussion"] = ""  # gone: REM_DISCUSSION_OVER is no longer said
     return False
 
 

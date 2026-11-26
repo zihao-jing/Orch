@@ -22,13 +22,13 @@ class TestStart(unittest.TestCase):
         self.assertEqual((d.phase, d.by_terminal), ("open", False))
         assert_has(self, actions, CommandReply, ok=True)
 
-    def test_scenario_13_DISC_1_what_it_writes_to_others_is_a_draft(self):
+    def test_scenario_13_DISC_1_what_it_writes_to_others_is_blocked_and_dropped(self):
         s = snapshot(Discussion("critic"))
         s, ev = turn_ended(s, "critic", "Done.")
         actions = decide(module(), s, ev, prior=draft_sends())
-        assert_has(self, actions, Hold, message_id="d1", reason=HoldReason.DRAFT)
-        assert_has(self, actions, Hold, message_id="d2", reason=HoldReason.DRAFT)
-        self.assertEqual(len(find(actions, Hold)), 2)  # the user's message is no draft
+        assert_has(self, actions, Drop, message_id="d1", reason=DropReason.DRAFT_ENDED)
+        assert_has(self, actions, Drop, message_id="d2", reason=DropReason.DRAFT_ENDED)
+        assert_none(self, actions, Hold)  # blocked at once, not held
 
     def test_DISC_1_a_discussion_that_ended_while_the_turn_wrote_drops_its_drafts(self):
         s, ev = turn_ended(snapshot(), "critic", "Done.", draft=True)
@@ -44,7 +44,7 @@ class TestStart(unittest.TestCase):
         s = snapshot(Discussion("manager"))
         s, ev = turn_ended(s, "manager", "Plan.")
         send = Send(message("d1", "critic", "manager", status="waiting"))
-        assert_has(self, decide(module(), s, ev, prior=[send]), Hold, message_id="d1")
+        assert_has(self, decide(module(), s, ev, prior=[send]), Drop, message_id="d1", reason=DropReason.DRAFT_ENDED)
 
     def test_DISC_5_in_a_critic_discussion_nothing_reaches_the_manager(self):
         s = snapshot(Discussion("critic"))
@@ -121,10 +121,11 @@ class TestApply(unittest.TestCase):
         assert_none(self, actions, Hold)  # not a draft: the worker and the manager get their parts
         assert_has(self, actions, SetDiscussion, agent="critic", discussion=None)
 
-    def test_DISC_3_a_turn_that_began_before_applying_stays_a_draft(self):
+    def test_DISC_3_a_turn_that_began_before_applying_is_dropped(self):
         s, ev = turn_ended(self.applying(), "critic", "Late draft.")
         actions = decide(module(), s, ev, prior=[Send(message("a1", "worker-1", "critic", status="waiting"))])
-        assert_has(self, actions, Hold, message_id="a1")
+        assert_has(self, actions, Drop, message_id="a1", reason=DropReason.DRAFT_ENDED)
+        assert_none(self, actions, Hold)
         assert_none(self, actions, SetDiscussion)
 
     def test_DISC_3_drafts_still_held_when_the_apply_reply_ends_are_dropped(self):
@@ -200,7 +201,7 @@ class TestTerminalAndMilestones(unittest.TestCase):
         s = snapshot(Discussion("manager"), night=True)
         s, ev = turn_ended(s, "manager", "Plan.")
         assert_has(self, decide(module(), s, ev, prior=[Send(message("d1", "critic", "manager", status="waiting"))]),
-                   Hold, reason=HoldReason.DRAFT)
+                   Drop, reason=DropReason.DRAFT_ENDED)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Discussion with the manager or the critic (docs/redesign.md DISC-1 to 6). Pure: `decide(snapshot, event, prior)`.
 
-While a discussion is open the agent talks only to the user: whatever it writes to others is a draft and is held
-(DISC-1). Incoming messages are not touched: they enter its conversation at once (DISC-2). Applying sends one message,
+While a discussion is open the agent talks only to the user: whatever it writes to others is blocked at once and
+dropped (DISC-1). Incoming messages are not touched: they enter its conversation at once (DISC-2). Applying sends one message,
 when the agent has no reply under way; the reply to it follows the normal rules (DISC-3). Ending drops the drafts and
 never incoming messages (DISC-4). Questions, pauses and decisions of a draft are ignored by their owners through
 `Snapshot.drafting` (assumption 4). A chat with a worker is no discussion (DISC-6).
@@ -117,12 +117,12 @@ class _Module:
             return []
         out: List[C.Action] = []
         if snap.drafting(a.id):
-            # DISC-1, 5: what it wrote to others is a draft; with the discussion already over it is dropped at once
+            # DISC-1, 5: what it wrote to others during the discussion is dropped at once
             dropped = {x.message_id for x in prior if isinstance(x, C.Drop)}
             for x in prior:
                 m = x.message if isinstance(x, C.Send) else None
                 if m and m.sender == a.id and m.recipient not in (C.USER, a.id) and m.id not in dropped:
-                    out.append(C.Hold(m.id, HoldReason.DRAFT) if d else C.Drop(m.id, DropReason.DRAFT_ENDED))
+                    out.append(C.Drop(m.id, DropReason.DRAFT_ENDED))
         elif d and d.phase == P.APPLYING and d.apply_message in t.started_by + t.joined \
                 and t.status == C.TurnStatus.OK:
             # the reply to the apply message ended: the discussion is over, drafts that were still being written go

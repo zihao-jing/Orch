@@ -11,10 +11,10 @@ import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from .contracts import (
-    Action, Agent, AddWorker, CommandReply, Drop, DropReason, Event, JobsChoice, Lifecycle, Message, MessageStatus,
+    Action, Agent, AddWorker, CommandReply, Drop, DropReason, Event, JobsChoice, Lifecycle, MessageStatus,
     ORCH, Refusal, Role, SaveChoice, Send,
-    SetLifecycle, Snapshot, StopJob, Tell, TextKey, TextRef, Trigger, USER, WorkerAdd, WorkerClose, WorkerDelete,
-    WorkerReopen, new_id)
+    SetLifecycle, Snapshot, StopJob, TextKey, TextRef, USER, WorkerAdd, WorkerClose, WorkerDelete,
+    WorkerReopen)
 
 NAME = "workers"
 _ASK = {WorkerClose: TextKey.ASK_JOBS_CLOSE, WorkerDelete: TextKey.ASK_JOBS_DELETE}
@@ -107,20 +107,13 @@ def _end(snap: Snapshot, cmd: Any) -> List[Action]:
                              choices)]
     acts: List[Action] = []
     if running and cmd.jobs == JobsChoice.STOP:
-        acts += [StopJob(j.id) for j in running]
-        if snap.critic:
-            acts.append(Tell(_notice(cmd, snap.critic.id, a.id, [j.label or j.id for j in running])))
+        acts += [StopJob(j.id) for j in running]  # no notice to the critic: its reminder shows the worker as stopped
     acts.append(SetLifecycle(a.id, target))
     # WRK-4: what is still on its way to it is recorded, never sent; late results of it are not routed
     acts += [Drop(m.id, DropReason.WORKER_CLOSED) for m in snap.messages.values()
              if m.recipient == a.id and (m.open or m.status == MessageStatus.WAITING) and m.drop is None]
     acts.append(CommandReply(cmd.id))
     return acts
-
-
-def _notice(cmd: Any, critic: str, worker: str, jobs: List[str]) -> Message:
-    return Message(new_id(NAME, cmd), ORCH, critic, "", TextRef(TextKey.JOBS_STOPPED, {"worker": worker, "jobs": jobs}),
-                   False, Trigger.ORCH)
 
 
 def _reopen(snap: Snapshot, cmd: WorkerReopen) -> List[Action]:

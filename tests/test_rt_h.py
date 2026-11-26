@@ -396,10 +396,10 @@ class TestReminders(unittest.TestCase):
         self.assertIn("rem_discussion", got)
         self.assertEqual(given["discussion"], str(T0))
 
-    def test_DISC_4_an_agent_is_told_once_that_the_discussion_ended_unapplied(self):
+    def test_DISC_4_an_ended_discussion_is_no_longer_said_but_its_mark_is_reset(self):
         snap = give(seen_all(snapshot(BOARD)), "manager", discussion="1")
         got, given = keys(snap, message("x1", "manager"))
-        self.assertEqual((got, given), (["rem_discussion_over"], {"discussion": ""}))
+        self.assertEqual((got, given), ([], {"discussion": ""}))
         m = message("x1", "manager", key=TextKey.DISCUSSION_APPLY, values={"request": ""})
         self.assertEqual(keys(snap, m), ([], {"discussion": ""}))
 
@@ -414,6 +414,14 @@ class TestReminders(unittest.TestCase):
         give(snap, "manager", **keys(snap, message("x3", "manager"))[1])
         snap.golden = big
         self.assertEqual(keys(snap, message("x4", "manager"))[0], ["rem_golden_size"])
+
+    def test_golden_size_is_told_again_by_chance_while_it_stays_over(self):
+        snap = seen_all(snapshot(GoldenBoard("/run/golden.md", "d1", chars=9000)))
+        give(snap, "manager", golden_size="over")
+        self.assertNotIn("rem_golden_size", keys(snap, message("x1", "manager"))[0])
+        self.assertIn("rem_golden_size", keys(snap, message("x2", "manager"), on=True)[0])
+        snap.golden = GoldenBoard("/run/golden.md", "d1", chars=100)
+        self.assertNotIn("rem_golden_size", keys(snap, message("x3", "manager"), on=True)[0])
 
     def test_night_mode_start_and_end(self):
         snap = seen_all(snapshot(night=True))
@@ -441,7 +449,7 @@ class TestReminders(unittest.TestCase):
     def test_PRM_4_each_random_item_has_its_own_chance(self):
         snap = seen_all(snapshot(BOARD))
         got = [texts.render(snap, message(f"x{i}", "manager")).text for i in range(2000)]
-        for text, chance in (("Only <message", 0.6), ("Keep the golden board", 0.25), ("Be brief", 0.25)):
+        for text, chance in (("Only <message", 0.3), ("Keep the golden board", 0.25), ("Be brief", 0.25)):
             self.assertAlmostEqual(sum(text in x for x in got) / 2000, chance, delta=0.05, msg=text)
 
     def test_PRM_4_random_picks_come_from_the_given_source_and_repeat_on_replay(self):
