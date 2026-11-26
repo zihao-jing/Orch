@@ -206,6 +206,8 @@ class _Decide:
             return self.new_session(a, state)
         if error in (ErrorClass.BILLING, ErrorClass.MISSING_CLI):
             return self.choice_failed(a, state)
+        if why == FailCause.FROZEN.value:  # SIL-4: frozen again after its one restart: no retry here, a backup or failed
+            return self.choice_failed(a, state)
         if attempt >= tries and not self.s.running_jobs(a.id):  # REC-4: with a job, go on in the open program
             return self.choice_failed(a, state)
         if hold:

@@ -101,7 +101,7 @@ class TestJobs(RuntimeCase):
         self.advance(2)
         self.assertEqual(len(worker.starts), 2)
         self.assertEqual(self.state.agents[W1].status, C.AgentStatus.FAILED)
-        self.assert_received_once(CRITIC, key=C.TextKey.WORKER_FAILED, answered=False)
+        self.assert_received_once(CRITIC, key=C.TextKey.WORKER_FAILED)  # the critic answers it (REC-3: reassigns)
 
     def test_S17_SIL_4_long_tool_is_not_frozen(self):
         worker, _ = self.start_stalled_worker(tools=["slow tool"])
