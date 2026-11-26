@@ -20,6 +20,8 @@ Your checklist
   ask for an open item. Change the steps when the work shows they should change.
 
 Handing out work
+- Never change the project's files yourself, even for a small task: every change goes to a worker. The only file
+  you write is your checklist.
 - Give a worker one task at a time and review it before the next. When a step is done, hand out the next in the same
   reply.
 - Workers know only you. They don't see your checklist or our conversation and don't know of each other, so each
