@@ -61,3 +61,40 @@ and say so.
 
 For each scenario: passing, or failing with reproduction and suspected module. Test counts (rt_e2e and the full suite).
 Anything in 4.4 that you could not express with the mock (say what the mock lacks).
+
+### End-to-end results
+
+The tests use the default Engine with its real store and modules. Every scenario uses scripted input and persisted state. The adapter variants use the repository’s subprocess, Unix-socket, and loopback HTTP fixtures.
+
+| Scenario | Result |
+| --- | --- |
+| 1 · Concurrent worker reports | Pass. Two reports reach the writing critic together, are answered, and both workers receive follow-up instructions once. |
+| 2 · Job, guidance, and wake-up | Pass with the scripted runtime and the Claude, Codex, and OpenCode adapter fixtures. Codex receives the engine’s fallback because its CLI does not self-wake. |
+| 3 · Missing wake-up and lost job | Pass. Ending a job without an event produces one fallback. Removing a lost job from the CLI’s job list prompts a worker check. |
+| 4 · Silence | Pass. Three manager checks open a pause gate. Work after the pause resets the count. |
+| 5 · Silent critic and checklist review | Pass. The worker gets the instruction and the completed checklist reaches the manager for review. |
+| 6 · Questions and pause | Pass. The critic instruction is held, and answering the two questions and the pause separately sends one combined answer. |
+| 7 · Removed, broken, and closed targets | Pass. The critic gets the first label corrections, the manager sees the repeated broken label, and a closed target is rejected. |
+| 8 · Send-intent restart | Pass before and after the CLI accepts the saved send. The original message ID reaches the CLI once. |
+| 9 · Working-session restart | Pass with a running job and an in-flight turn on a backup backend. The original processes and sessions continue. |
+| 10 · Retries, backup, handover, and return | Pass. Transient errors reach the retry limit, the critic hands over to a new backup session, and a dashboard choice returns the worker to its saved main session. |
+| 11 · Billing and recovery | Pass for a single choice and for a main plus backup. Another worker continues, and a successful periodic smoke test clears the affected worker’s gate. |
+| 12 · Forced switch with restart | **Fails at opening and handover.** Pending, testing, confirming, done, and failed-smoke checkpoints pass. See reproductions below. |
+| 13 · Discussion | Pass. Incoming work reaches the critic during a draft, applying waits for the active reply, and ending without applying discards the draft. |
+| 14 · Terminal | Pass. Two instructions remain held until take-back and then reach the same worker session. |
+| 15 · Milestone changes | Pass for changing a milestone with an approval open, adding one after completion, and reopening a saved finished run. |
+| 16 · Worker close and reopen | Pass. Letting the job finish records its late result without forwarding it, and reopening retains the session. |
+| 17 · Frozen worker | **Fails on the second freeze.** The same-session restart and the long-tool and long-job controls pass. See reproduction below. |
+| 18 · Night mode | Pass. The recommendation is recorded, the critic receives the instruction, and no question gate opens. |
+
+- **S12 · Opening (MOD-6, REC-7).** Start a worker job, send a user message that starts an unfinished turn, then force a cross-backend switch. Restart immediately after the store saves `opening`, before its effect. The switch completes, but the new CLI never receives the unfinished user request. Suspect engine replay of the opening effect or recovery’s unfinished-turn bookkeeping.
+- **S12 · Handover (REC-7, REC-8).** Restart immediately after `handover` is saved for the same forced switch. The critic’s handover is processed and the switch enters `confirming`, but delivery reports “the CLI is not running” even after retry. Suspect engine reconnect selecting the main process or backend while the replacement session is awaiting confirmation.
+- **S17 · Second freeze (SIL-4).** Start a worker turn with no output, active tool, or job. Advance beyond 40 minutes and observe the restart and continuation in the same session. Keep the continuation silent and advance another 40 minutes. The worker remains `writing` instead of becoming `failed`. Suspect the supervisor’s second-timeout path or its handoff to recovery.
+
+`python3 tests/run.py rt_e2e` ran 36 tests. 33 passed and the three cases above failed. All three adapter tests ran and passed.
+
+The mock can model messages, terminal holds, and session identity. It does not launch an external terminal, so scenario 14 verifies the runtime take-back and queue release without observing a separate terminal process exit. Scenario 15 reopens a persisted finished runtime snapshot. Legacy-file conversion is outside that fixture.
+
+The one full run, `python3 tests/run.py`, ran 1,239 tests. 1,226 passed, 6 skipped, 6 failed, and 1 errored. It reproduced the three failures above and the three baseline cases in redesign §4.5. Its remaining failure was S11’s multi-choice fixture. Both choices could recover on the same periodic probe, making the expected primary selection timing-dependent. The fixture now keeps the backup unavailable for that probe. The related selection was rerun with the corrected fixture after the full run.
+
+An early adapter test reached the installed Codex binary because the engine re-resolved the stored choice and discarded its executable option. The final Claude and Codex tests use a restricted executable search path containing the corresponding repository fake and system utilities.

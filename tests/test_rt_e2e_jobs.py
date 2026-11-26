@@ -1,0 +1,116 @@
+from rt_e2e_helpers import C, CRITIC, QUIET, W1, W2, Reply, RuntimeCase, tell
+
+
+class TestJobs(RuntimeCase):
+    def test_S02_JOB_2_JOB_3_JOB_4_worker_receives_guidance_and_self_wakes(self):
+        self.cli(CRITIC).script(tell(W1, "Train.") + QUIET, tell(W1, "Keep the log.") + QUIET, QUIET)
+        worker = self.cli(W1).script(Reply("Training started.", jobs=["train"]), "Log kept.")
+        self.start()
+        self.assign()
+        self.advance()
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.WAITING_JOB)
+        self.assertEqual(self.state.turns[W1].ending, C.Ending.INTERMEDIATE)
+        self.advance()
+        self.advance()
+        self.assert_received_once(CRITIC, body="Training started.", key=C.TextKey.WORKER_INTERMEDIATE)
+        self.assert_received_once(W1, body="Keep the log.")
+        self.assertEqual(self.state.jobs[f"{W1}/train"].state, C.JobState.RUNNING)
+        worker.job_end("train", wake="Training complete.")
+        self.advance()
+        self.advance(2)
+        self.advance(61)
+        self.assert_received_once(CRITIC, body="Training complete.", key=C.TextKey.WORKER_FINAL)
+        self.assertFalse(self.incoming(W1, key=C.TextKey.JOB_WAKEUP))
+        self.assertTrue(self.state.jobs[f"{W1}/train"].woke)
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.IDLE)
+
+    def test_S03_JOB_5_ended_job_without_wake_gets_one_fallback(self):
+        worker = self.cli(W1).script(Reply("Started.", jobs=["train"]), "Result after fallback.")
+        self.cli(CRITIC).script(tell(W1, "Train.") + QUIET)
+        self.start()
+        self.assign()
+        self.advance(2)
+        worker.job_end("train", report=False)
+        self.advance(30)
+        self.assertFalse(self.incoming(W1, key=C.TextKey.JOB_WAKEUP))
+        self.advance(32)
+        self.advance(2)
+        self.advance(2)
+        self.advance(62)
+        self.assert_received_once(W1, key=C.TextKey.JOB_WAKEUP)
+        self.assert_received_once(CRITIC, body="Result after fallback.", key=C.TextKey.WORKER_FINAL)
+        self.assertTrue(self.state.jobs[f"{W1}/train"].woke)
+
+    def test_S03_JOB_6_JOB_7_lost_job_is_found_and_worker_checks_it(self):
+        worker = self.cli(W1).script(Reply("Started.", jobs=["train"]), "Checked for a partial result.")
+        self.cli(CRITIC).script(tell(W1, "Train.") + QUIET)
+        self.start()
+        self.assign()
+        self.advance(2)
+        worker.job_end("train", lost=True, report=False, forget=True)
+        for _ in range(4):
+            self.advance(61)
+        self.assert_received_once(W1, key=C.TextKey.JOB_LOST)
+        self.assert_received_once(CRITIC, body="Checked for a partial result.", key=C.TextKey.WORKER_FINAL)
+        self.assertEqual(self.state.jobs[f"{W1}/train"].state, C.JobState.LOST)
+
+    def test_S16_WRK_3_WRK_4_WRK_5_WRK_6_close_finish_late_result_reopen(self):
+        worker = self.cli(W1).script(Reply("Running audit.", jobs=["audit"]), "Back to work.")
+        self.cli(CRITIC).script(tell(W1, "Audit.") + QUIET)
+        self.start()
+        self.assign()
+        self.advance(2)
+        session = self.state.agents[W1].session.session_id
+        self.command(C.WorkerClose, W1)
+        self.assertEqual(self.state.agents[W1].lifecycle, C.Lifecycle.OPEN)
+        self.command(C.WorkerClose, W1, jobs=C.JobsChoice.FINISH)
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.CLOSED)
+        worker.job_end("audit", wake="Late audit result.")
+        self.advance(2)
+        self.assertEqual(self.state.turns[W1].text, "Late audit result.")
+        self.assertEqual(self.incoming(CRITIC, body="Late audit result."), [])
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.CLOSED)
+        received = list(self.cli(CRITIC).received)
+        self.command(C.WorkerReopen, W1)
+        self.advance(2)
+        self.assertEqual(self.cli(CRITIC).received, received)
+        self.chat(W1, "Resume with the same context.")
+        self.advance(2)
+        self.assert_received_once(W1, body="Resume with the same context.")
+        self.assertEqual(self.state.agents[W1].session.session_id, session)
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.IDLE)
+
+    def start_stalled_worker(self, *, tools=(), jobs=()):
+        worker = self.cli(W1)
+        worker.script(Reply("", ends=False, tools=list(tools), jobs=list(jobs)), Reply("", ends=False))
+        self.cli(CRITIC).script(tell(W1, "Process input.") + QUIET)
+        self.start()
+        self.assign()
+        self.advance()
+        self.assert_received_once(W1, body="Process input.")
+        return worker, self.state.agents[W1].session.session_id
+
+    def test_S17_SIL_4_frozen_worker_restarts_once(self):
+        worker, session = self.start_stalled_worker()
+        self.advance(2401)
+        self.advance(2)
+        self.assertEqual(len(worker.starts), 2)
+        self.assertEqual(worker.starts[-1][1].session_id, session)
+        self.assert_received_once(W1, key=C.TextKey.RESTART_CONTINUE)
+        self.advance(2401)
+        self.advance(2)
+        self.assertEqual(len(worker.starts), 2)
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.FAILED)
+        self.assert_received_once(CRITIC, key=C.TextKey.WORKER_FAILED, answered=False)
+
+    def test_S17_SIL_4_long_tool_is_not_frozen(self):
+        worker, _ = self.start_stalled_worker(tools=["slow tool"])
+        self.advance(2401)
+        self.assertEqual(len(worker.starts), 1)
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.WRITING)
+
+    def test_S17_SIL_4_long_job_is_not_frozen(self):
+        worker, _ = self.start_stalled_worker(jobs=["slow job"])
+        self.advance(2401)
+        self.assertEqual(len(worker.starts), 1)
+        self.assertEqual(self.state.agents[W1].status, C.AgentStatus.WRITING)
