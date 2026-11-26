@@ -12,11 +12,14 @@ request is small, a client that is slow or gone only ends its own thread.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import re
+import socket
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,7 +41,7 @@ TICK = 0.4  # seconds between two looks at the state and the live files
 LIVE_PAGE = 500  # most lines one /api/live answer holds
 MESSAGE_PAGE = 100
 _NAME = re.compile(r"^[\w][\w.-]{0,63}$")
-_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+_LOOPBACK = ("localhost", "127.0.0.1", "::1")
 _FLOW = {  # old runs: purpose -> (from role, to role) of the turn's output
     "plan": ("manager", "user"), "kickoff": ("manager", "critic"), "restart": ("manager", "critic"),
     "answer": ("manager", "critic"), "review": ("manager", "user"), "feedback": ("manager", "critic"),
@@ -67,6 +70,83 @@ def _epoch(v: Any) -> float:
         return 0.0
 
 
+def _host_ok(header: str) -> bool:
+    """A Host header, without its port, must be an IP literal, a loopback name, this computer's name or that name
+    plus ".local". Anything else (a DNS name pointing here) is refused."""
+    h = header.strip().lower()
+    if h.startswith("["):
+        h = h[1:].split("]", 1)[0]  # [::1] or [::1]:port
+    elif h.count(":") == 1:
+        h = h.split(":", 1)[0]  # name:port
+    if not h:
+        return False
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        pass
+    me = socket.gethostname().lower()
+    return h in (*_LOOPBACK, me, me + ".local")
+
+
+def _role(v: Any) -> Role:
+    """An old run's role; a role this code does not know is a worker."""
+    try:
+        return Role(str(v or "worker"))
+    except ValueError:
+        return Role.WORKER
+
+
+def _live_lines(path: Path, start: int) -> Tuple[List[Dict[str, Any]], int, bool]:
+    """Items of the complete lines from index `start` on (at most LIVE_PAGE), the index after the last line read,
+    and whether the file has fewer complete lines than `start`. Read line by line, so no size cap."""
+    items: List[Dict[str, Any]] = []
+    n, nxt = 0, start  # n: complete lines seen so far
+    try:
+        with path.open("rb") as fh:
+            for raw in fh:
+                if not raw.endswith(b"\n"):
+                    break  # the line being written
+                i, n = n, n + 1
+                if i < start:
+                    continue
+                if len(items) >= LIVE_PAGE:
+                    break
+                nxt = i + 1
+                item = _live_item(raw.decode("utf-8", "replace"))
+                if item:
+                    items.append({"n": i, **item})
+    except OSError:
+        pass
+    return items, nxt, n < start
+
+
+def _count_lines(path: Path, end: int) -> int:
+    """Newlines in the first `end` bytes of a file, counted in pieces (the text is not kept)."""
+    n, left = 0, end
+    with path.open("rb") as fh:
+        while left > 0:
+            piece = fh.read(min(left, 1 << 20))
+            if not piece:
+                break
+            n += piece.count(b"\n")
+            left -= len(piece)
+    return n
+
+
+def _chat_rows(rd: Path) -> List[Dict[str, Any]]:
+    """chat.jsonl of an old run, the lines of each conversation merged by id. Read only: no lease, no recovery."""
+    rows: Dict[str, Dict[str, Any]] = {}
+    for ln in _read(rd / "chat.jsonl").splitlines():
+        try:
+            c = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(c, dict):
+            rows.setdefault(str(c.get("id") or ""), {}).update(c)
+    return list(rows.values())
+
+
 class Board:
     """What the server shows. `runtime`: the engine (state, submit; optionally message(id) for one full message).
     `words`: renders a TextRef. `runs_root`: folder of <project>/<run>/ folders (old runs, UI-6)."""
@@ -76,7 +156,6 @@ class Board:
         self.runtime, self.run_dir, self.words, self.runs_root = runtime, Path(run_dir), words, runs_root
         self._lock = threading.Lock()
         self._at, self._state, self._hash, self.rev = -1e9, None, "", 0
-        self._ledger: Tuple[Any, List[Dict[str, Any]]] = (None, [])
         self.streams = threading.BoundedSemaphore(MAX_SSE)
 
     # -- state
@@ -90,7 +169,8 @@ class Board:
                     if self._state is None:
                         raise
                 else:
-                    h = hashlib.sha1(json.dumps(st, sort_keys=True, default=str).encode()).hexdigest()
+                    body = {k: v for k, v in st.items() if k != "now"}  # rev counts content changes only
+                    h = hashlib.sha1(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
                     if h != self._hash:
                         self._hash, self.rev = h, self.rev + 1
                     self._state = st
@@ -130,55 +210,30 @@ class Board:
         return 200, reply
 
     # -- messages
-    def _all_messages(self) -> List[Dict[str, Any]]:
-        """Ledger rows (older ones) and the state's messages, by seq, without `rendered`."""
-        rows: Dict[str, Dict[str, Any]] = {}
-        p = self.run_dir / "ledger.jsonl"  # CONTRACT: one to_dict(Message) per line; the store's ledger of old messages
-        try:
-            sig = (p.stat().st_mtime_ns, p.stat().st_size)
-        except OSError:
-            sig = None
-        if sig != self._ledger[0]:
-            old = []
-            for ln in (_read(p).splitlines() if sig else []):
-                try:
-                    d = json.loads(ln)
-                except ValueError:
-                    continue
-                if isinstance(d, dict) and d.get("id"):
-                    d.pop("rendered", None)
-                    old.append(d)
-            self._ledger = (sig, old)
-        for d in self._ledger[1]:
-            rows[d["id"]] = d
-        for d in (self.state().get("messages") or {}).values():
-            rows[d["id"]] = d
-        return sorted(rows.values(), key=lambda d: d.get("seq", 0))
-
     def messages(self, q: Dict[str, List[str]]) -> Dict[str, Any]:
+        """The engine's messages (runtime.messages), without `rendered`."""
         def one(k: str, default: str = "") -> str:
             return (q.get(k) or [default])[0]
         try:
-            before = int(one("before") or 1 << 60)
+            before = int(one("before") or 0)
             limit = max(1, min(int(one("limit") or MESSAGE_PAGE), 500))
         except ValueError:
-            before, limit = 1 << 60, MESSAGE_PAGE
-        text, agent = one("q").lower(), one("agent")
-        rows = [d for d in self._all_messages() if d.get("seq", 0) < before
-                and (not agent or agent in (d.get("sender"), d.get("recipient")))]
-        if text:
-            rows = [d for d in rows if text in str(d.get("body", "")).lower()
-                    or text in str(self.shown(d.get("text") or {}).get("shown", "")).lower()]
-        return {"messages": [self.shown(d) for d in rows[-limit:]], "more": len(rows) > limit}
+            before, limit = 0, MESSAGE_PAGE
+        rows, more = self.runtime.messages(before=before, limit=limit, q=one("q"), agent=one("agent"))
+        out = []
+        for m in rows:
+            d = to_dict(m)
+            d.pop("rendered", None)
+            out.append(self.shown(d))
+        return {"messages": out, "more": more}
 
     def message(self, mid: str) -> Optional[Dict[str, Any]]:
-        full = getattr(self.runtime, "message", None)  # CONTRACT: runtime.message(id) -> Message or None, with rendered
+        """One full message, with `rendered`: runtime.message(id); None if the engine does not know it."""
         try:
-            m = full(mid) if full else None
+            m = self.runtime.message(mid)
         except Exception:
-            m = None
-        d = to_dict(m) if m is not None else next((x for x in self._all_messages() if x.get("id") == mid), None)
-        return self.shown(d) if d else None
+            return None
+        return self.shown(to_dict(m)) if m is not None else None
 
     # -- files of the run
     def turn(self, tid: str, run: str = "") -> Dict[str, Any]:
@@ -193,40 +248,49 @@ class Board:
         return {"error": "not found"}
 
     def live(self, agent: str, start: int) -> Dict[str, Any]:
-        """Lines `start` on of live/<agent>.jsonl (complete lines only)."""
+        """Lines from index `start` on of live/<agent>.jsonl, each with its index `n`. A file with fewer lines than
+        `start` was replaced or cut: it is read from 0 and the answer says "reset"."""
         if not _NAME.match(agent):
             return {"items": [], "next": start}
-        lines = _read(self.run_dir / "live" / f"{agent}.jsonl").split("\n")[:-1]
-        items = [_live_item(ln) for ln in lines[start:start + LIVE_PAGE]]
-        return {"items": [i for i in items if i], "next": min(len(lines), start + LIVE_PAGE)}
+        path = self.run_dir / "live" / f"{agent}.jsonl"
+        items, nxt, short = _live_lines(path, start)
+        if short:
+            items, nxt, _ = _live_lines(path, 0)
+            return {"items": items, "next": nxt, "reset": True}
+        return {"items": items, "next": nxt}
 
     def text_file(self, path: str) -> Dict[str, Any]:
         text = _read(Path(path)) if path else ""
         return {"text": text, "digest": text_digest(text), "path": path}
 
     def golden(self) -> Dict[str, Any]:
-        return self.text_file(((self.state().get("golden") or {}).get("path")) or "")
+        """The golden board; a relative path is taken from the run's workspace, as the store does."""
+        st = self.state()
+        p = str((st.get("golden") or {}).get("path") or "")
+        ws = str((st.get("run") or {}).get("workspace") or "")
+        return self.text_file(str(Path(ws, p)) if p else "")
 
     def audit_notes(self) -> Dict[str, Any]:
-        """CONTRACT: <folder of run.decisions_path, else the run folder>/audit-decisions.md."""
-        dp = (self.state().get("run") or {}).get("decisions_path")
-        return self.text_file(str((Path(dp).parent if dp else self.run_dir) / "audit-decisions.md"))
+        """The file run.audit_notes_path names (the one the auditor reads); nothing if the run names none."""
+        p = str((self.state().get("run") or {}).get("audit_notes_path") or "")
+        return self.text_file(p) if p else {"text": "", "digest": "", "path": ""}
 
     def audit(self) -> Dict[str, Any]:
-        """CONTRACT: the newest audits/*.md of the run folder; state["audit_running"] says it is under way."""
+        """The reply part of the newest audits/*.md of the run folder, redacted; run.audit_running: one is under way."""
         files = sorted((self.run_dir / "audits").glob("*.md"))
-        return {"report": _read(files[-1])[:60000] if files else "", "running": bool(self.state().get("audit_running"))}
+        text = _read(files[-1]) if files else ""
+        reply = text.split("## Reply\n\n", 1)[1] if "## Reply\n\n" in text else ""
+        reply = re.split(r"\n## stderr\n", reply, 1)[0].strip()
+        running = bool((self.state().get("run") or {}).get("audit_running"))
+        return {"report": redact(reply)[:60000], "running": running}
 
     # -- runs (UI-6)
     def runs(self) -> Dict[str, Any]:
         out = []
         for key, rd in self._run_folders().items():
             st = read_json(rd / "state.json", {}) or {}
-            old = "agents" not in st
-            run = st if old else (st.get("run") or {})
-            status = str(st.get("status") or "") if old else ("finished" if st.get("finished") else "running")
-            out.append({"id": key, "project": key.split("/")[0], "status": status, "old": old,
-                        "started": _epoch(run.get("started_at" if old else "started"))})
+            out.append({"id": key, "project": key.split("/")[0], "status": str(st.get("status") or ""),
+                        "old": "runtime" not in st, "started": _epoch(st.get("started_at"))})
         return {"runs": sorted(out, key=lambda r: -r["started"])}
 
     def run(self, key: str) -> Dict[str, Any]:
@@ -234,14 +298,13 @@ class Board:
         if rd is None:
             return {"error": "not found"}
         st = read_json(rd / "state.json", {}) or {}
-        if "agents" in st:
-            try:
-                d = public_state(from_dict(Snapshot, st))
-            except (ValueError, TypeError, KeyError, AttributeError):
-                return {"error": "unreadable run"}
-        else:
-            d = public_state(_old_snapshot(rd, st))
-        return {**self.shown(d), "old": "agents" not in st, "rev": 0}
+        old = "runtime" not in st  # a run saved before the runtime: read from its turn files
+        try:
+            snap = _old_snapshot(rd, st) if old else from_dict(Snapshot, st["runtime"]["snap"])
+            d = public_state(snap)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return {"error": "unreadable run"}
+        return {**self.shown(d), "old": old, "rev": 0}
 
     def _run_folders(self) -> Dict[str, Path]:
         found = {}
@@ -267,19 +330,29 @@ def _old_snapshot(rd: Path, st: Dict[str, Any]) -> Snapshot:
     """An old run (rounds/r*/t*.json) as a snapshot: its agents closed, one message per turn output (UI-6)."""
     agents: Dict[str, Agent] = {}
     messages: Dict[str, Message] = {}
-    for p in sorted(rd.glob("rounds/r*/t*.json")):
-        t = read_json(p) or {}
-        aid, role = str(t.get("agent") or ""), Role(str(t.get("role") or "worker"))
-        if not aid or not t.get("turn_id"):
-            continue
+    turns = [t for t in (read_json(p) for p in sorted(rd.glob("rounds/r*/t*.json"))) if isinstance(t, dict)]
+    turns = sorted((t for t in turns if t.get("agent") and t.get("turn_id")),
+                   key=lambda t: _epoch(t.get("started_at")))  # by time, not by file name
+    for t in turns:
+        aid, role = str(t["agent"]), _role(t.get("role"))
         a = agents.setdefault(aid, Agent(aid, role=role, display=aid, lifecycle=Lifecycle.CLOSED,
                                          status=AgentStatus.CLOSED))
         a.actual_model = str((t.get("meta") or {}).get("model") or a.actual_model)
         src, dst = _FLOW.get(str(t.get("purpose")), (role.value, "user"))
         messages[t["turn_id"]] = Message(
             t["turn_id"], sender=aid, recipient=dst if src == role.value else src, body=str(t.get("output") or ""),
-            needs_answer=False, turn=t["turn_id"], created=_epoch(t.get("started_at")), seq=len(messages) + 1,
+            needs_answer=False, turn=t["turn_id"], created=_epoch(t.get("started_at")), seq=0,
             status=MessageStatus.ANSWERED)
+    for c in _chat_rows(rd):  # the board chat, merged in by id
+        cid, peer = str(c.get("id") or ""), str(c.get("who") or c.get("with") or "")
+        if not cid or c.get("status") == "running" or c.get("role") not in ("human", "agent", "manager"):
+            continue
+        sender, recipient = ("user", peer) if c.get("role") == "human" else (peer, "user")
+        messages[cid] = Message(cid, sender=sender, recipient=recipient, body=str(c.get("text") or ""),
+                                needs_answer=False, turn="", created=_epoch(c.get("ts")), seq=0,
+                                status=MessageStatus.ANSWERED)
+    ordered = sorted(messages.values(), key=lambda m: m.created)  # the sort is stable: ties keep their order
+    messages = {m.id: replace(m, seq=i) for i, m in enumerate(ordered, 1)}
     run = RunInfo(id=str(st.get("run_id") or rd.name), project=str(st.get("monitor") or ""),
                   goal=str(st.get("goal") or ""), started=_epoch(st.get("started_at")))
     return Snapshot(now=_epoch(st.get("updated_at")), run=run, agents=agents, messages=messages, finished=True)
@@ -294,9 +367,7 @@ class _Server(ThreadingHTTPServer):
         pass  # a client that went away mid-request; the details could hold anything
 
 
-def _handler(board: Board, bind: str):
-    loopback = bind in _LOOPBACK
-
+def _handler(board: Board):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         timeout = 15  # a client that stops sending or reading ends its own thread
@@ -318,13 +389,13 @@ def _handler(board: Board, bind: str):
             self.send(code, json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"), "application/json")
 
         def allowed(self) -> bool:
-            """No other web page may drive the dashboard: on loopback only loopback names are served (DNS
-            rebinding), and a request from another origin is refused."""
-            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
-            if loopback and host not in _LOOPBACK:
+            """No other web page may drive the dashboard: the Host must name this computer or loopback (DNS
+            rebinding), on every bind, and a request from another origin is refused."""
+            host = self.headers.get("Host") or ""
+            if not _host_ok(host):
                 return False
             origin = self.headers.get("Origin")
-            return not origin or urlparse(origin).netloc.lower() == (self.headers.get("Host") or "").lower()
+            return not origin or urlparse(origin).netloc.lower() == host.lower()
 
         def do_GET(self) -> None:
             if not self.allowed():
@@ -414,7 +485,7 @@ def _handler(board: Board, bind: str):
                     self.send_header(k, v)
                 self.end_headers()
                 self.close_connection = True
-                offsets: Dict[str, int] = {}
+                offsets: Dict[str, Any] = {}
                 rev, started, ping = -1, time.monotonic(), time.monotonic()
                 while time.monotonic() - started < SSE_MAX_AGE:
                     out = b""
@@ -437,26 +508,38 @@ def _handler(board: Board, bind: str):
             finally:
                 board.streams.release()
 
-        def live_lines(self, offsets: Dict[str, int]) -> bytes:
-            """New complete lines of live/*.jsonl since this stream began (the first look only notes the ends)."""
-            first, out = not offsets and "_" not in offsets, []
-            offsets.setdefault("_", 0)
+        def live_lines(self, offsets: Dict[str, Any]) -> bytes:
+            """New complete lines of live/*.jsonl since the last look, each as a `live` event with its index `n`.
+            The first look only notes each file's size (earlier lines come from /api/live). A file that became
+            shorter was replaced or cut: it is read again from 0. A file's line count is taken when its first new
+            line is read, by counting the newlines before it (in pieces, the text is not kept)."""
+            first = "_" not in offsets
+            offsets.setdefault("_", True)
+            out = []
             for f in sorted((board.run_dir / "live").glob("*.jsonl")):
                 try:
                     size = f.stat().st_size
-                    off = offsets.get(f.name, f.read_bytes().rfind(b"\n") + 1 if first else 0)
+                    if f.name not in offsets:
+                        offsets[f.name] = (size, None) if first else (0, 0)
+                    off, n = offsets[f.name]
+                    if size < off:
+                        off, n = 0, 0
                     if size > off:
                         with f.open("rb") as fh:
                             fh.seek(off)
                             chunk = fh.read(min(size - off, MAX_FILE))
                         cut = chunk.rfind(b"\n") + 1
+                        if cut:
+                            if n is None:
+                                n = _count_lines(f, off)
+                            for ln in chunk[:cut].split(b"\n")[:-1]:
+                                item = _live_item(ln.decode("utf-8", "replace"))
+                                if item:
+                                    out.append(b"event: live\ndata: " + json.dumps(
+                                        {"agent": f.stem, "n": n, **item}, ensure_ascii=False).encode() + b"\n\n")
+                                n += 1
                         off += cut
-                        for ln in chunk[:cut].decode("utf-8", "replace").splitlines():
-                            item = _live_item(ln)
-                            if item:
-                                out.append(b"event: live\ndata: " + json.dumps(
-                                    {"agent": f.stem, **item}, ensure_ascii=False).encode() + b"\n\n")
-                    offsets[f.name] = off if size >= off else 0
+                    offsets[f.name] = (off, n)
                 except OSError:
                     continue
             return b"".join(out)
@@ -470,7 +553,7 @@ def serve(board: Board, host: str = "127.0.0.1", port: int = 8765) -> Tuple[Thre
     last: Optional[Exception] = None
     for p in ([0] if port == 0 else range(port, port + 20)):
         try:
-            srv = _Server((host, p), _handler(board, host))
+            srv = _Server((host, p), _handler(board))
             break
         except OSError as e:
             last = e
@@ -482,7 +565,6 @@ def serve(board: Board, host: str = "127.0.0.1", port: int = 8765) -> Tuple[Thre
 
 
 def _lan_ip() -> str:
-    import socket
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))  # no packet is sent; this only picks the outgoing interface
