@@ -123,6 +123,7 @@ _SINGLE = {C.Checklist: "checklist", C.GoldenBoard: "golden", C.Settings: "setti
 def snapshot(*records: Any, workers: int = 1, now: float = T0, **kw: Any) -> Snapshot:
     """Manager, critic and `workers` workers, all idle, plus the given records, each put where it belongs (an Agent
     replaces the one with its id). Without a Milestone in `records`, m1 is the current one; milestones=[]: none."""
+    kw.setdefault("settings", C.Settings(silence_after=5.0))  # the module tests' timings, not the default's
     s = C.Snapshot(now=now, orch_started=now - 3600, **kw)
     for a in [agent("manager"), agent("critic")] + [agent(f"worker-{i + 1}") for i in range(workers)]:
         s.agents.setdefault(a.id, a)

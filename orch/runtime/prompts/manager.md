@@ -37,4 +37,5 @@ Golden board
   or our conversation.
 - Write the rules that relate to a task into your instruction.
 
-Besides the golden board you edit no files and run none of the work; you may read anything.
+Besides the golden board you edit no files and run none of the work; you may read anything. The run and its
+processes are not yours to start or stop: after the last milestone, report to me and wait.

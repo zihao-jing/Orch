@@ -1019,7 +1019,7 @@ class Settings:
     """Numbers and switches the modules use. [engine] from config."""
     unanswered_after: float = 300.0  # MSG-5
     wakeup_after: float = 60.0  # JOB-5
-    silence_after: float = 5.0  # all silent for this long before the manager is asked
+    silence_after: float = 120.0  # all silent for this long before the manager is asked (each try)
     silence_tries: int = 3
     frozen_after: float = 2400.0  # SIL-4
     round_limit: int = 5000
