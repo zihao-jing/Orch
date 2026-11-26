@@ -113,8 +113,14 @@ Recent activity of an agent, the checklist, earlier runs, audit records and the 
   edge at 360 px.
 - A team row: a status dot (writing pulses, waiting for a job is amber, failed is red, closed is grey), the name,
   the role only when it differs from the name, the short model name (`deepseek-v4-pro`, not the full path; the
-  backups only in the model window), last activity. Talk and Model as small buttons; Close, Delete, Stop and the
-  terminal command in that agent's "⋯" menu. Delete is red only inside the menu.
+  backups only in the model window), last activity. Talk and Model as small buttons; Close, Delete and Stop in that agent's "⋯"
+  menu. Delete is red only inside the menu.
+- The terminal command takes no line of its own: one small underlined link-style button, "Open in terminal", that
+  copies `orch terminal <project> <agent>` and says so in a toast ("Copied: orch terminal s-live manager. Paste it
+  in a terminal."). Its tooltip shows the command. `test_UI_3_terminal_command_is_shown_to_copy` keeps passing, so
+  change it only as far as the command now sits in the tooltip and the copied text.
+- The same rule for every small extra: a line of its own only when it carries something to read, otherwise a link-style
+  button.
 - *Needs you* appears only when a gate is open or a question waits for the user: one card at the top, its options as
   buttons. Notices (milestones done, a model switched) become a toast plus a marked row in the messages, not yellow
   banners. Keep the connection-lost banner.
