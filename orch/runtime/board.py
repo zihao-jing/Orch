@@ -19,6 +19,7 @@ import re
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import replace
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -147,6 +148,26 @@ def _chat_rows(rd: Path) -> List[Dict[str, Any]]:
     return list(rows.values())
 
 
+def _message_level(m: Message, roles: Dict[str, str]) -> str:
+    parties = (roles.get(m.sender, m.sender), roles.get(m.recipient, m.recipient))
+    if "monitor" in parties:
+        return "monitor"
+    if "user" in parties or ("orch" in parties and "manager" in parties):
+        return "you"
+    if "worker" in parties:
+        return "workers"
+    return "critic" if "critic" in parties else "you"
+
+
+def _orch_note(m: Message) -> bool:
+    key = str(m.text.key) if m.text else ""
+    return m.sender == "orch" and (key.startswith(("note_", "rem_")) or key in {
+        "silence_check", "gate_answers", "direct_message_notice", "checklist_unreadable",
+        "job_wakeup", "job_lost", "job_no_progress", "monitor_check", "monitor_report",
+        "nobody_watches", "review_rubric_missing",
+    })
+
+
 class Board:
     """What the server shows. `runtime`: the engine (state, submit; optionally message(id) for one full message).
     `words`: renders a TextRef. `runs_root`: folder of <project>/<run>/ folders (old runs, UI-6)."""
@@ -211,7 +232,7 @@ class Board:
 
     # -- messages
     def messages(self, q: Dict[str, List[str]]) -> Dict[str, Any]:
-        """The engine's messages (runtime.messages), without `rendered`."""
+        """Paged messages without rendered inputs. The timeline also needs count and turn metadata."""
         def one(k: str, default: str = "") -> str:
             return (q.get(k) or [default])[0]
         try:
@@ -219,13 +240,61 @@ class Board:
             limit = max(1, min(int(one("limit") or MESSAGE_PAGE), 500))
         except ValueError:
             before, limit = 0, MESSAGE_PAGE
-        rows, more = self.runtime.messages(before=before, limit=limit, q=one("q"), agent=one("agent"))
-        out = []
-        for m in rows:
-            d = to_dict(m)
-            d.pop("rendered", None)
-            out.append(self.shown(d))
-        return {"messages": out, "more": more}
+        search, agent = one("q"), one("agent")
+        if one("timeline") != "1":
+            rows, more = self.runtime.messages(before=before, limit=limit, q=search, agent=agent)
+            return {"messages": [self._message_row(m) for m in rows], "more": more}
+
+        supported = {"you", "critic", "workers", "monitor"}
+        levels = set(one("levels", "you,critic,workers,monitor").split(",")) & supported
+        notes = one("notes") != "0"
+        roles = {aid: a.get("role", "") for aid, a in (self.state().get("agents") or {}).items()}
+        selected, total = [], 0
+        cursor = before
+        while levels:
+            batch, more = self.runtime.messages(before=cursor, limit=500, q=search, agent=agent)
+            for m in sorted(batch, key=lambda item: item.seq, reverse=True):
+                if _message_level(m, roles) not in levels or (not notes and _orch_note(m)):
+                    continue
+                total += 1
+                if len(selected) < limit:
+                    selected.append(m)
+            if not batch or not more:
+                break
+            next_cursor = min(m.seq for m in batch)
+            if next_cursor <= 0 or (cursor and next_cursor >= cursor):
+                break
+            cursor = next_cursor
+
+        turns = {}
+        rows = []
+        for m in reversed(selected):
+            row = self._message_row(m)
+            if _orch_note(m):
+                row["orch_note"] = True
+            if m.turn:
+                if m.turn not in turns:
+                    turns[m.turn] = self._turn_summary(m.turn)
+                if turns[m.turn]:
+                    row["written_by"] = turns[m.turn]
+            rows.append(row)
+        return {"messages": rows, "more": total > len(rows), "remaining": total - len(rows)}
+
+    def _message_row(self, m: Message) -> Dict[str, Any]:
+        d = to_dict(m)
+        d.pop("rendered", None)
+        return self.shown(d)
+
+    def _turn_summary(self, tid: str) -> Dict[str, Any]:
+        match = re.fullmatch(r"(r[0-9]+)-(t[0-9]+-[A-Za-z0-9_-]+)", tid)
+        if not match:
+            return {}
+        folder, name = match.groups()
+        t = read_json(self.run_dir / "rounds" / folder / (name + ".json")) or {}
+        if t.get("turn_id") != tid:
+            return {}
+        return {"model": t.get("model") or "", "input_chars": len(t.get("input") or ""),
+                "output_chars": len(t.get("output") or "")}
 
     def message(self, mid: str) -> Optional[Dict[str, Any]]:
         """One full message, with `rendered`: runtime.message(id); None if the engine does not know it."""
@@ -247,12 +316,28 @@ class Board:
                 return out
         return {"error": "not found"}
 
-    def live(self, agent: str, start: int) -> Dict[str, Any]:
+    def live(self, agent: str, start: int, tail: int = 0, before: Optional[int] = None) -> Dict[str, Any]:
         """Lines from index `start` on of live/<agent>.jsonl, each with its index `n`. A file with fewer lines than
         `start` was replaced or cut: it is read from 0 and the answer says "reset"."""
         if not _NAME.match(agent):
             return {"items": [], "next": start}
         path = self.run_dir / "live" / f"{agent}.jsonl"
+        if tail:
+            last = deque(maxlen=min(LIVE_PAGE, tail))
+            total, nxt = 0, 0
+            try:
+                with path.open("rb") as fh:
+                    for i, raw in enumerate(fh):
+                        if (before is not None and i >= before) or not raw.endswith(b"\n"):
+                            break
+                        nxt = i + 1
+                        item = _live_item(raw.decode("utf-8", "replace"))
+                        if item:
+                            total += 1
+                            last.append({"n": i, **item})
+            except OSError:
+                pass
+            return {"items": list(last), "next": nxt, "more": total > len(last)}
         items, nxt, short = _live_lines(path, start)
         if short:
             items, nxt, _ = _live_lines(path, 0)
@@ -275,14 +360,26 @@ class Board:
         p = str((self.state().get("run") or {}).get("audit_notes_path") or "")
         return self.text_file(p) if p else {"text": "", "digest": "", "path": ""}
 
-    def audit(self) -> Dict[str, Any]:
-        """The reply part of the newest audits/*.md of the run folder, redacted; run.audit_running: one is under way."""
-        files = sorted((self.run_dir / "audits").glob("*.md"))
-        text = _read(files[-1]) if files else ""
+    def audit(self, record: str = "", history: bool = False) -> Dict[str, Any]:
+        """Read one audit reply, with an index so older replies can be opened on demand."""
+        files = sorted((self.run_dir / "audits").glob("*.md"), reverse=True)
+        selected = next((p for p in files if p.stem == record), None) if record else (files[0] if files else None)
+        if record and selected is None:
+            return {"error": "not found"}
+        text = _read(selected) if selected else ""
         reply = text.split("## Reply\n\n", 1)[1] if "## Reply\n\n" in text else ""
         reply = re.split(r"\n## stderr\n", reply, 1)[0].strip()
         running = bool((self.state().get("run") or {}).get("audit_running"))
-        return {"report": redact(reply)[:60000], "running": running}
+        result = {"report": redact(reply)[:60000], "running": running}
+        if history and not record:
+            records = []
+            for p in files:
+                try:
+                    records.append({"id": p.stem, "at": p.stat().st_mtime})
+                except OSError:
+                    continue
+            result["records"] = records
+        return result
 
     # -- runs (UI-6)
     def runs(self) -> Dict[str, Any]:
@@ -475,7 +572,9 @@ def _handler(board: Board):
                     t = board.turn(one("id"), one("run"))
                     self.js(t, 404 if "error" in t else 200)
                 elif api == "live":
-                    self.js(board.live(one("agent"), max(0, int(one("from") or 0))))
+                    before = one("before")
+                    self.js(board.live(one("agent"), max(0, int(one("from") or 0)), max(0, int(one("tail") or 0)),
+                                       max(0, int(before)) if before else None))
                 elif api == "events":
                     self.events()
                 elif api == "golden":
@@ -483,7 +582,8 @@ def _handler(board: Board):
                 elif api == "audit_notes":
                     self.js(board.audit_notes())
                 elif api == "audit":
-                    self.js(board.audit())
+                    audit = board.audit(one("id"), one("history") == "1")
+                    self.js(audit, 404 if "error" in audit else 200)
                 elif api == "runs":
                     self.js(board.runs())
                 elif api == "run":

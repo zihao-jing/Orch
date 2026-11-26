@@ -93,6 +93,62 @@
     return m.sender === "orch" && m.recipient === "user" && !!(m.text && NOTE_KEYS.indexOf(m.text.key) >= 0);
   }
 
+  const LEVELS = {
+    you: ["You ↔ Manager", "Messages to or from you, and between Orch and the manager."],
+    critic: ["Manager ↔ Critic", "Messages between the manager and critic, and Orch messages to the critic."],
+    workers: ["Critic ↔ Workers", "Messages involving workers, including instructions from Orch."],
+    monitor: ["Monitor", "Messages to or from the monitor."],
+  };
+  const MESSAGE_PAGE = 30;
+  const LIST_PAGE = 15;
+  function messageLevel(m, agents) {
+    const role = id => (agents[id] || {}).role || id;
+    const parties = [role(m.sender), role(m.recipient)];
+    if (parties.includes("monitor")) return "monitor";
+    if (parties.includes("user") || (parties.includes("orch") && parties.includes("manager"))) return "you";
+    if (parties.includes("worker")) return "workers";
+    return parties.includes("critic") ? "critic" : "you";
+  }
+
+  function latest(list, limit = LIST_PAGE) {
+    return { rows: limit > 0 ? list.slice(-limit) : [], remaining: Math.max(0, list.length - limit) };
+  }
+
+  function pageQuery({ limit = MESSAGE_PAGE, before = 0, q = "", agent = "", levels = Object.keys(LEVELS), notes = true }) {
+    const p = new URLSearchParams({ timeline: "1", limit: String(limit), levels: levels.join(",") || "none", notes: notes ? "1" : "0" });
+    if (before > 0) p.set("before", String(before));
+    if (q.trim()) p.set("q", q.trim());
+    if (agent) p.set("agent", agent);
+    return p.toString();
+  }
+
+  function shortModel(model) { return String(model || "").trim().split("/").pop(); }
+
+  function characterSize(n) {
+    return n < 1000 ? String(n) : (n / 1000).toFixed(n < 10000 ? 1 : 0).replace(/\.0$/, "") + "k";
+  }
+
+  function messageException(m) {
+    if (m.drop) return "Dropped";
+    if (m.status === "waiting" && (m.holds || []).length) return "Held";
+    if (m.status === "waiting" || m.status === "failed") return messageStatus(m);
+    return "";
+  }
+
+  function awaitsAnswer(m) {
+    return m.needs_answer && !m.drop && (m.status === "waiting" || m.status === "delivered");
+  }
+
+  function statusHint(m) {
+    if (m.status === "answered" && !m.drop) return "Answered. The recipient replied to this message.";
+    if (m.status === "delivered" && !m.drop) {
+      return "Delivered. This message reached the recipient." + (awaitsAnswer(m) ? " Waiting for a reply." : "");
+    }
+    if (m.status === "waiting" && !(m.holds || []).length) return "Waiting. This message is queued to be sent.";
+    if (m.status === "failed" && !m.drop) return "Failed. Orch could not send this message.";
+    return messageStatus(m);
+  }
+
   // one line about an agent beyond its status
   function agentTags(a, snap) {
     const t = [];
@@ -100,7 +156,10 @@
     if (a.retry) t.push("trying again" + (a.retry.until ? " at " + clock(a.retry.until) : ""));
     if (a.switch) t.push(a.switch.step === "pending" ? "switch pending" : "switching model");
     if (snap && snap.terminals && snap.terminals[a.id]) t.push("terminal open");
-    if (snap && snap.discussions && snap.discussions[a.id]) t.push("discussing");
+    const discussion = snap && (snap.discussions || {})[a.id];
+    if (discussion) {
+      t.push(discussion.by_terminal && !(snap.terminals || {})[a.id] ? "Terminal discussion pending" : "discussing");
+    }
     return t;
   }
 
@@ -135,9 +194,9 @@
   }
 
   // LAB-6: the latest reply of a worker that went to the user can be sent on to the critic
-  function sendableToCritic(messages) {
+  function sendableToCritic(messages, agents = {}) {
     const last = {};
-    messages.forEach(m => { if (m.recipient === "user" && /^worker/.test(m.sender || "") && !m.drop) last[m.sender] = m.id; });
+    messages.forEach(m => { if (m.recipient === "user" && ((agents[m.sender] || {}).role === "worker" || (!agents[m.sender] && /^worker/.test(m.sender || ""))) && !m.drop) last[m.sender] = m.id; });
     return Object.keys(last).map(k => last[k]);
   }
 
@@ -237,7 +296,8 @@
     STATUS, GATE_KIND, MS_STATUS, NOTE_KEYS, plainName, agentName, clock, stamp, ago, duration, shownOf, messageText,
     messageStatus, messageTone, isNotice, agentTags, jobLine, workerActions, sortedMessages, mergeMessages, talkLog,
     sendableToCritic, openGates, answeredWaiting, gateAnswer, newId, backoff, applyChoice, efforts, markdown, preview,
-    progress,
+    progress, LEVELS, MESSAGE_PAGE, LIST_PAGE, messageLevel, latest, pageQuery, shortModel, characterSize,
+    messageException, awaitsAnswer, statusHint,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.OrchLogic = api;

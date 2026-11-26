@@ -3,39 +3,62 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Orch board</title>
+<title>Orch dashboard</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<a class="skip" href="#needs">Skip to what needs you</a>
+<a class="skip" href="#msgs-h">Skip to messages</a>
 <div class="wrap">
  <header>
-  <h1 id="title">Orch board</h1>
-  <span id="runstate"></span>
-  <span class="grow"></span>
-  <button class="sm" id="talkbtn" type="button" aria-haspopup="dialog">Talk<span id="talkbadge"></span></button>
-  <button class="sm" id="nightbtn" type="button" aria-pressed="false" title="Night mode: the manager answers questions by itself and its choices are recorded">Night mode</button>
-  <button class="sm" id="stopbtn" type="button">Stop agents</button>
-  <button class="sm" id="runsbtn" type="button">Earlier runs</button>
-  <button class="sm" id="morebtn" type="button" aria-haspopup="dialog">More</button>
-  <button class="sm" id="themebtn" type="button" title="Light or dark">Light/dark</button>
+  <div class="run-heading"><h1 id="title">Orch dashboard</h1><span id="runstate"></span></div>
+  <div class="header-actions" id="header-actions">
+   <button class="pri" id="talkbtn" type="button" aria-haspopup="dialog" aria-expanded="false">Talk<span id="talkbadge"></span></button>
+   <button class="icon" id="themebtn" type="button" title="Switch between light and dark" aria-label="Switch between light and dark">◐</button>
+   <details class="menu" id="run-menu">
+    <summary class="icon" aria-label="Run actions" title="Run actions">⋯</summary>
+    <div class="menu-items">
+     <button id="nightbtn" type="button" aria-pressed="false" title="The manager answers questions on its own and records its choices">Night mode</button>
+     <button id="runsbtn" type="button" title="Read the records of previous runs">Earlier runs</button>
+     <button id="morebtn" type="button" aria-haspopup="dialog" title="Update, restart, or close Orch">More</button>
+     <button id="stopbtn" type="button" class="danger-text">Stop agents</button>
+    </div>
+   </details>
+  </div>
  </header>
  <div id="lost" class="banner lost" role="alert" hidden>Connection lost. Trying again&hellip;</div>
  <div id="oldnote" class="banner info" hidden></div>
- <div id="notices" role="status"></div>
  <main>
   <section id="needs" class="card needs" aria-label="Needs you" hidden></section>
-  <section class="card" aria-labelledby="team-h"><h2 id="team-h">Team</h2><div id="team" class="team"></div>
-   <div class="acts" style="margin-top:12px"><button type="button" id="addworker">Add worker</button></div></section>
-  <section class="card" aria-labelledby="prog-h"><div class="acts" style="margin-bottom:10px"><h2 id="prog-h" style="margin:0">Progress</h2><span class="grow"></span><button type="button" class="sm" id="changems">Change milestones</button></div>
-   <div id="progress"></div></section>
-  <section class="card" aria-labelledby="msgs-h"><h2 id="msgs-h">Messages</h2>
-   <div class="mfilter"><input type="search" id="msearch" placeholder="Search messages" aria-label="Search messages">
-    <select id="mwho" class="sm" aria-label="Show messages of"></select></div>
-   <div class="acts"><button type="button" class="sm" id="older" hidden>Older messages</button></div><div id="messages"></div></section>
-  <details class="card" id="goldcard"><summary><h2>Golden board</h2></summary><div id="golden"></div></details>
-  <details class="card" id="auditcard"><summary><h2>Audit</h2></summary><div id="audit"></div></details>
+  <div id="notices" role="status"></div>
+  <div class="workspace">
+    <section class="card progress-card" aria-labelledby="prog-h">
+     <div class="section-head"><h2 id="prog-h">Milestones</h2><button type="button" class="link" id="changems">Change milestones</button></div>
+     <div id="progress"></div>
+    </section>
+    <aside class="card team-card" aria-labelledby="team-h">
+     <div class="section-head"><h2 id="team-h">Team</h2><button class="link" type="button" id="addworker">Add worker</button></div>
+     <div id="team" class="team"></div>
+    </aside>
+    <section class="card timeline" aria-labelledby="msgs-h">
+     <div class="section-head message-head"><h2 id="msgs-h" tabindex="-1">Messages</h2><span id="message-count" class="small mute"></span></div>
+     <div id="message-filters">
+      <div class="mfilter"><input type="search" id="msearch" placeholder="Search messages" aria-label="Search messages">
+       <select id="mwho" aria-label="Filter by agent"></select></div>
+      <div class="message-options"><div id="levels" class="levels" role="group" aria-label="Interaction levels"></div>
+       <label class="notes-switch" title="Show Orch's housekeeping messages, including silence checks, reminders, and notices"><input type="checkbox" id="orch-notes" checked> Orch notes</label></div>
+     </div>
+     <div class="page-controls" id="message-pages" hidden>
+      <button type="button" class="link" id="older">Show 30 more</button><span class="small mute" id="remaining"></span>
+      <button type="button" class="link" id="show-all" hidden>Show all</button>
+     </div>
+     <div id="messages"></div>
+    </section>
+    <div class="resources" id="resources">
+     <details class="card" id="goldcard"><summary><h2>Golden board</h2></summary><div id="golden"></div></details>
+     <details class="card" id="auditcard"><summary><h2>Audit</h2></summary><div id="audit"></div></details>
+    </div>
+  </div>
  </main>
 </div>
 
@@ -46,7 +69,7 @@
   <div id="talkinfo"></div>
   <div id="talklog" tabindex="0" aria-live="polite"></div>
   <div class="row"><textarea id="talkin" rows="2" placeholder="Write here. Enter sends, Shift+Enter adds a line." aria-label="Your message"></textarea></div>
-  <div class="row" style="justify-content:flex-end"><button type="button" class="pri" id="talksend">Send</button></div>
+  <div class="row talk-send-row"><button type="button" class="pri" id="talksend">Send</button></div>
  </div>
 </div>
 

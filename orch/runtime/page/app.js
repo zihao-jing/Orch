@@ -9,9 +9,12 @@
   let offset = 0;               // server time minus browser time, seconds
   let old = null;               // an earlier run being read ({id, state})
   let es = null, tries = 0, connectedOnce = false;     // the event stream
-  const live = {}, liveN = {};  // agent -> last live lines, and last seen n
-  const openMsgs = new Set(), openAct = new Set(), detail = {};
-  let older = [], olderMore = null, found = null, foundMore = false, findSeq = 0;
+  const live = {}, liveN = {}, liveMore = {}, liveLoaded = new Set();
+  const openMsgs = new Set(), openAct = new Set(), openFolds = new Set(), pages = new Map();
+  const detail = new Map();
+  let timeline = { rows: [], remaining: 0, limit: L.MESSAGE_PAGE, busy: false, queued: false };
+  let headVersion = "";
+  let levels = new Set(Object.keys(L.LEVELS));
   let who = "manager";          // the talk panel's recipient
   let seenSeq = null, modalRefresh = null;
   let goldText = null, auditText = null, auditNotes = null, goldEdit = false, notesEdit = false, lastSide = 0;
@@ -22,6 +25,10 @@
     set(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* no storage: fine */ } },
   };
   let drafts = {};
+  try {
+    const saved = JSON.parse(store.get("orch-message-levels"));
+    if (Array.isArray(saved)) levels = new Set(saved.filter(x => Object.hasOwn(L.LEVELS, x)));
+  } catch (e) { /* use all interaction levels */ }
   try { drafts = JSON.parse(window.sessionStorage.getItem("orch-drafts") || "{}"); } catch (e) { drafts = {}; }
   function saveDrafts() { try { window.sessionStorage.setItem("orch-drafts", JSON.stringify(drafts)); } catch (e) { /* ignore */ } }
   function clearDraft(k) { delete drafts[k]; saveDrafts(); }
@@ -121,6 +128,12 @@
     $("toast").append(t);
     setTimeout(() => t.remove(), 6000);
   }
+  const listLimit = key => pages.get(key) || L.LIST_PAGE;
+  function listMore(key, remaining, render) {
+    if (!remaining) return null;
+    return h("button", { type: "button", class: "link more-list", title: remaining + " more items",
+      on: { click: () => { pages.set(key, listLimit(key) + L.LIST_PAGE); render(); } } }, "Show more");
+  }
   function busy(b, on) { if (b) { b.disabled = on; if (on) b.setAttribute("aria-busy", "true"); else b.removeAttribute("aria-busy"); } }
 
   // ------------------------------------------------------------------------------------------------ dialogs
@@ -196,7 +209,12 @@
       const j = await getJson("api/state");
       S = j; offset = (j.now || Date.now() / 1000) - Date.now() / 1000;
       setLost(false);
-      if (!old) { render(); loadSide(false); }
+      if (!old) {
+        render();
+        const version = JSON.stringify(S.messages);
+        if (headVersion !== version) { headVersion = version; loadTimeline(); }
+        loadSide(false);
+      }
     } catch (e) { setLost(true); }
     loading = false;
     if (again) { again = false; loadState(); }
@@ -225,32 +243,52 @@
       liveN[d.agent] = d.n;
     }
     const list = live[d.agent] || (live[d.agent] = []);
-    list.push({ n: d.n, at: d.at, k: d.k, s: d.s });
-    if (list.length > 60) list.shift();
-    document.querySelectorAll('[data-live="' + d.agent + '"]').forEach(e => { e.textContent = L.preview(d.s, 110); });
-    document.querySelectorAll('[data-livelog="' + d.agent + '"]').forEach(e => { e.append(liveLine(list[list.length - 1])); });
+    list.push(d);
+    if (list.length > listLimit("activity:" + d.agent)) { list.shift(); liveMore[d.agent] = true; }
+    paintActivity(d.agent);
   }
-  const liveLine = x => document.createTextNode((x.k === "tool" ? "> " : "") + x.s + "\n");
-  async function loadLive(id, box, fromN) {
+
+  function paintActivity(id) {
+    const list = live[id] || [], last = list[list.length - 1];
+    document.querySelectorAll('[data-live="' + id + '"]').forEach(e => { e.textContent = last ? L.preview(last.s, 110) : ""; });
+    document.querySelectorAll('[data-livelog="' + id + '"]').forEach(box => {
+      const signature = JSON.stringify([list, liveMore[id]]);
+      paint(box, signature, () => [
+        liveMore[id] ? h("button", { type: "button", class: "link", on: { click: () => {
+          const key = "activity:" + id;
+          pages.set(key, listLimit(key) + L.LIST_PAGE);
+          loadLive(id, "older");
+        } } }, "Show more") : null,
+        list.length ? h("div", { class: "livelog" }, list.map(x => (x.k === "tool" ? "> " : "") + x.s + "\n"))
+          : h("p", { class: "empty" }, "No activity recorded."),
+      ]);
+    });
+  }
+  async function loadLive(id, mode, fromN) {
+    const paging = mode === "older";
+    const list = live[id] || [];
     const from = fromN !== undefined ? fromN : (id in liveN ? liveN[id] + 1 : 0);
+    const tail = paging || (mode === "open" && !liveLoaded.has(id));
+    const params = tail ? "&tail=" + L.LIST_PAGE + (paging && list.length ? "&before=" + list[0].n : "") : "&from=" + from;
     try {
-      const j = await getJson("api/live?agent=" + encodeURIComponent(id) + "&from=" + from);
-      if (j.reset || from === 0) live[id] = [];
-      const list = live[id] || (live[id] = []);
-      (j.items || []).forEach(it => {
-        if (typeof it.n === "number") {
-          if (!j.reset && from > 0 && id in liveN && it.n <= liveN[id]) return;
-          liveN[id] = it.n;
-        }
-        list.push({ n: it.n, at: it.at, k: it.k, s: it.s });
-      });
-      if (list.length > 60) live[id] = list.slice(-60);
-      const boxes = box ? [box] : Array.prototype.slice.call(document.querySelectorAll('[data-livelog="' + id + '"]'));
-      boxes.forEach(b => b.replaceChildren(...live[id].map(liveLine)));
-      const last = live[id][live[id].length - 1];
-      if (last) document.querySelectorAll('[data-live="' + id + '"]').forEach(e => { e.textContent = L.preview(last.s, 110); });
-      else if (j.reset) document.querySelectorAll('[data-live="' + id + '"]').forEach(e => { e.textContent = ""; });
-    } catch (e) { if (box) box.textContent = "Not available."; }
+      const j = await getJson("api/live?agent=" + encodeURIComponent(id) + params);
+      const seen = live[id] || [];
+      const previous = j.reset || (!tail && from === 0) ? [] :
+        tail && !paging ? seen.filter(x => x.n >= j.next) : seen;
+      const byIndex = new Map(previous.concat(j.items || []).map(x => [x.n, x]));
+      const sorted = [...byIndex.values()].sort((a, b) => a.n - b.n);
+      const page = L.latest(sorted, listLimit("activity:" + id));
+      live[id] = page.rows;
+      if (tail && !paging) liveLoaded.add(id);
+      if (!paging && (j.next > 0 || j.reset)) {
+        liveN[id] = j.reset ? j.next - 1 : Math.max(liveN[id] ?? -1, j.next - 1);
+      }
+      if (tail || j.reset) liveMore[id] = !!j.more;
+      if (page.remaining) liveMore[id] = true;
+      paintActivity(id);
+    } catch (e) {
+      if (mode) toast("Could not load activity.");
+    }
   }
 
   // --------------------------------------------------------------------------------------------- rendering
@@ -261,13 +299,14 @@
   function agentList() {
     const rank = { manager: 0, critic: 1, worker: 2, monitor: 3 };
     return Object.values(agents()).filter(a => a.lifecycle !== "deleted" && a.role !== "auditor")
-      .sort((x, y) => ((rank[x.role] || 9) - (rank[y.role] || 9)) || x.id.localeCompare(y.id, undefined, { numeric: true }));
+      .sort((x, y) => ((rank[x.role] ?? 9) - (rank[y.role] ?? 9)) || x.id.localeCompare(y.id, undefined, { numeric: true }));
   }
   const messages = () => L.sortedMessages(S.messages);
 
   function render() {
     if (!S) return;
     $("oldnote").hidden = true;
+    ["header-actions", "message-filters", "resources", "changems", "addworker", "notices"].forEach(id => { $(id).hidden = false; });
     renderHeader(); renderNotices(); renderNeeds(); renderTeam(); renderProgress(); renderMessages();
     renderTalk(); renderSide();
     if (modalRefresh) modalRefresh();
@@ -277,28 +316,34 @@
     const name = (S.run && S.run.project) || "Orch board";
     $("title").textContent = name; document.title = name + " - Orch board";
     const stopped = agentList().some(a => a.stopped_by_user && a.lifecycle === "open");
+    const bits = (status, label) => h("span", { class: "state-label" }, h("span", { class: "dot status-" + status, "aria-hidden": "true" }), label);
     paint($("runstate"), JSON.stringify([S.finished, S.paused, stopped]), () => [
-      S.finished ? h("span", { class: "pill p-good" }, "Finished") : S.paused ? h("span", { class: "pill p-warn" }, "Paused") : h("span", { class: "pill p-run" }, "Running"),
-      stopped ? h("span", { class: "pill p-crit" }, "Agents stopped") : null]);
+      S.finished ? bits("finished", "Finished") : S.paused ? bits("waiting_job", "Paused") : bits("writing static", "Running"),
+      stopped ? bits("failed", "Agents stopped") : null]);
     const nb = $("nightbtn"); nb.classList.toggle("on", !!S.night); nb.setAttribute("aria-pressed", S.night ? "true" : "false");
     $("stopbtn").textContent = stopped ? "Start agents" : "Stop agents";
     $("stopbtn").dataset.mode = stopped ? "start" : "stop";
+    $("stopbtn").classList.toggle("danger-text", !stopped);
+    $("stopbtn").setAttribute("title", stopped ? "Resume agents in their saved sessions" : "Stop all agents and their jobs after confirmation");
   }
 
-  // notices: what Orch tells you, an open terminal
-  function dismissed() { try { return JSON.parse(store.get("orch-dismissed") || "[]"); } catch (e) { return []; } }
+  // Notices stay in the timeline. Toast fresh ones once, including just-finished runs.
+  const seenNotices = new Set();
   function renderNotices() {
-    const gone = dismissed(), t = nowSrv();
-    const notes = messages().filter(m => L.isNotice(m) && gone.indexOf(m.id) < 0 && t - m.created < 21600).slice(-5);
+    const notes = messages().filter(L.isNotice);
+    notes.forEach(m => {
+      if (seenNotices.has(m.id)) return;
+      seenNotices.add(m.id);
+      if (nowSrv() - m.created < 60) toast(L.messageText(m));
+    });
     const terms = Object.keys(S.terminals || {});
-    const sig = JSON.stringify([notes.map(m => m.id), terms.map(a => [a, (S.agents[a] || {}).waiting])]);
-    paint($("notices"), sig, () => [
-      terms.map(a => h("div", { class: "banner note" }, h("div", { class: "t" },
-        "A terminal is open on " + nm(a) + ". " + ((S.agents[a] || {}).waiting || 0) + " message(s) are waiting for it."),
-        h("button", { type: "button", class: "sm", on: { click: act("TerminalTakeBack", { agent: a }) } }, "Take back"))),
-      notes.map(m => h("div", { class: "banner note" }, h("div", { class: "t" }, L.messageText(m)),
-        m.text && m.text.key === "note_migrated" ? h("button", { type: "button", class: "sm", on: { click: act("ConfirmMigration", {}) } }, "Remove old files") : null,
-        h("button", { type: "button", class: "sm", on: { click: () => { gone.push(m.id); store.set("orch-dismissed", JSON.stringify(gone.slice(-200))); $("notices")._sig = ""; renderNotices(); } } }, "Dismiss")))]);
+    const migration = notes.find(m => m.text.key === "note_migrated");
+    paint($("notices"), JSON.stringify([terms.map(a => [a, (agents()[a] || {}).waiting]), migration && migration.id]), () => [
+      terms.map(a => h("div", { class: "banner info terminal-banner" }, h("div", { class: "t" },
+        "A terminal is open on " + nm(a) + ". " + ((agents()[a] || {}).waiting || 0) + " message(s) are waiting for it."),
+        h("button", { type: "button", class: "link", on: { click: act("TerminalTakeBack", { agent: a }) } }, "Take back"))),
+      migration ? h("div", { class: "banner info terminal-banner" }, h("div", { class: "t" }, L.messageText(migration)),
+        h("button", { type: "button", class: "link", on: { click: act("ConfirmMigration", {}) } }, "Remove old files")) : null]);
   }
 
   // gates: everything that waits for you
@@ -336,56 +381,81 @@
     if (r && r.ok) clearDraft(key);
   }
   function renderNeeds() {
-    const open = L.openGates(S.gates), waiting = L.answeredWaiting(S.gates), sec = $("needs");
-    sec.hidden = !(open.length || waiting.length);
-    paint(sec, JSON.stringify([open, waiting.map(g => g.id)]), () => [
-      h("h2", {}, "Needs you"), open.map(gateCard),
-      waiting.length ? h("p", { class: "mute small" }, "You answered " + waiting.length + " question(s). The answers go to the manager when all questions are answered.") : null]);
+    const open = L.openGates(S.gates), sec = $("needs");
+    sec.hidden = !open.length;
+    paint(sec, JSON.stringify(open), () => open.length ? [h("h2", {}, "Needs you"), open.map(gateCard)] : []);
   }
 
   // team
   function termCommand(a) { return "orch terminal " + ((S.run && S.run.project) || "") + " " + a.id; }
-  function copy(text) {
-    try { navigator.clipboard.writeText(text).then(() => toast("Copied"), () => toast("Copy it by hand")); } catch (e) { toast("Copy it by hand"); }
+  async function copyCommand(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied: " + text + ". Paste it in a terminal.");
+    } catch (e) {
+      toast("Copy this command and paste it in a terminal: " + text);
+    }
+  }
+  function terminalLink(a) {
+    const command = termCommand(a);
+    return h("button", { type: "button", class: "link", title: command, on: { click: () => copyCommand(command) } }, "Open in terminal");
+  }
+  function menu(title) {
+    const panel = h("div", { class: "menu-items" });
+    const summary = h("summary", { class: "icon", "aria-label": title, title }, "⋯");
+    const node = h("details", { class: "menu" }, summary, panel);
+    panel.addEventListener("click", () => { node.open = false; summary.focus(); });
+    return [node, panel];
   }
   function agentCard(a) {
-    const t = nowSrv(), tone = { writing: "p-run", waiting_job: "p-warn", failed: "p-crit" }[a.status] || "";
+    const t = nowSrv(), name = nm(a.id), role = ROLE[a.role] || "", status = L.STATUS[a.status] || "";
     const box = h("div", { class: "agent" + (a.status === "closed" ? " closed" : "") });
-    box.append(h("div", { class: "top" }, h("h3", {}, nm(a.id)), h("span", { class: "mute small" }, ROLE[a.role] || ""),
-      h("span", { class: "pill " + tone }, a.status === "writing" ? h("span", { class: "dot live" }) : null, L.STATUS[a.status] || ""),
-      L.agentTags(a, S).map(x => h("span", { class: "pill p-warn" }, x))));
-    const model = a.actual_model || (a.choice && a.choice.label) || "";
-    const chosen = a.choice && a.choice.label;
-    box.append(h("div", { class: "line" }, h("b", {}, "Model: "), model, a.actual_model && chosen && a.actual_model !== chosen ? " (chosen: " + chosen + ")" : "",
-      a.choice && a.choice.effort ? ", effort " + a.choice.effort : "", a.choice && a.choice.name ? " (backup: " + a.choice.name + ")" : ""));
-    if (a.assignment && a.assignment.line) box.append(h("div", { class: "line" }, h("b", {}, "Task: "), a.assignment.line));
-    if (a.status === "failed" && a.failed_why) box.append(h("div", { class: "line" }, h("b", {}, "Why: "), a.failed_why));
+    const model = a.actual_model || (a.choice && (a.choice.model || a.choice.label)) || "";
+    const [actions, items] = menu("Actions for " + name);
+    const controls = h("div", { class: "agent-actions" });
+    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "sm", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
+    controls.append(h("button", { type: "button", class: "sm", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"), actions);
+    box.append(h("div", { class: "agent-head" },
+      h("div", { class: "agent-identity" }, h("span", { class: "dot status-" + a.status, title: status, "aria-hidden": "true" }),
+        h("h3", {}, name), role.toLowerCase() !== name.toLowerCase() ? h("span", { class: "agent-role" }, role) : null),
+      controls));
+    box.append(h("div", { class: "agent-meta" },
+      model ? h("span", { class: "model-name", title: model }, L.shortModel(model)) : null,
+      h("span", { class: "agent-when" }, status,
+        a.last_output ? [" · ", h("span", { data: { ago: a.last_output }, title: "Last activity" }, L.ago(a.last_output, t))] : null)));
+    const tags = L.agentTags(a, S);
+    if (tags.length) box.append(h("div", { class: "agent-line tags" }, tags.join(" · ")));
+    if (a.assignment && a.assignment.line) box.append(h("div", { class: "agent-line assignment", title: a.assignment.line },
+      h("b", {}, a.open_report || S.finished ? "Last assignment " : "Assignment "), a.assignment.line));
+    if (a.status === "failed" && a.failed_why) box.append(h("div", { class: "agent-line danger-text" }, a.failed_why));
     const last = (live[a.id] || []).slice(-1)[0];
-    box.append(h("div", { class: "line" }, h("b", {}, "Last activity: "), a.last_output ? h("span", { data: { ago: a.last_output } }, L.ago(a.last_output, t)) : "–",
-      " ", h("span", { class: "mute", data: { live: a.id } }, last ? L.preview(last.s, 110) : "")));
+    box.append(h("div", { class: "agent-line live-preview", data: { live: a.id } }, last ? L.preview(last.s, 110) : ""));
     if (a.waiting) {
       const why = a.holds.map(x => ({ terminal: "a terminal is open", "switch": "model is being switched", turn: "it is writing", send_failed: "sending failed", stopped: "stopped by you" }[x])).filter(Boolean);
-      box.append(h("div", { class: "line" }, h("b", {}, "Waiting messages: "), String(a.waiting), why.length ? " (" + why.join(", ") + ")" : ""));
+      box.append(h("div", { class: "agent-line" }, a.waiting + " waiting", why.length ? " · " + why.join(", ") : ""));
     }
-    const jobs = Object.values(S.jobs || {}).filter(j => j.agent === a.id && (j.state === "running" || (!j.woke && !j.stopped_by_user))).slice(0, 8);
-    jobs.forEach(j => box.append(h("div", { class: "line" }, h("b", {}, "Job: "), L.jobLine(j, t))));
-    const acts = h("div", { class: "acts" });
-    if (a.role !== "monitor") acts.append(h("button", { type: "button", class: "sm", on: { click: () => openTalk(a.id) } }, "Talk"));
-    acts.append(h("button", { type: "button", class: "sm", on: { click: () => openModel(a.id) } }, "Model"));
-    if (a.role === "worker") L.workerActions(a).forEach(type => acts.append(h("button", { type: "button", class: "sm" + (type === "WorkerDelete" ? " danger" : ""), on: { click: ev => workerAct(type, a, ev.currentTarget) } },
+    const jobs = Object.values(S.jobs || {}).filter(j => j.agent === a.id && (j.state === "running" || (!j.woke && !j.stopped_by_user)));
+    const jobKey = "jobs:" + a.id, shownJobs = L.latest(jobs, listLimit(jobKey));
+    shownJobs.rows.forEach(j => box.append(h("div", { class: "agent-line" }, h("b", {}, "Job "), L.jobLine(j, t))));
+    add(box, listMore(jobKey, shownJobs.remaining, renderTeam));
+    if (a.role !== "monitor" && a.lifecycle === "open") items.append(terminalLink(a));
+    const activity = h("div", { class: "activity-body", data: { livelog: a.id }, hidden: !openAct.has(a.id) });
+    items.append(h("button", { type: "button", title: "Show this agent’s recent output and tools",
+      on: { click: ev => {
+        activity.hidden = !activity.hidden;
+        ev.currentTarget.textContent = activity.hidden ? "Recent activity" : "Hide recent activity";
+        if (activity.hidden) openAct.delete(a.id);
+        else { openAct.add(a.id); paintActivity(a.id); loadLive(a.id, "open"); }
+      } } }, openAct.has(a.id) ? "Hide recent activity" : "Recent activity"));
+    box.append(activity);
+    if (a.role === "worker") L.workerActions(a).forEach(type => items.append(h("button", { type: "button",
+      class: type === "WorkerDelete" ? "danger-text" : "",
+      title: { WorkerClose: "Close this worker and keep its session", WorkerReopen: "Reopen this worker in its saved session", WorkerDelete: "Permanently remove this worker from the team" }[type],
+      on: { click: ev => workerAct(type, a, ev.currentTarget) } },
       { WorkerClose: "Close", WorkerReopen: "Reopen", WorkerDelete: "Delete" }[type])));
-    if (a.lifecycle === "open") acts.append(a.stopped_by_user
-      ? h("button", { type: "button", class: "sm", on: { click: act("StartAgents", { agents: [a.id] }) } }, "Start")
-      : h("button", { type: "button", class: "sm", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
-    box.append(acts);
-    if (a.role !== "monitor") box.append(h("div", { class: "term" }, h("span", { class: "mute" }, "Terminal: "), h("code", {}, termCommand(a)), " ",
-      h("button", { type: "button", class: "sm", on: { click: () => copy(termCommand(a)) } }, "Copy")));
-    const act2 = h("details", { class: "term", data: { id: a.id } }, h("summary", {}, "Recent activity"));
-    const log = h("div", { class: "livelog", data: { livelog: a.id } }, (live[a.id] || []).map(liveLine));
-    act2.append(log);
-    if (openAct.has(a.id)) act2.open = true;
-    act2.addEventListener("toggle", () => { if (act2.open) { openAct.add(a.id); loadLive(a.id, log); } else openAct.delete(a.id); });
-    box.append(act2);
+    if (a.lifecycle === "open") items.append(a.stopped_by_user
+      ? h("button", { type: "button", title: "Resume this agent in its saved session", on: { click: act("StartAgents", { agents: [a.id] }) } }, "Start")
+      : h("button", { type: "button", title: "Stop this agent and its jobs", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
     return box;
   }
   async function workerAct(type, a, btn) {
@@ -394,82 +464,230 @@
   }
   function renderTeam() {
     const list = agentList(), t = Math.floor(nowSrv() / 60);
-    const sig = JSON.stringify([list, S.jobs, S.terminals, S.discussions, t]);
-    paint($("team"), sig, () => list.map(agentCard));
+    const sig = JSON.stringify([list, S.jobs, S.terminals, S.discussions, S.finished, t, list.map(a => listLimit("jobs:" + a.id))]);
+    if (paint($("team"), sig, () => list.map(agentCard))) openAct.forEach(paintActivity);
     if (!list.length) $("team").textContent = "No agents yet.";
   }
 
   // progress: milestones and the current checklist
   function renderProgress() {
     const ms = S.milestones || [], ck = S.checklist || {};
-    paint($("progress"), JSON.stringify([ms, ck, S.finished]), () => {
+    paint($("progress"), JSON.stringify([ms, ck, listLimit("checklist")]), () => {
       if (!ms.length) return h("p", { class: "empty" }, "No milestones yet.");
       const [d, n] = L.progress(ck);
-      const out = [S.finished ? h("p", { class: "ink2" }, "All milestones are done. The run stays open.") : null,
-        h("div", { class: "ms" }, ms.map(m => h("div", { class: "mscard" + (m.status === "current" ? " cur" : "") },
+      const out = [h("div", { class: "ms" }, ms.map(m => h("div", { class: "mscard" + (m.status === "current" ? " cur" : "") },
           h("div", { class: "mute small" }, L.MS_STATUS[m.status] || ""), h("div", { class: "t" }, m.title),
           m.status === "current" && n ? [h("div", { class: "bar" }, h("i", { style: "width:" + Math.round(100 * d / n) + "%" })), h("div", { class: "mute small" }, d + " of " + n + " done")] : null,
           m.score !== null && m.score !== undefined && m.status === "done" ? h("div", { class: "mute small" }, "Score " + m.score) : null,
-          m.text ? h("details", {}, h("summary", { class: "small" }, "Details"), md(m.text)) : null,
-          m.status === "done" ? h("button", { type: "button", class: "sm", style: "margin-top:6px", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen") : null)))];
+          h("div", { class: "milestone-actions" },
+            m.text ? h("details", {}, h("summary", { class: "link" }, "Details"), md(m.text)) : null,
+            m.status === "done" ? h("button", { type: "button", class: "link", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen") : null))))];
       if (ck.error) out.push(h("p", { class: "mute" }, "The critic's checklist is missing or cannot be read."));
-      (ck.steps || []).forEach(s => out.push(h("div", { class: "stepname" }, (s.done ? "Done: " : "") + s.title),
-        h("ul", { class: "ck" }, (s.items || []).map(it => h("li", { class: it[0] ? "done" : "open" }, h("span", { class: "bx" }, it[0] ? "x" : "o"), h("span", {}, it[1]))))));
+      const entries = (ck.steps || []).flatMap(step => (step.items.length ? step.items : [null]).map(item => ({ step, item })));
+      const { rows, remaining } = L.latest(entries, listLimit("checklist"));
+      if (rows.length) {
+        out.push(listMore("checklist", remaining, renderProgress), h("ul", { class: "ck" }, rows.map(({ step, item }, i) =>
+          [i === 0 || rows[i - 1].step !== step ? h("li", { class: "stepname" }, step.title) : null,
+            item ? h("li", { class: item[0] ? "done" : "open" }, h("span", { class: "bx", title: item[0] ? "Complete" : "To do" }, item[0] ? "✓" : "○"), h("span", {}, item[1])) : null])));
+      }
       return out;
     });
   }
 
   // messages
-  function msgRow(m) {
-    const touser = m.recipient === "user", d = h("details", { class: "msg" + (touser ? " touser" : "") });
-    d.append(h("summary", {}, h("span", { class: "tm" }, L.stamp(m.created, nowSrv())), h("b", {}, nm(m.sender)), "to", h("b", {}, nm(m.recipient)),
-      h("span", { class: "st " + L.messageTone(m) }, L.messageStatus(m)), h("span", { class: "pv" }, L.preview(L.messageText(m)))));
-    if (openMsgs.has(m.id)) d.open = true;
-    const fb = h("div", { class: "fb" }, md(L.messageText(m)));
-    d.append(fb);
-    if (L.sendableToCritic(messages()).indexOf(m.id) >= 0) fb.append(h("button", { type: "button", class: "sm", on: { click: act("SendToCritic", { message_id: m.id, agent: m.sender }) } }, "Send to critic"));
-    const more = h("div", { class: "acts", style: "margin-top:6px" }), area = h("div");
-    if (m.turn || m.reply_turn || m.sender !== "orch") more.append(h("button", { type: "button", class: "sm", on: { click: () => showTurn(m, area) } }, "Show the whole reply"));
-    more.append(h("button", { type: "button", class: "sm", on: { click: () => showSent(m, area) } }, "Show the text as sent"));
-    fb.append(more, area);
-    d.addEventListener("toggle", () => { if (d.open) openMsgs.add(m.id); else openMsgs.delete(m.id); });
+  const messageFilter = () => ({ q: $("msearch").value, agent: $("mwho").value,
+    levels: [...levels], notes: $("orch-notes").checked });
+
+  function cached(path) {
+    if (!detail.has(path)) {
+      detail.set(path, getJson(path).catch(error => { detail.delete(path); throw error; }));
+      if (detail.size > 180) detail.delete(detail.keys().next().value);
+    }
+    return detail.get(path);
+  }
+
+  function fold(key, label, build, help) {
+    const body = h("div", { class: "fold-body" });
+    const node = h("details", { class: "message-fold" }, h("summary", { class: "link" }, label), body);
+    let loaded = false, loading = false;
+    async function fill() {
+      if (loaded || loading) return;
+      loading = true;
+      body.textContent = "Loading…";
+      try {
+        body.replaceChildren(...flat([help ? h("p", { class: "detail-hint" }, help) : null, await build()]));
+        loaded = true;
+      } catch (e) { body.textContent = "Could not load this. Close and reopen to try again."; }
+      loading = false;
+    }
+    node.addEventListener("toggle", () => {
+      if (node.open) { openFolds.add(key); fill(); }
+      else openFolds.delete(key);
+    });
+    if (openFolds.has(key)) { node.open = true; fill(); }
+    return node;
+  }
+
+  function messageBody(m, sendable, run, named) {
+    const hint = L.statusHint(m);
+    const fb = h("div", { class: "fb" }, hint ? h("p", { class: "detail-hint" }, hint) : null, md(L.messageText(m)));
+    if (sendable) fb.append(h("button", { type: "button", class: "link", on: {
+      click: act("SendToCritic", { message_id: m.id, agent: m.sender }),
+    } }, "Send to critic"));
+    if (m.turn) {
+      const getTurn = () => cached("api/turn?id=" + encodeURIComponent(m.turn) + (run ? "&run=" + encodeURIComponent(run) : ""));
+      const sender = L.agentName(named, m.sender);
+      const possessive = ((named[m.sender] || {}).display || "").startsWith("the ") ? "the " + sender.toLowerCase() + "'s" : sender + "'s";
+      fb.append(fold(m.id + ":input", "Input to " + possessive + " turn that wrote this", async () => {
+        const turn = await getTurn();
+        return [h("pre", {}, turn.input || "No input was recorded."),
+          fold(m.id + ":system", "System instructions for " + sender, () => h("pre", {}, turn.system_prompt || "No instructions were recorded."))];
+      }), fold(m.id + ":output", possessive[0].toUpperCase() + possessive.slice(1) + " whole reply", async () => {
+        const turn = await getTurn();
+        return md(turn.output || turn.text || "Nothing was recorded.");
+      }, "Everything that turn wrote, including text sent in other messages."));
+    }
+    if (!run && named[m.recipient] && !m.drop) {
+      const recipient = L.agentName(named, m.recipient);
+      fb.append(fold(m.id + ":received", "What " + recipient + " received", async () => {
+        const result = await cached("api/message?id=" + encodeURIComponent(m.id));
+        return h("pre", {}, (result.message || {}).rendered || "No delivered text was recorded.");
+      }, "The message as delivered, with Orch’s additions."));
+    }
+    return fb;
+  }
+
+  function msgRow(m, sendable, run, named = agents()) {
+    const level = L.messageLevel(m, named), note = L.isNotice(m), awaiting = L.awaitsAnswer(m);
+    const cls = ["msg", "level-" + level, m.recipient === "user" ? "touser" : "", awaiting ? "awaiting" : "", note ? "notice-row" : m.orch_note ? "housekeeping" : ""];
+    const meta = m.written_by || {}, exception = L.messageException(m), hint = L.statusHint(m);
+    const route = L.agentName(named, m.sender) + " → " + L.agentName(named, m.recipient);
+    const size = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
+    const d = h("details", { class: cls.filter(Boolean).join(" "), data: { message: m.id } },
+      h("summary", { title: [route, hint].filter(Boolean).join(" · ") },
+        h("span", { class: "tm" }, L.stamp(m.created, nowSrv())),
+        h("span", { class: "route" }, route),
+        exception ? h("span", { class: "st " + L.messageTone(m), title: hint }, exception) : null,
+        meta.model ? h("span", { class: "row-model", title: "Written by " + meta.model }, L.shortModel(meta.model)) : null,
+        h("span", { class: "pv" }, L.preview(L.messageText(m))),
+        size ? h("span", { class: "sz" + (meta.input_chars > 30000 ? " large" : ""),
+          title: meta.input_chars.toLocaleString() + " input characters → " + meta.output_chars.toLocaleString() + " output characters" +
+            (meta.input_chars > 30000 ? " · input exceeds 30,000 characters" : "") },
+        L.characterSize(meta.input_chars) + " → " + L.characterSize(meta.output_chars)) : null));
+    function expand() {
+      if (!d._body) { d._body = messageBody(m, sendable, run, named); d.append(d._body); }
+    }
+    if (openMsgs.has(m.id)) { d.open = true; expand(); }
+    d.addEventListener("toggle", () => {
+      if (d.open) { openMsgs.add(m.id); expand(); }
+      else openMsgs.delete(m.id);
+    });
     return d;
   }
-  async function showTurn(m, area) {
-    try { const j = await getJson("api/turn?id=" + encodeURIComponent(m.turn || m.reply_turn || m.id)); area.replaceChildren(h("pre", {}, j.output || j.text || "Nothing written.")); }
-    catch (e) { area.textContent = "Not available."; }
+
+  function patchRows(box, list, build, signature) {
+    if (!list.length) { paint(box, "empty", () => h("p", { class: "empty" }, "No messages match.")); return; }
+    box._sig = null;
+    const previous = new Map(Array.from(box.children).map(e => [e.dataset.message, e]));
+    list.forEach((m, i) => {
+      const sig = signature(m), previousRow = previous.get(m.id);
+      const existing = previousRow && previousRow._signature === sig;
+      const row = existing ? previousRow : build(m);
+      row._signature = sig;
+      if (row !== box.children[i]) box.insertBefore(row, box.children[i] || null);
+    });
+    Array.from(box.children).slice(list.length).forEach(row => row.remove());
   }
-  async function showSent(m, area) {
-    try { const j = await getJson("api/message?id=" + encodeURIComponent(m.id)); area.replaceChildren(h("pre", {}, (j.message && j.message.rendered) || "Not sent yet.")); }
-    catch (e) { area.textContent = "Not available."; }
-  }
-  function shownMessages() {
-    return found !== null ? found : L.mergeMessages([older, messages()]);
-  }
+
   function renderMessages() {
-    const list = shownMessages(), filt = $("msearch").value.trim() || $("mwho").value;
-    const opts = [["", "Everyone"]].concat(agentList().map(a => [a.id, nm(a.id)]));
+    const opts = [["", "All agents"]].concat(agentList().map(a => [a.id, nm(a.id)]));
     const keep = $("mwho").value;
-    paint($("mwho"), JSON.stringify(opts), () => opts.map(x => h("option", { value: x[0] }, x[1])));
-    $("mwho").value = keep;
-    const more = found !== null ? foundMore : (olderMore !== null ? olderMore : Object.keys(S.messages).length >= 300);
-    $("older").hidden = !more;
-    const sig = JSON.stringify([list.map(m => [m.id, m.status, m.drop, m.holds, m.delivered_at]), filt, S.agents && Object.keys(S.agents).length]);
-    paint($("messages"), sig, () => list.length ? list.map(msgRow) : h("p", { class: "empty" }, filt ? "No message matches." : "No messages yet."));
+    if (paint($("mwho"), JSON.stringify(opts), () => opts.map(x => h("option", { value: x[0] }, x[1])))) {
+      $("mwho").value = opts.some(x => x[0] === keep) ? keep : "";
+    }
+    const { rows, remaining, busy, ready } = timeline;
+    const shown = rows.length, total = shown + remaining;
+    $("message-pages").hidden = remaining <= 0;
+    $("older").disabled = $("show-all").disabled = busy;
+    $("show-all").hidden = remaining <= L.MESSAGE_PAGE;
+    $("remaining").textContent = remaining + " older";
+    $("message-count").textContent = ready ? (remaining ? shown + " of " + total : shown + (shown === 1 ? " message" : " messages")) : "Loading…";
+    if (!ready) return;
+    const eligible = new Set(L.sendableToCritic(messages(), agents()));
+    patchRows($("messages"), rows, m => msgRow(m, eligible.has(m.id)), m =>
+      JSON.stringify([m, eligible.has(m.id), nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
   }
-  async function loadMessages(before) {
-    const q = $("msearch").value.trim(), ag = $("mwho").value, mine = ++findSeq;
-    const p = new URLSearchParams({ limit: "50" });
-    if (q) p.set("q", q); if (ag) p.set("agent", ag); if (before) p.set("before", String(before));
+
+  async function requestTimeline(filter, limit, before) {
+    let rows = [], remaining = 0;
+    do {
+      const page = await getJson("api/messages?" + L.pageQuery({ ...filter, limit: Math.min(limit - rows.length, 500), before }));
+      if (!page.messages.length) { remaining = 0; break; }
+      rows = L.mergeMessages([rows, page.messages]);
+      remaining = Number(page.remaining) || 0;
+      before = rows[0].seq;
+    } while (remaining && rows.length < limit);
+    return { rows, remaining };
+  }
+
+  async function loadTimeline(olderCount = 0) {
+    const view = timeline;
+    if (old || !S) return;
+    if (view.busy) { view.queued = true; return; }
+    view.busy = true;
+    renderMessages();
     try {
-      const j = await getJson("api/messages?" + p.toString());
-      if (mine !== findSeq) return;
-      if (before) { if (q || ag) { found = L.mergeMessages([found, j.messages]); foundMore = !!j.more; } else { older = L.mergeMessages([older, j.messages]); olderMore = !!j.more; } }
-      else if (q || ag) { found = j.messages; foundMore = !!j.more; }
-      renderMessages();
-    } catch (e) { toast("Could not load messages."); }
+      const before = olderCount && view.rows.length ? view.rows[0].seq : 0;
+      const result = await requestTimeline(messageFilter(), olderCount || view.limit, before);
+      if (timeline !== view || old) return;
+      view.rows = before ? L.mergeMessages([result.rows, view.rows]) : result.rows;
+      view.remaining = result.remaining;
+      if (olderCount) view.limit += olderCount;
+      view.ready = true;
+    } catch (e) { if (timeline === view && !old) toast("Could not load messages."); }
+    finally {
+      view.busy = false;
+      if (timeline === view && !old) {
+        renderMessages();
+        if (view.queued) { view.queued = false; loadTimeline(); }
+      }
+    }
   }
-  function firstSeq() { const l = shownMessages(); return l.length ? l[0].seq : 0; }
+
+  function resetTimeline() {
+    if (old) return;
+    timeline = { rows: [], remaining: 0, limit: L.MESSAGE_PAGE, busy: false, queued: false };
+    $("messages").replaceChildren();
+    $("messages")._sig = null;
+    loadTimeline();
+  }
+
+  function wireFilters() {
+    $("orch-notes").checked = store.get("orch-message-notes") !== "0";
+    Object.entries(L.LEVELS).forEach(([level, [name, title]]) => {
+      const b = h("button", { type: "button", class: "level-toggle level-" + level, title,
+        "aria-pressed": String(levels.has(level)),
+        on: { click: () => {
+          if (levels.has(level)) levels.delete(level); else levels.add(level);
+          b.setAttribute("aria-pressed", String(levels.has(level)));
+          store.set("orch-message-levels", JSON.stringify([...levels]));
+          resetTimeline();
+        } } }, name);
+      $("levels").append(b);
+    });
+    $("orch-notes").addEventListener("change", e => {
+      store.set("orch-message-notes", e.target.checked ? "1" : "0");
+      resetTimeline();
+    });
+    let timer = 0;
+    $("msearch").addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(resetTimeline, 250);
+    });
+    $("mwho").addEventListener("change", () => { clearTimeout(timer); resetTimeline(); });
+    $("older").addEventListener("click", () => loadTimeline(Math.min(L.MESSAGE_PAGE, timeline.remaining)));
+    $("show-all").addEventListener("click", () => loadTimeline(timeline.remaining));
+  }
 
   // the talk panel
   function talkable() {
@@ -501,25 +719,33 @@
     if ($("talk").hidden) return;
     const a = S.agents[who] || {}, disc = S.discussions[who];
     const mgrId = Object.values(S.agents).find(x => x.role === "manager");
-    const log = L.talkLog(messages(), who, mgrId && mgrId.id), elig = L.sendableToCritic(messages());
-    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), who, !!disc, disc && disc.phase, elig]);
+    const all = L.talkLog(messages(), who, mgrId && mgrId.id), elig = L.sendableToCritic(messages(), agents());
+    const talkKey = "talk-history:" + who;
+    const { rows: log, remaining } = L.latest(all, listLimit(talkKey));
+    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), remaining, who, !!disc, disc && disc.phase, elig]);
     const box = $("talklog"), near = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-    const changed = paint(box, sig, () => log.length ? log.map(m => {
+    const changed = paint(box, sig, () => log.length ? [listMore(talkKey, remaining, () => {
+      const height = box.scrollHeight, top = box.scrollTop;
+      renderTalk();
+      box.scrollTop = top + box.scrollHeight - height;
+    }), log.map(m => {
       const me = m.sender === "user";
       return h("div", { class: "cm" + (me ? " me" : "") + (L.isNotice(m) ? " note" : "") },
         h("div", { class: "w" }, (me ? "You" : nm(m.sender)) + " - " + L.stamp(m.created, nowSrv()) + (me ? " - " + L.messageStatus(m) : "")),
         h("div", { class: "b" }, md(L.messageText(m)), elig.indexOf(m.id) >= 0 ? h("button", { type: "button", class: "sm", on: { click: act("SendToCritic", { message_id: m.id, agent: m.sender }) } }, "Send to critic") : null));
-    }) : h("p", { class: "empty" }, "Nothing yet. Write below."));
+    })] : h("p", { class: "empty" }, "Nothing yet. Write below."));
     if (changed && near) box.scrollTop = box.scrollHeight;
     $("talk-h").textContent = "Talk to";
     const isLead = a.role === "manager" || a.role === "critic";
-    paint($("talkacts"), JSON.stringify([isLead, !!disc, disc && disc.phase, who]), () => !isLead ? [] : disc
-      ? [h("button", { type: "button", class: "sm ok", on: { click: applyDiscussion } }, "Apply discussion"),
-        h("button", { type: "button", class: "sm", on: { click: endDiscussion } }, "End without applying")]
-      : [h("button", { type: "button", class: "sm", title: "Talk it over first. What the agent writes to others waits until you apply it.", on: { click: act("DiscussionStart", { agent: who }) } }, "Discuss")]);
-    paint($("talkinfo"), JSON.stringify([!!disc, disc && disc.phase, who, S.run && S.run.project]), () => [
-      disc ? h("div", { class: "banner info" }, disc.phase === "applying" ? "Applying the discussion. The agent is answering." : "A discussion is open. What " + nm(who) + " writes to others is a draft until you apply it.") : null,
-      a.id && (isLead || a.role === "worker") ? h("p", { class: "mute small" }, "In a terminal: ", h("code", {}, termCommand(a))) : null]);
+    paint($("talkacts"), JSON.stringify([isLead, !!disc, disc && disc.phase, who, S.run && S.run.project]), () => [
+      isLead && disc ? [h("button", { type: "button", class: "sm ok", on: { click: applyDiscussion } }, "Apply discussion"),
+        h("button", { type: "button", class: "sm", on: { click: endDiscussion } }, "End without applying")] : null,
+      isLead && !disc ? h("button", { type: "button", class: "sm", title: "Messages to other agents wait until you apply the discussion", on: { click: act("DiscussionStart", { agent: who }) } }, "Discuss") : null,
+      a.id && (isLead || a.role === "worker") ? terminalLink(a) : null,
+    ]);
+    paint($("talkinfo"), JSON.stringify([!!disc, disc && disc.phase, who]), () =>
+      disc ? h("div", { class: "banner info" }, disc.phase === "applying" ? "Applying the discussion. The agent is answering."
+        : "A discussion is open. What " + nm(who) + " writes to others is a draft until you apply it.") : []);
   }
   async function applyDiscussion() {
     const t = draft("apply:" + who, "textarea", { rows: 3, "aria-label": "Your words with it" });
@@ -541,7 +767,9 @@
     const build = () => {
       const a = S.agents[id]; if (!a) return h("p", {}, "This agent is gone.");
       const k = "model:" + id + ":", cat = S.catalog || [];
-      const body = [h("p", {}, h("b", {}, "Now: "), a.actual_model || a.choice.label || "", a.choice.effort ? ", effort " + a.choice.effort : "")];
+      const current = a.actual_model || a.choice.model || a.choice.label || "";
+      const body = [h("p", {}, h("b", {}, "Current model "), h("span", { title: current }, L.shortModel(current)),
+        a.choice.effort ? " · " + a.choice.effort + " effort" : "")];
       if (a.switch) {
         body.push(h("div", { class: "banner note" }, h("div", { class: "t" }, (a.switch.step === "pending" ? "Switch pending to " : "Switching to ") + (a.switch.target.label || "the new model") +
           (a.switch.step === "pending" ? ". It happens when the agent is idle." : ".") + (a.switch.error ? " " + a.switch.error : "")),
@@ -563,8 +791,11 @@
       if (a.choices.length > 1 || a.choice.name) {
         body.push(h("h3", { style: "margin-top:14px" }, "Backups"));
         a.choices.forEach(c => {
-          const cur = c.label === a.choice.label;
-          body.push(h("div", { class: "opt" + (cur ? " cur" : "") }, h("span", { class: "grow" }, (c.name ? c.name + ": " : "Main: ") + (c.label || c.model)), cur ? h("span", { class: "mute small" }, "in use") :
+          const cur = ["backend", "provider", "model", "effort", "name"].every(key => (c[key] || "") === (a.choice[key] || ""));
+          const name = c.label || L.shortModel(c.model), source = [c.backend, c.provider].filter(Boolean).join(" / ");
+          body.push(h("div", { class: "opt" + (cur ? " cur" : "") },
+            h("span", { class: "grow", title: c.model }, c.name ? name : "Main · " + name, source ? h("small", { class: "mute model-source" }, source) : null),
+            cur ? h("span", { class: "mute small" }, "in use") :
             h("button", { type: "button", class: "sm", on: { click: ev => cmd("ChooseModel", { agent: id, backup: c.name || "", model_id: "", force: !!drafts[k + "force"] }, ev.currentTarget) } }, "Use")));
         });
       }
@@ -585,7 +816,7 @@
       if ($("goldcard").open && !goldEdit) goldText = await getJson("api/golden");
       if ($("auditcard").open) {
         if (!notesEdit) auditNotes = await getJson("api/audit_notes");
-        auditText = await getJson("api/audit");
+        auditText = await getJson("api/audit?history=1");
       }
     } catch (e) { /* the connection banner speaks for itself */ }
     renderSide();
@@ -603,10 +834,14 @@
       : [h("p", { class: "mute small" }, "The manager keeps the rules and decisions every agent works by. Your edit goes to all agents."),
         goldText.text ? md(goldText.text) : h("p", { class: "empty" }, "Empty."),
         h("button", { type: "button", class: "sm", on: { click: () => { goldEdit = true; renderSide(); } } }, "Edit")]);
-    paint($("audit"), JSON.stringify([auditText, auditNotes, notesEdit]), () => {
+    paint($("audit"), JSON.stringify([auditText, auditNotes, notesEdit, listLimit("audits")]), () => {
       if (!auditText) return h("p", { class: "mute" }, "Loading...");
       return [h("div", { class: "acts" }, h("button", { type: "button", class: "sm", disabled: !!auditText.running, on: { click: act("AuditRun", {}) } }, auditText.running ? "Audit is running" : "Run audit")),
         auditText.report ? md(auditText.report) : h("p", { class: "empty" }, "No audit yet."),
+        (auditText.records || []).slice(1, listLimit("audits")).map(a => fold(
+          "audit:" + a.id, "Audit from " + L.stamp(a.at, nowSrv()),
+          async () => md((await cached("api/audit?id=" + encodeURIComponent(a.id))).report || "No reply was recorded."))),
+        listMore("audits", Math.max(0, (auditText.records || []).length - listLimit("audits")), renderSide),
         h("h3", { style: "margin-top:14px" }, "Your notes on the audit"),
         !auditNotes ? null : notesEdit
           ? editor("notes", "Your notes", () => auditNotes, "AuditNotes", () => { notesEdit = false; loadSide(true); }, () => { notesEdit = false; renderSide(); })
@@ -636,28 +871,60 @@
   // earlier runs (read only)
   async function runs() {
     let list = [];
-    try { list = (await getJson("api/runs")).runs || []; } catch (e) { toast("Could not load the runs."); return; }
-    const v = await modal("Earlier runs", close => list.length ? list.map((r, i) => h("div", { class: "opt" },
-      h("span", { class: "grow" }, (r.project || "Run") + " - " + (r.status || "") + " - " + L.stamp(r.started, nowSrv())),
-      h("button", { type: "button", class: "sm", on: { click: () => close("run" + i) } }, "Open"))) : h("p", { class: "empty" }, "No earlier runs."), [{ label: "Close", value: "" }]);
+    try {
+      const current = S && S.run ? S.run.project + "/" + S.run.id : "";
+      list = ((await getJson("api/runs")).runs || []).filter(r => r.id !== current);
+    } catch (e) { toast("Could not load the runs."); return; }
+    const box = h("div");
+    const draw = close => {
+      const limit = listLimit("earlier-runs");
+      box.replaceChildren(...flat(list.length ? [
+        list.slice(0, limit).map((r, i) => h("div", { class: "opt" },
+          h("span", { class: "grow" }, (r.project || "Run") + " · " + (r.status || "Saved") + " · " + L.stamp(r.started, nowSrv())),
+          h("button", { type: "button", class: "sm", on: { click: () => close("run" + i) } }, "Open"))),
+        listMore("earlier-runs", list.length - Math.min(limit, list.length), () => draw(close)),
+      ] : h("p", { class: "empty" }, "No earlier runs.")));
+      return box;
+    };
+    const v = await modal("Earlier runs", draw, [{ label: "Close", value: "" }]);
     if (typeof v === "string" && /^run\d+$/.test(v)) viewOld(list[Number(v.slice(3))]);
   }
   async function viewOld(r) {
     try { old = await getJson("api/run?id=" + encodeURIComponent(r.id)); } catch (e) { toast("Could not open that run."); return; }
+    pages.delete("old-messages");
     renderOld(old, r);
   }
   function renderOld(j, r) {
     const note = $("oldnote"); note.hidden = false;
-    note.replaceChildren(document.createTextNode("You are reading an earlier run (" + (r.project || "run") + "). Nothing here can be changed. "),
-      h("button", { type: "button", class: "sm", on: { click: () => { old = null; note.hidden = true; ["needs", "team", "progress", "messages"].forEach(i => { $(i)._sig = ""; }); render(); } } }, "Back to the current run"));
+    note.replaceChildren(document.createTextNode("You are reading an earlier run (" + (r.project || "run") + "). "),
+      h("button", { type: "button", class: "link", on: { click: () => {
+        old = null;
+        ["needs", "team", "progress", "messages", "runstate"].forEach(i => { $(i)._sig = null; });
+        render(); loadTimeline();
+      } } }, "Back to the current run"));
     $("needs").hidden = true;
-    const items = (j.tl_items || []).concat((j.chat || []).map(c => ({ ts: c.ts, from: c.role === "human" ? "You" : (c.who || c.role), to: "", text: c.text })));
-    paint($("team"), "old" + r.id, () => (j.agents || []).map(a => h("div", { class: "agent" }, h("h3", {}, L.agentName({ [a.name]: { display: a.called, role: a.role } }, a.name)), h("span", { class: "mute small" }, ROLE[a.role === "verifier" ? "critic" : a.role] || a.role || ""))));
-    paint($("progress"), "old" + r.id, () => (j.tl_groups || []).map(g => h("div", { class: "line" }, g.label || g.key)));
-    paint($("messages"), "old" + r.id, () => items.length ? items.map(it => h("details", { class: "msg" }, h("summary", {}, h("span", { class: "tm" }, String(it.ts || "").slice(11, 16)),
-      h("b", {}, L.plainName(it.from || "")), it.to ? ["to", h("b", {}, L.plainName(it.to))] : null, h("span", { class: "pv" }, L.preview(it.text || it.preview || it.title || ""))),
-      h("div", { class: "fb" }, md(it.text || it.preview || it.title || "")))) : h("p", { class: "empty" }, "Nothing recorded."));
-    $("older").hidden = true;
+    ["header-actions", "message-filters", "resources", "changems", "addworker", "notices", "message-pages"].forEach(id => { $(id).hidden = true; });
+    $("title").textContent = r.project || "Earlier run";
+    $("runstate").textContent = "Read only";
+    const snapshotAgents = j.agents && !Array.isArray(j.agents);
+    const team = snapshotAgents ? Object.values(j.agents) : (j.agents || []);
+    const items = j.messages ? L.sortedMessages(j.messages) :
+      (j.tl_items || []).concat((j.chat || []).map(c => ({ ts: c.ts, from: c.role === "human" ? "You" : (c.who || c.role), to: "", text: c.text })))
+        .sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+    paint($("team"), "old" + r.id, () => team.map(a => h("div", { class: "agent" },
+      h("h3", {}, snapshotAgents ? L.agentName(j.agents, a.id) : L.plainName(a.called || a.name)),
+      h("span", { class: "mute small" }, ROLE[a.role === "verifier" ? "critic" : a.role] || a.role || ""))));
+    paint($("progress"), "old" + r.id, () => (j.milestones || j.tl_groups || []).map(g => h("div", { class: "line" }, g.title || g.label || g.key)));
+    const { rows, remaining } = L.latest(items, listLimit("old-messages"));
+    $("message-count").textContent = rows.length + " of " + items.length;
+    paint($("messages"), "old" + r.id + ":" + rows.length, () => items.length ? [
+      listMore("old-messages", remaining, () => renderOld(j, r)),
+      rows.map(it => j.messages ? msgRow(it, false, r.id, j.agents) :
+        h("details", { class: "msg" }, h("summary", {}, h("span", { class: "tm" }, String(it.ts || "").slice(11, 16)),
+          h("span", { class: "route" }, L.plainName(it.from || "") + (it.to ? " → " + L.plainName(it.to) : "")),
+          h("span", { class: "pv" }, L.preview(it.text || it.preview || it.title || ""))),
+        h("div", { class: "fb" }, md(it.text || it.preview || it.title || "")))),
+    ] : h("p", { class: "empty" }, "Nothing recorded."));
   }
 
   // ------------------------------------------------------------------------------------------------ wiring
@@ -669,6 +936,18 @@
     $("talkin").addEventListener("input", e => { drafts["talk:" + who] = e.target.value; saveDrafts(); });
     $("talkin").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendTalk(); } });
     document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("talk").hidden && !$("dlg").open && !$("dlg2").open) closeTalk(); });
+    const runMenu = $("run-menu");
+    ["nightbtn", "stopbtn", "morebtn", "runsbtn"].forEach(id => $(id).addEventListener("click", () => { runMenu.open = false; }));
+    document.addEventListener("click", e => document.querySelectorAll("details.menu[open]").forEach(menu => {
+      if (!menu.contains(e.target)) menu.open = false;
+    }));
+    document.addEventListener("keydown", e => {
+      if (e.key !== "Escape") return;
+      document.querySelectorAll("details.menu[open]").forEach(menu => {
+        if (menu.contains(document.activeElement)) menu.querySelector("summary").focus();
+        menu.open = false;
+      });
+    });
     $("nightbtn").addEventListener("click", ev => cmd("SetNight", { on: !(S && S.night) }, ev.currentTarget));
     $("stopbtn").addEventListener("click", stopStart);
     $("morebtn").addEventListener("click", more);
@@ -680,11 +959,7 @@
       r.dataset.theme = dark ? "light" : "dark"; store.set("orch-theme", r.dataset.theme);
     });
     const th = store.get("orch-theme"); if (th) document.documentElement.dataset.theme = th;
-    let timer = 0;
-    const again2 = () => { clearTimeout(timer); timer = setTimeout(() => { found = null; if ($("msearch").value.trim() || $("mwho").value) loadMessages(0); else { findSeq++; renderMessages(); } }, 300); };
-    $("msearch").addEventListener("input", again2);
-    $("mwho").addEventListener("change", again2);
-    $("older").addEventListener("click", () => loadMessages(firstSeq()));
+    wireFilters();
     $("goldcard").addEventListener("toggle", () => { if ($("goldcard").open) loadSide(true); });
     $("auditcard").addEventListener("toggle", () => { if ($("auditcard").open) loadSide(true); });
     setInterval(() => { document.querySelectorAll("[data-ago]").forEach(e => { e.textContent = L.ago(Number(e.dataset.ago), nowSrv()); }); }, 15000);

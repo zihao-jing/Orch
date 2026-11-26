@@ -158,6 +158,33 @@ const T = {
   progress() {
     assert.deepStrictEqual(L.progress({steps: [{items: [[true, 'a'], [false, 'b']]}]}), [1, 2]);
   },
+  timeline() {
+    const roster = {lead: {role: 'manager'}, reviewer: {role: 'critic'}, helper: {role: 'worker'}, lookout: {role: 'monitor'}};
+    const level = (sender, recipient) => L.messageLevel({sender, recipient}, roster);
+    assert.strictEqual(level('user', 'helper'), 'you');
+    assert.strictEqual(level('orch', 'lead'), 'you');
+    assert.strictEqual(level('lead', 'reviewer'), 'critic');
+    assert.strictEqual(level('orch', 'reviewer'), 'critic');
+    assert.strictEqual(level('helper', 'reviewer'), 'workers');
+    assert.strictEqual(level('orch', 'helper'), 'workers');
+    assert.strictEqual(level('lookout', 'reviewer'), 'monitor');
+    assert.strictEqual(level('orch', 'lookout'), 'monitor');
+    assert.strictEqual(L.MESSAGE_PAGE, 30);
+    assert.deepStrictEqual(L.latest([1, 2, 3, 4], 2), {rows: [3, 4], remaining: 2});
+    assert.deepStrictEqual(L.latest([1, 2], 0), {rows: [], remaining: 2});
+    const p = new URLSearchParams(L.pageQuery({before: 12, q: ' sample text ', agent: 'helper', levels: ['you', 'workers'], notes: false}));
+    assert.deepStrictEqual(Object.fromEntries(p), {timeline: '1', limit: '30', levels: 'you,workers', notes: '0', before: '12', q: 'sample text', agent: 'helper'});
+    assert.strictEqual(new URLSearchParams(L.pageQuery({levels: []})).get('levels'), 'none');
+    assert.strictEqual(L.shortModel('zenmux/deepseek/deepseek-v4-pro'), 'deepseek-v4-pro');
+    assert.strictEqual(L.shortModel('claude-haiku'), 'claude-haiku');
+    assert.strictEqual(L.shortModel(null), '');
+    assert.deepStrictEqual([12000, 1400, 1000, 39].map(L.characterSize), ['12k', '1.4k', '1k', '39']);
+    assert.strictEqual(L.messageException({status: 'answered'}), '');
+    assert.strictEqual(L.messageException({status: 'waiting', holds: ['turn']}), 'Held');
+    assert.strictEqual(L.messageException({status: 'failed', drop: 'rejected'}), 'Dropped');
+    assert.ok(L.awaitsAnswer({status: 'delivered', needs_answer: true}));
+    assert.ok(!L.awaitsAnswer({status: 'answered', needs_answer: true}));
+  },
   time() {
     assert.strictEqual(L.ago(0, 130), '–'); assert.strictEqual(L.ago(null, 130), '–');
     assert.strictEqual(L.ago(100, 130), 'just now'); assert.strictEqual(L.ago(100, 100 + 600), '10 min ago');
@@ -219,6 +246,9 @@ class TestLogic(unittest.TestCase):
     def test_UI_2_progress_count(self):
         self.run_js("progress")
 
+    def test_UI_2_timeline_levels_paging_and_short_models(self):
+        self.run_js("timeline")
+
     def test_UI_1_times(self):
         self.run_js("time")
 
@@ -239,7 +269,13 @@ class El {
     this.className = ''; this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0; this.returnValue = ''; this.disabled = false;
   }
   append(...k) { k.forEach(x => { if (typeof x === 'string') x = new Txt(x); x.parent = this; this.children.push(x); }); }
-  replaceChildren(...k) { this.children = []; this.append(...k); }
+  replaceChildren(...k) { this.children.forEach(x => { x.parent = null; }); this.children = []; this.append(...k); }
+  insertBefore(x, next) {
+    if (x.parent) x.remove();
+    x.parent = this;
+    const at = this.children.indexOf(next);
+    if (at === -1) this.children.push(x); else this.children.splice(at, 0, x);
+  }
   setAttribute(k, v) { this.attrs[k] = v; if (k === 'disabled') this.disabled = true; }
   removeAttribute(k) { delete this.attrs[k]; }
   get textContent() { return this.children.map(c => c.textContent).join(''); }
@@ -300,18 +336,28 @@ async function fetchStub(url, opt) {
   if (url.startsWith('api/run?')) return json({tl_items: [{ts: '2026-01-01T10:00:00', from: 'manager', to: 'critic', text: 'old words'}], chat: [], agents: [{name: 'manager', role: 'manager', called: 'Manager'}, {name: 'worker-1', role: 'worker'}], tl_groups: []});
   if (url.startsWith('api/live')) return json(liveReply(url));
   if (url.startsWith('api/message?')) return json({message: {rendered: 'SENT TEXT'}});
-  if (url.startsWith('api/turn')) return json({output: 'WHOLE REPLY'});
-  if (url.startsWith('api/messages')) return json({messages: [], more: false});
+  if (url.startsWith('api/turn')) return json({input: 'TURN INPUT', output: 'WHOLE REPLY', system_prompt: 'SYSTEM INSTRUCTIONS'});
+  if (url.startsWith('api/messages')) {
+    const p = new URLSearchParams(url.split('?')[1]);
+    const levels = (p.get('levels') || '').split(',');
+    const q = (p.get('q') || '').toLowerCase(), agent = p.get('agent'), before = Number(p.get('before')), limit = Number(p.get('limit'));
+    const matching = win.OrchLogic.sortedMessages(state.messages).filter(m =>
+      (!before || m.seq < before) && (!agent || m.sender === agent || m.recipient === agent) &&
+      (!q || m.body.toLowerCase().includes(q)) && levels.includes(win.OrchLogic.messageLevel(m, state.agents)) &&
+      (p.get('notes') !== '0' || !win.OrchLogic.isNotice(m)));
+    const {rows, remaining} = win.OrchLogic.latest(matching, limit);
+    return json({messages: rows, remaining, more: remaining > 0});
+  }
   return json({}, false, 404);
 }
-const store = {};
+const store = {}, clipboard = [];
 const win = {
   OrchLogic: require(path.join(dir, 'logic.js')),
   localStorage: {getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }},
   sessionStorage: {getItem: () => null, setItem: () => {}},
   matchMedia: () => ({matches: false}), addEventListener() {},
 };
-const sandbox = {window: win, document: doc, fetch: fetchStub, EventSource: ES, navigator: {clipboard: {writeText: () => Promise.resolve()}},
+const sandbox = {window: win, document: doc, fetch: fetchStub, EventSource: ES, navigator: {clipboard: {writeText: text => { clipboard.push(text); return Promise.resolve(); }}},
   setTimeout: (f, ms) => setTimeout(f, Math.min(ms || 0, 5)), clearTimeout, setInterval: () => 0, URLSearchParams, console, Date, JSON, Math,
   encodeURIComponent, Promise};
 sandbox.window.window = win;
@@ -325,9 +371,10 @@ const byText = (root, t) => buttons(root).find(b => b.textContent === t);
 const click = async b => { assert.ok(b, 'button missing'); b.fire('click'); await settle(); };
 const lastPost = () => posts[posts.length - 1];
 const type = (el, v) => { el.value = v; el.fire('input'); };
-const pageText = () => Object.values(registry).map(r => r.textContent).join('\n');
+const textParts = e => e.nodeType === 3 ? e.textContent : e.children.map(textParts).join(' ');
+const pageText = () => Object.values(registry).map(textParts).join('\n');
 const refresh = async () => { sources[0].l.state({data: '{}'}); await settle(); };
-const ctx = {assert, $, byText, click, lastPost, posts, gets, type, settle, pageText, refresh, buttons, everything, sources, doc,
+const ctx = {assert, $, clipboard, byText, click, lastPost, posts, gets, type, settle, pageText, refresh, buttons, everything, sources, doc,
   created, fixture, win, store,
   setState: s => { state = s; }, getState: () => state, setReply: f => { commandReply = f; }, setLiveReply: f => { liveReply = f; }, setFail: v => { failState = v; }};
 (async () => {
@@ -352,7 +399,7 @@ global.SC = {
   async messages({assert, $, pageText, created}) {
     const m = $('messages').textContent;                                 // UI-2
     assert.ok(m.includes('<img src=x onerror=alert(1)>'), 'shown as text');
-    assert.ok(m.includes('Waiting'), 'status shown');
+    assert.ok(m.includes('Held'), 'status shown');
     assert.ok($('progress').textContent.includes('Build it'));           // steps panel
     assert.ok(!created.has('IMG'));
   },
@@ -445,14 +492,17 @@ global.SC = {
     assert.strictEqual(posts.length, 2); assert.strictEqual(lastPost().jobs, 'stop');
     assert.notStrictEqual(posts[0].id, posts[1].id);
   },
-  async talk({assert, $, click, lastPost, type, byText, buttons}) {
+  async talk({assert, $, click, lastPost, type, byText, clipboard}) {
     await click($('talkbtn')); assert.ok(!$('talk').hidden);
     assert.ok($('talklog').textContent.includes('Hello manager'));
     type($('talkin'), 'please continue'); await click($('talksend'));
     assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().text], ['Chat', 'manager', 'please continue']);
     assert.strictEqual($('talkin').value, '');
     await click(byText($('talkacts'), 'Discuss')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['DiscussionStart', 'manager']);
-    assert.ok($('talkinfo').textContent.includes('orch terminal demo manager'));
+    const terminal = byText($('talkacts'), 'Open in terminal');
+    assert.strictEqual(terminal.attrs.title, 'orch terminal demo manager');
+    await click(terminal);
+    assert.deepStrictEqual(clipboard, ['orch terminal demo manager']);
   },
   async enterSends({assert, $, click, lastPost, type, settle}) {
     await click($('talkbtn')); type($('talkin'), 'by key');
@@ -479,10 +529,9 @@ global.SC = {
     assert.ok($('notices').textContent.includes('A terminal is open on Critic'));
     await click(byText($('notices'), 'Take back'));
     assert.deepStrictEqual([lastPost().type, lastPost().agent], ['TerminalTakeBack', 'critic']);
-    assert.ok($('notices').textContent.includes('Worker 1 stopped'));
-    await click(byText($('notices'), 'Remove old files')); assert.strictEqual(lastPost().type, 'ConfirmMigration');
-    await click(byText($('notices'), 'Dismiss'));
     assert.ok(!$('notices').textContent.includes('Worker 1 stopped'));
+    assert.ok($('messages').all().some(e => e.className.includes('notice-row') && e.textContent.includes('Worker 1 stopped')));
+    await click(byText($('notices'), 'Remove old files')); assert.strictEqual(lastPost().type, 'ConfirmMigration');
   },
   async milestones({assert, $, click, byText, lastPost, type}) {
     await click(byText($('progress'), 'Reopen')); assert.deepStrictEqual([lastPost().type, lastPost().milestone_id], ['ReopenMilestone', 'm0']);
@@ -527,10 +576,92 @@ global.SC = {
     await click(byText($('audit'), 'Save'));
     assert.deepStrictEqual([lastPost().type, lastPost().text, lastPost().base], ['AuditNotes', 'new notes', 'n1']);
   },
-  async messageDetail({assert, $, click, byText, gets}) {
-    const row = $('messages').all().find(e => e.tagName === 'DETAILS');
-    await click(byText(row, 'Show the text as sent')); assert.ok(row.textContent.includes('SENT TEXT'));
-    await click(byText(row, 'Show the whole reply')); assert.ok(row.textContent.includes('WHOLE REPLY'));
+  async messageDetail({assert, $, gets, refresh, getState, settle}) {
+    const detail = id => $('messages').all().find(e => e.dataset.message === id);
+    const open = async node => { assert.ok(node); node.open = true; node.fire('toggle'); await settle(); };
+    const fold = (row, label) => row.all().find(e => e.tagName === 'DETAILS' && e.children[0].textContent === label);
+    const row = detail('mu');
+    await open(row);
+    assert.ok(!gets.some(u => u.startsWith('api/message?')));
+    await open(fold(row, 'What Manager received'));
+    assert.ok(row.textContent.includes('SENT TEXT'));
+    assert.ok(row.textContent.includes('with Orch’s additions'));
+    const written = detail('mr');
+    await open(written);
+    assert.ok(!gets.some(u => u.startsWith('api/turn')));
+    const input = fold(written, "Input to the manager's turn that wrote this");
+    await open(input);
+    assert.ok(input.textContent.includes('TURN INPUT'));
+    assert.ok(!input.textContent.includes('SYSTEM INSTRUCTIONS'));
+    await open(fold(input, 'System instructions for Manager'));
+    assert.ok(input.textContent.includes('SYSTEM INSTRUCTIONS'));
+    await open(fold(written, "The manager's whole reply"));
+    assert.ok(written.textContent.includes('WHOLE REPLY'));
+    const state = getState();
+    state.messages.mr.status = 'delivered';
+    await refresh();
+    assert.ok(detail('mr').open && fold(detail('mr'), "The manager's whole reply").open);
+    assert.strictEqual(gets.filter(u => u.startsWith('api/turn')).length, 1);
+  },
+  async timelinePage({assert, $, byText, click, gets, refresh, getState, settle, store, type}) {
+    const state = getState();
+    for (let seq = 6; seq <= 83; seq++) {
+      const m = {id: 'typed-' + seq, seq, sender: 'manager', recipient: 'critic', body: 'Record ' + seq, status: 'answered'};
+      state.messages[m.id] = m;
+    }
+    await refresh();
+    const ids = () => $('messages').children.map(row => row.dataset.message);
+    assert.strictEqual(ids().length, 30);
+    assert.strictEqual(ids().at(-1), 'typed-83');
+    assert.strictEqual($('remaining').textContent, '53 older');
+    assert.ok(!$('show-all').hidden);
+    await click($('older'));
+    assert.strictEqual(ids().length, 60);
+    assert.ok(gets.some(url => url.includes('before=54')));
+    assert.ok($('show-all').hidden);
+    await click($('older'));
+    assert.strictEqual(ids().length, 83);
+    assert.ok($('message-pages').hidden);
+    await click(byText($('levels'), 'Manager ↔ Critic'));
+    assert.strictEqual(ids().length, 5);
+    assert.ok(!JSON.parse(store['orch-message-levels']).includes('critic'));
+    $('orch-notes').checked = false;
+    $('orch-notes').fire('change');
+    await settle();
+    assert.strictEqual(ids().length, 3);
+    assert.strictEqual(store['orch-message-notes'], '0');
+    type($('msearch'), 'Hello manager');
+    await new Promise(resolve => setTimeout(resolve, 12));
+    await settle();
+    assert.deepStrictEqual(ids(), ['mu']);
+    $('mwho').value = 'worker-1';
+    $('mwho').fire('change');
+    await settle();
+    assert.ok($('messages').textContent.includes('No messages match.'));
+  },
+  async answeredWithoutGates({assert, $, getState, refresh}) {
+    const gates = getState().gates;
+    Object.values(gates).forEach(g => { g.closed = 1; g.answer = {text: 'yes'}; });
+    await refresh();
+    assert.ok($('needs').hidden);
+  },
+  async caps({assert, $, byText, click, getState, refresh}) {
+    const state = getState();
+    for (let seq = 6; seq <= 27; seq++) {
+      const m = {id: 'talk-' + seq, seq, sender: 'manager', recipient: 'user', body: 'Conversation ' + seq, status: 'delivered'};
+      state.messages[m.id] = m;
+    }
+    state.checklist.steps[0].items = Array.from({length: 22}, (_, i) => [false, 'Task number ' + (i + 1)]);
+    await refresh();
+    assert.ok(!$('progress').all().some(el => el.tagName === 'SPAN' && el.textContent === 'Task number 1'));
+    assert.ok($('progress').textContent.includes('Task number 22'));
+    await click(byText($('progress'), 'Show more'));
+    assert.ok($('progress').textContent.includes('Task number 1'));
+    await click($('talkbtn'));
+    assert.ok(!$('talklog').textContent.includes('Hello manager'));
+    assert.ok($('talklog').textContent.includes('Conversation 27'));
+    await click(byText($('talklog'), 'Show more'));
+    assert.ok($('talklog').textContent.includes('Hello manager'));
   },
   async oldRuns({assert, $, click, byText, settle}) {
     await click($('runsbtn'));
@@ -605,6 +736,7 @@ def state_fixture():
         snap.messages[mid].created = t - 100
     snap.messages["mu"].sender, snap.messages["mu"].recipient = USER, "manager"
     snap.messages["mr"].sender, snap.messages["mr"].recipient = "manager", USER
+    snap.messages["mr"].turn = "r001-t01-manager"
     snap.messages["mw"].sender, snap.messages["mw"].recipient = "worker-1", USER
     for aid, ag in snap.agents.items():
         if aid != "worker-1":
@@ -744,6 +876,15 @@ class TestSmoke(unittest.TestCase):
 
     def test_UI_5_UI_2_message_details(self):
         self.run_scenario("messageDetail")
+
+    def test_UI_2_timeline_controls(self):
+        self.run_scenario("timelinePage")
+
+    def test_UI_3_answered_gates_do_not_need_you(self):
+        self.run_scenario("answeredWithoutGates")
+
+    def test_UI_2_checklist_and_talk_are_capped(self):
+        self.run_scenario("caps")
 
     def test_UI_6_old_runs_are_read_only(self):
         self.run_scenario("oldRuns")
