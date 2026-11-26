@@ -977,7 +977,7 @@ def validate(cfg: Config, check_paths: bool = False) -> List[str]:
 
     With ``check_paths`` the workspace / working directories must exist.
     """
-    from .backends import BACKENDS
+    from .runtime.adapters import ADAPTERS as BACKENDS
 
     warnings: List[str] = []
     seen = set()
