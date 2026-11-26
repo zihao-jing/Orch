@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orch.backends import OpenCodeBackend, TurnRequest, _OpenCodeLive
 from orch.opencode_recovery import ProviderRecovery
-from test_orch import FAKE_OPENCODE, make_cfg, pipeline, run, turns
+from test_orch import FAKE_OPENCODE, make_cfg, pipeline, turns
 
 ERROR = {"type": "provider.internal", "message": "api_error: upstream JSONDecodeError", "status": 200}
 
@@ -179,76 +179,6 @@ class TestOpenCodeRecovery(unittest.TestCase):
         self.assertIn('provider_recovery', result.meta)
         self.assertNotIn('error_kind', result.meta)
 
-    def test_stall_spends_all_fifteen_retries_before_fallback(self):
-        m = pipeline()
-        waits = [30, 60, 120, 240] + [480] * 11
-        m['agents'][0].update(backend='opencode', retries=3, retry_waits=waits,
-            backend_options={'executable': str(self.exe), 'provider_retry_timeout': 0.15},
-            env={'FAKE_OC_MODE': 'recovery_stall', 'FAKE_OC_LOG': str(self.d / 'calls.jsonl')},
-            fallback=[{'label': 'backup', 'backend': 'mock'}])
-        m['agents'][1]['backend_options'] = {'pass_after': 1}
-        with mock.patch('orch.controller.MonitorRunner.pause') as pause:
-            status, rec = run(make_cfg(self.d, [m]))
-        self.assertEqual([c.args[0] for c in pause.call_args_list], waits)
-        self.assertEqual(status, 'completed')
-        first = next(t for t in turns(rec) if t['agent'] == 'w1')
-        self.assertEqual([a['status'] for a in first['attempts']], ['error'] * 16 + ['ok'])
-        self.assertEqual(first['fallbacks'][0]['to'], 'backup')
-        self.assertIn('JSONDecodeError', first['fallbacks'][0]['reason'])
-        self.assertTrue(first['attempts'][0]['provider_recovery']['exhausted'])
-        self.assertIn('running jobs', first['input'])
-        self.assertIn('Already inspected done.md.', first['input'])
-        self.assertIn('done.md', first['input'])
-        self.assertEqual([r['wait_s'] for r in first['retries']], waits)
-        calls = [json.loads(x) for x in (self.d / 'calls.jsonl').read_text().splitlines()]
-        retries = [c for c in calls if c['args'][0] == 'run'][1:]
-        self.assertEqual(len(retries), 15)
-        for call in retries:
-            self.assertEqual(call['args'][call['args'].index('--session') + 1], 'ses_new1')
-            self.assertIn('running jobs', call['stdin'])
-            self.assertNotIn('Your task (round 1)', call['stdin'])
-        self.assertEqual(first['input'].count('Partial reply from the previous attempt:'), 1)
 
-    def test_same_provider_fallback_continues_the_existing_session(self):
-        m = pipeline()
-        m['agents'][0].update(backend='opencode', retry_waits=[],
-            backend_options={'executable': str(self.exe), 'provider_retry_timeout': 0.15},
-            env={'FAKE_OC_MODE': 'recovery_stall', 'FAKE_OC_LOG': str(self.d / 'calls.jsonl')},
-            fallback=[{'backend_options': {'model': 'recovered'}}])
-        m['agents'][1]['backend_options'] = {'pass_after': 1}
-        status, rec = run(make_cfg(self.d, [m]))
-        self.assertEqual(status, 'completed')
-        calls = [json.loads(x) for x in (self.d / 'calls.jsonl').read_text().splitlines()]
-        runs = [c for c in calls if c['args'][0] == 'run']
-        self.assertEqual(len(runs), 2)
-        self.assertNotIn('--session', runs[0]['args'])
-        self.assertIn('--session', runs[1]['args'])
-        self.assertEqual(runs[1]['args'][runs[1]['args'].index('--session') + 1], 'ses_new1')
-        self.assertIn('running jobs', runs[1]['stdin'])
-        self.assertNotIn('Your task (round 1)', runs[1]['stdin'])
 
-    def test_without_fallback_stall_fails_with_provider_diagnostic(self):
-        m = pipeline()
-        m['agents'][0].update(backend='opencode', retries=5, retry_waits=[60],
-            backend_options={'executable': str(self.exe), 'provider_retry_timeout': 0.15},
-            env={'FAKE_OC_MODE': 'recovery_stall', 'FAKE_OC_LOG': str(self.d / 'calls.jsonl')})
-        with mock.patch('orch.controller.MonitorRunner.pause') as pause:
-            status, rec = run(make_cfg(self.d, [m]))
-        pause.assert_called_once_with(60)
-        self.assertEqual(status, 'failed')
-        first = next(t for t in turns(rec) if t['agent'] == 'w1')
-        self.assertEqual(len(first['attempts']), 2)
-        self.assertEqual(first['meta']['error_kind'], 'provider_stall')
-        self.assertIn('JSONDecodeError', first['stderr'])
 
-    def test_hard_timeout_does_not_activate_fallback(self):
-        m = pipeline()
-        m['agents'][0].update(backend='opencode', safety_timeout=0.1,
-            backend_options={'executable': str(self.exe), 'provider_retry_timeout': 0.15},
-            env={'FAKE_OC_MODE': 'recovery_stall', 'FAKE_OC_LOG': str(self.d / 'calls.jsonl')},
-            fallback=[{'backend': 'mock'}])
-        status, rec = run(make_cfg(self.d, [m]))
-        first = next(t for t in turns(rec) if t['agent'] == 'w1')
-        self.assertEqual(first['status'], 'timeout')
-        self.assertEqual(len(first['attempts']), 1)
-        self.assertNotIn('fallbacks', first)

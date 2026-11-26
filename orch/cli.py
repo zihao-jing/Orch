@@ -20,8 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import __version__
-from .config import Config, ConfigError, find_project, is_config, load_config, settings_path, validate
-from .controller import MonitorRunner
+from .config import Config, ConfigError, find_project, is_config, load_config, require_managed, settings_path, validate
 from .recorder import read_json, write_json
 from . import report
 
@@ -139,12 +138,6 @@ fresh_session: compact      # each milestone: the session is summarised in place
         "agents/auditor/agent.yaml": AUDITOR_YAML,
         "agents/monitor/agent.yaml": MONITOR_YAML,
     }
-    from .config import PROMPTS_DIR
-    for name in ("manager", "critic", "worker", "auditor"):
-        files[f"agents/{name}/preference.md"] = PREFERENCE_STUB
-        # the role's default prompt, copied so this project can adapt it
-        if name != "auditor":  # the auditor keeps orch's prompt: it audits orch, not this project
-            files[f"agents/{name}/system_prompt.md"] = (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
     for rel, text in files.items():
         f = d / rel
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -284,15 +277,10 @@ def cmd_audit(a: argparse.Namespace) -> int:
     return rc
 
 
-PREFERENCE_STUB = """\
-<!-- The user's preferences for this agent in this project. Not added to the system prompt: the agent reads this file
-     when a request may touch a preference, and adds a line when the user states one. -->
-"""
-
-
 def _load(path: str, check_paths: bool) -> Config:
     try:
         cfg = load_config(path)
+        require_managed(cfg)
         for w in validate(cfg, check_paths=check_paths):
             print(f"warning: {w}", file=sys.stderr)
         return cfg
@@ -321,50 +309,6 @@ def cmd_validate(a: argparse.Namespace) -> int:
     return 0
 
 
-def _resume_plan(m: Any) -> List[str]:
-    """What `orch run --resume` would do for one monitor, read from its latest run. Changes nothing."""
-    from .recorder import Recorder
-    rec = Recorder.latest(m.output_dir, m.name)
-    if rec is None:
-        return [f"{m.name}: no earlier run; `orch run` starts a new one"]
-    st = rec.state
-    lines = [f"{m.name}: run {rec.run_dir.name} · status {st.get('status')} · round {st.get('round', 0)}"]
-    if st.get("status") == "completed":
-        return lines + ["  already completed; nothing to resume"]
-    if st.get("error"):
-        lines.append(f"  last error: {str(st['error']).strip().splitlines()[-1][:160]}")
-    mg = st.get("managed") or {}
-    if mg:
-        lines.append(f"  phase {mg.get('phase')} · milestone {int(mg.get('ms', 0)) + 1} · round in milestone {mg.get('ms_round', 0)}")
-        if mg.get("in_work"):
-            fin = rec.finished_turns(int(mg["in_work"]), "work")
-            lines.append(f"  round {mg['in_work']} was cut off: redone; workers already finished are kept: "
-                         f"{', '.join(sorted(fin)) or 'none'}")
-        if mg.get("job"):
-            lines.append("  waiting for a worker's background job; the wait resumes")
-        if mg.get("wait") or (mg.get("gate") or {}).get("kind") == "wait":
-            lines.append("  paused until your task is done (waiting on you)")
-    for a in m.agents:
-        sess = (st.get("sessions") or {}).get(a.name) or {}
-        sid = sess.get("session_id")
-        queued = len((st.get("fwd") or {}).get(a.name) or [])
-        if sid and sess.get("backend") not in (None, a.backend):
-            how = f"backend changed {sess.get('backend')} → {a.backend}: new session"
-        elif sid:
-            how = f"session {str(sid)[:8]} kept"
-        elif sess.get("turns"):
-            how = "NO session saved: starts fresh (only files and memory carry over)"
-        else:
-            how = "new session"
-        lines.append(f"  {a.name:<10} {how}; last turn {sess.get('last_status') or '—'}; "
-                     f"{queued} message(s) waiting to be delivered")
-    pending = [w for w in (st.get("worker_messages") or []) if w.get("status") not in ("accepted", "in_prompt")]
-    if pending:
-        lines.append(f"  {len(pending)} worker message(s) not yet acknowledged: "
-                     + ", ".join(sorted({str(w.get('status')) for w in pending})))
-    return lines
-
-
 def _get_engine_cls() -> Any:
     if Engine is not None:
         return Engine
@@ -376,6 +320,9 @@ def _make_adapters(clock: Any) -> Dict[str, Callable[[], Any]]:
     from .runtime import adapters as rt_adapters
     backends = ("claude", "qoder", "qwen", "codex", "opencode", "agy", "command", "mock")
     return {b: (lambda b=b: rt_adapters.make(b, clock)) for b in backends if b in rt_adapters.ADAPTERS}
+
+
+_STARTED_HEAD = ""  # the orch commit this process runs (read at its first run)
 
 
 def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) -> int:
@@ -406,11 +353,16 @@ def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) ->
     except (ValueError, OSError):
         pass
 
+    global _STARTED_HEAD
+    if not _STARTED_HEAD and not os.environ.get("ORCH_NO_GIT"):
+        from . import update
+        _STARTED_HEAD = update.head()
     engine_cls = _get_engine_cls()
     clock = SystemClock()
     adapters = _make_adapters(clock)
     engines: List[Any] = []
     servers: List[Any] = []
+    restart: Optional[Tuple[List[str], str]] = None
 
     try:
         for m in selected:
@@ -458,6 +410,11 @@ def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) ->
             while any(t.is_alive() for t in threads):
                 for t in threads:
                     t.join(0.5)
+                if any(getattr(e, "update_requested", False) for e in engines):
+                    restart = _take_update(a, engines, servers[0].server_address[1] if servers else None)
+                    if restart:
+                        stop.set()
+                        break
         except KeyboardInterrupt:
             stop.set()
     finally:
@@ -473,22 +430,48 @@ def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) ->
             signal.signal(signal.SIGINT, prev_int)
         except (ValueError, OSError):
             pass
+    if restart:  # the new code passed: carry on in it from where each run is; the agents never stopped (REC-9)
+        print(f"restarting with orch {restart[1]}: {' '.join(restart[0][1:])}", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(restart[0][0], restart[0])
     return 0
 
 
+def _take_update(a: argparse.Namespace, engines: List[Any], port: Optional[int]) -> Optional[Tuple[List[str], str]]:
+    """The dashboard's Update button: take in origin/main (or code already pulled by hand), check it with `orch
+    validate`, and return the command to restart with. No waiting for a quiet moment: the agents keep running while Orch
+    restarts and it reconnects to them. Each step goes to update.json in the run folders."""
+    from . import update
+    for e in engines:
+        e.update_requested = False
+
+    def tell(text: str, **status: Any) -> None:
+        print(text, flush=True)
+        for e in engines:
+            update.write_status(e.run_dir, {"message": text, **status})
+
+    config = str(Path(a.config).resolve())
+    started = _STARTED_HEAD or update.head()
+    res = update.apply(config)
+    if not res.get("ok"):
+        tell(f"⬆ update not done: {res.get('error')}", state="failed", error=res.get("error"))
+        return None
+    now = update.head()
+    if not now or now == started:
+        tell("⬆ orch is already up to date", state="current")
+        return None
+    if not res.get("updated"):  # pulled by hand since this process started: the code must still pass
+        bad = update.validate_code(config)
+        if bad:
+            tell(f"⬆ the orch checkout is at {now[:7]}, but it fails `orch validate`: {bad}", state="failed", error=bad)
+            return None
+    tell(f"⬆ orch updated {started[:7]} → {now[:7]}; Orch restarts and carries on where it stopped",
+         state="restarting", old=started[:7], new=now[:7])
+    return update.restart_argv(sys.argv, port), now[:7]
+
+
 def cmd_run(a: argparse.Namespace) -> int:
-    proj = find_project(a.config)
-    if proj is not None and settings_path(proj) is None:
-        # Check if any agent.yaml sets runtime: new before loading so settings.yaml can be migrated first
-        for ay in sorted((proj / "agents").glob("*/agent.yaml")):
-            try:
-                from .config import _read_raw
-                if str(_read_raw(ay).get("runtime", "") or "").strip() == "new":
-                    from .runtime import migrate as rt_migrate
-                    rt_migrate.write_settings(proj)
-                    break
-            except Exception:
-                pass
     cfg = _load(a.config, check_paths=True)
     selected = [m for m in cfg.monitors if (m.name in a.monitor if a.monitor else m.enabled)]
     if a.monitor:
@@ -497,211 +480,23 @@ def cmd_run(a: argparse.Namespace) -> int:
             raise SystemExit(f"unknown monitor(s): {', '.join(sorted(missing))}")
     if not selected:
         raise SystemExit("no monitors selected")
-    if cfg.runtime == "new" or any(getattr(m, "runtime", "") == "new" for m in selected):
-        return _run_new_runtime(a, cfg, selected)
-    if a.plan:
-        for m in selected:
-            print("\n".join(_resume_plan(m) if a.resume else [f"{m.name}: `--plan` shows the resume; add --resume"]))
-        return 0
-    if a.dry_run:
-        def mockify(ag):
-            return dataclasses.replace(ag, backend="mock", backend_options={"delay": 0.2})
-        selected = [dataclasses.replace(
-            m, agents=[mockify(x) for x in m.agents],
-            controller=dataclasses.replace(m.controller, agent=mockify(m.controller.agent) if m.controller.agent else None),
-        ) for m in selected]
-        print("dry run: every agent uses the mock backend")
-    if a.max_rounds:
-        selected = [dataclasses.replace(m, max_rounds=a.max_rounds) for m in selected]
-
-    stop = threading.Event()
-    lock = threading.Lock()
-
-    def log(s: str) -> None:
-        with lock:
-            print(time.strftime("%H:%M:%S ") + s, flush=True)
-
-    def on_sigint(signum, frame):
-        if stop.is_set():
-            raise SystemExit(130)
-        log("stopping: current turns are being terminated (Ctrl-C again to force)")
-        stop.set()
-
-    signal.signal(signal.SIGINT, on_sigint)
-    try:
-        signal.signal(signal.SIGTERM, on_sigint)
-    except (ValueError, OSError):
-        pass
-
-    results = {}
-    runners = [MonitorRunner(m, stop, resume=a.resume, log=log, max_rounds_given=bool(a.max_rounds)) for m in selected]
-    srv = None
-    if a.serve:
-        from .board import Board, serve
-        boards = {r.mon.name: Board(r.mon.name, (lambda r=r: getattr(r, "rec", None) and r.rec.run_dir), r.mon)
-                  for r in runners}
-        srv, url = serve(boards, host=a.host, port=a.port)
-        log(f"board: {url}  (live progress, your questions and approvals, chat with the manager; logs at {url}log/)")
-        if a.open:
-            import webbrowser
-            webbrowser.open(url)
-    threads = []
-    for r in runners:
-        t = threading.Thread(target=lambda r=r: results.__setitem__(r.mon.name, r.run()), name=r.mon.name, daemon=True)
-        t.start()
-        threads.append(t)
-    restart: Dict[str, Any] = {}
-    if not a.dry_run:  # the board's Update button: nothing is updated without it
-        threading.Thread(target=_auto_update, args=(a, runners, threads, stop, restart, log), name="auto-update",
-                         daemon=True).start()
-    while any(t.is_alive() for t in threads):
-        for t in threads:
-            t.join(timeout=0.3)
-    if restart:  # a newer orch was taken in while every run waited: carry on in it, from where each run stopped
-        from . import update
-        argv = update.restart_argv(sys.argv, srv.server_address[1] if srv is not None else None)
-        log(f"restarting with orch {restart['new']}: {' '.join(argv[1:])}")
-        if srv is not None:
-            srv.shutdown()
-            srv.server_close()  # the new process takes the same port
-        sys.stdout.flush()
-        sys.stderr.flush()
-        os.execv(argv[0], argv)
-    print("\nsummary:")
-    for r in runners:
-        rd = getattr(r, "rec", None)
-        print(f"  {r.mon.name:<20} {results.get(r.mon.name, '?'):<20} {rd.run_dir / 'report.html' if rd else ''}")
-    if runners and getattr(runners[0], "rec", None):
-        print(f"index: {Path(selected[0].output_dir) / 'index.html'}")
-    if a.serve and not stop.is_set():
-        print(f"the board stays up at {url} (Ctrl-C to quit)", flush=True)
-        try:
-            while not stop.is_set():
-                time.sleep(0.5)
-        except (KeyboardInterrupt, SystemExit):
-            pass
-    return 0 if all(v == "completed" for v in results.values()) else 2
-
-
-def _update_ready(runners: List[Any]) -> bool:
-    """Every run of this process waits for me (a gate, a job, a pause), with no turn and no audit running."""
-    from . import update
-    for r in runners:
-        rec = getattr(r, "rec", None)
-        if rec is None or str(rec.state.get("status") or "") not in update.RESTART_STATUSES:
-            return False
-        if rec.state.get("auditing") or any(rec.agent_busy(ag.name) for ag in r.mon.agents):
-            return False
-    return bool(runners)
-
-
-POLL_UPDATE = 2.0  # seconds between looks for an update request (a file in the run folder; local reads only)
-
-
-def _update_requested(runners: List[Any]) -> List[Path]:
-    """The UPDATE files the board's Update button wrote into the runs' folders."""
-    out = []
-    for r in runners:
-        rec = getattr(r, "rec", None)
-        if rec is not None and (rec.run_dir / update_mod().REQUEST).exists():
-            out.append(rec.run_dir / update_mod().REQUEST)
-    return out
-
-
-def update_mod() -> Any:
-    from . import update
-    return update
-
-
-def _auto_update(a: argparse.Namespace, runners: List[Any], threads: List[threading.Thread], stop: threading.Event,
-                 restart: Dict[str, Any], log: Callable[[str], None]) -> None:
-    """The board's Update button (an UPDATE file in a run's folder): once every run of this process waits for me with
-    nothing running, take in the newer orch from origin/main (or code already pulled by hand), check it with `orch
-    validate`, and stop the runs so that cmd_run restarts as `orch run … --resume`. Nothing happens without the button.
-    Each step is written to update.json in the run folders, where the board shows it."""
-    update = update_mod()
-    config = str(Path(a.config).resolve())
-    started = update.head()
-
-    def tell(text: str, **status: Any) -> None:
-        log(text)
-        for r in runners:
-            if getattr(r, "rec", None) is not None:
-                r.rec.progress(text)
-                update.write_status(r.rec.run_dir, {"message": text, **status})
-
-    def clear() -> None:
-        for f in _update_requested(runners):
-            f.unlink(missing_ok=True)
-
-    waiting = False
-    pending = ""  # new code on disk that passed, to restart into at the next quiet moment
-    while not stop.wait(POLL_UPDATE):
-        if not started or not any(t.is_alive() for t in threads) or not (pending or _update_requested(runners)):
-            continue
-        if not _update_ready(runners):  # a turn, chat or audit: the update starts when it ends
-            if not waiting:
-                waiting = True
-                tell("⬆ update requested: it starts at the next point where the run waits for you with nothing running",
-                     state="waiting")
-            continue
-        if not pending:
-            res = update.apply(config)
-            if not res.get("ok"):
-                clear()
-                waiting = False
-                tell(f"⬆ update not done: {res.get('error')}", state="failed", error=res.get("error"))
-                continue
-            now = update.head()
-            if not now or now == started:
-                clear()
-                waiting = False
-                tell("⬆ orch is already up to date", state="current")
-                continue
-            if not res.get("updated"):  # pulled by hand since this process started: the code must still pass
-                bad = update.validate_code(config)
-                if bad:
-                    clear()
-                    waiting = False
-                    tell(f"⬆ the orch checkout is at {now[:7]}, but it fails `orch validate`: {bad}", state="failed",
-                         error=bad)
-                    continue
-            pending = now
-            if not _update_ready(runners):  # a chat started meanwhile: restart when it ends
-                continue
-        clear()
-        restart.update(old=started[:7], new=pending[:7])
-        for r in runners:
-            r.rec.event("orch_update", old=started[:7], new=pending[:7])
-        tell(f"⬆ orch updated {started[:7]} → {pending[:7]}; the run restarts and carries on where it stopped",
-             state="restarting", old=started[:7], new=pending[:7])
-        stop.set()
-        return
+    return _run_new_runtime(a, cfg, selected)
 
 
 def cmd_serve(a: argparse.Namespace) -> int:
-    """Board for existing runs: a config (chat enabled, latest run per monitor) or a run folder (read-only)."""
-    from .board import Board, serve
-    p = Path(a.target).expanduser().resolve()
-    boards = {}
-    if is_config(str(p)):
-        cfg = _load(str(p), check_paths=False)
-        for m in cfg.monitors:
-            if a.monitor and m.name not in a.monitor:
-                continue
-            md = Path(m.output_dir) / m.name
-
-            def latest(md=md):
-                runs = _runs_in(md) if md.is_dir() else []
-                return runs[-1] if runs else None
-            boards[m.name] = Board(m.name, latest, m)
-    else:
-        for run in resolve_runs(a.target, a.monitor):
-            boards[run.parent.name] = Board(run.parent.name, (lambda run=run: run), None)
-    if not boards:
+    """The dashboard for saved runs, without running them: a project or config (its latest run; the others in the run
+    list), or a run folder. Old runs are read-only; a command for a new one waits in its commands/ folder for its Orch."""
+    from .runtime import board as rt_board
+    from .runtime import texts as rt_texts
+    runs = resolve_runs(a.target, a.monitor)
+    if not runs:
         raise SystemExit("nothing to show")
-    _, url = serve(boards, host=a.host, port=a.port)
-    print(f"board: {url}   logs: {url}log/   (Ctrl-C to quit)", flush=True)
+    run = max(runs, key=lambda r: (r / "state.json").stat().st_mtime if (r / "state.json").exists() else 0)
+    viewer = rt_board.Viewer(run)
+    words = (lambda ref: rt_texts.words(ref, viewer.snapshot()))
+    _, url = rt_board.serve(rt_board.Board(viewer, run, words=words, runs_root=run.parent.parent),
+                            host=a.host, port=a.port)
+    print(f"board: {url}   (Ctrl-C to quit)", flush=True)
     if a.open:
         import webbrowser
         webbrowser.open(url)
@@ -724,6 +519,18 @@ def _is_new_run(run: Path, target: str = "") -> bool:
         except Exception:
             pass
     return False
+
+
+def _new_runs(a: argparse.Namespace) -> List[Path]:
+    """The runs a command is for; an old run (before the runtime) can only be read (`orch serve`, `orch show`)."""
+    runs = resolve_runs(a.target, a.monitor)
+    if not runs:
+        print("no runs found")
+    new = [r for r in runs if _is_new_run(r, a.target)]
+    for r in runs:
+        if r not in new:
+            print(f"{r}: an old run, which can only be read (orch serve / orch show)")
+    return new
 
 
 def _new_command_id() -> str:
@@ -773,50 +580,26 @@ def _open_gate_id(run: Path, gate_arg: str = "") -> str:
     return ""
 
 
-def _control(a: argparse.Namespace, data: dict) -> int:
-    runs = resolve_runs(a.target, a.monitor)
-    if not runs:
-        print("no runs found")
-        return 1
-    for run in runs:
-        inbox = run / "inbox"
-        inbox.mkdir(exist_ok=True)
-        p = inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}-{data['kind']}.json"
-        write_json(p, data)
-        print(f"queued: {p}")
-    return 0
-
-
 def cmd_approve(a: argparse.Namespace) -> int:
-    runs = resolve_runs(a.target, a.monitor)
-    if runs and all(_is_new_run(r, a.target) for r in runs):
-        from .runtime.contracts import GateAnswer
-        now = time.time()
-        for run in runs:
-            gid = _open_gate_id(run, getattr(a, "gate", "") or "")
-            if a.revise is not None:
-                cmd = GateAnswer(at=now, id=_new_command_id(), gate_id=gid, text=a.revise, approve=False)
-            else:
-                cmd = GateAnswer(at=now, id=_new_command_id(), gate_id=gid, text=a.note or "", approve=True)
-            p = write_command(run, cmd)
-            print(f"queued: {p}")
-        return 0
-    if a.revise is not None:
-        return _control(a, {"kind": "gate", "decision": "revise", "message": a.revise})
-    return _control(a, {"kind": "gate", "decision": "approve", "message": a.note or ""})
+    from .runtime.contracts import GateAnswer
+    runs = _new_runs(a)
+    for run in runs:
+        gid = _open_gate_id(run, getattr(a, "gate", "") or "")
+        if a.revise is not None:
+            cmd = GateAnswer(at=time.time(), id=_new_command_id(), gate_id=gid, text=a.revise, approve=False)
+        else:
+            cmd = GateAnswer(at=time.time(), id=_new_command_id(), gate_id=gid, text=a.note or "", approve=True)
+        print(f"queued: {write_command(run, cmd)}")
+    return 0 if runs else 1
 
 
 def cmd_answer(a: argparse.Namespace) -> int:
-    runs = resolve_runs(a.target, a.monitor)
-    if runs and all(_is_new_run(r, a.target) for r in runs):
-        from .runtime.contracts import GateAnswer
-        now = time.time()
-        for run in runs:
-            cmd = GateAnswer(at=now, id=_new_command_id(), gate_id=a.qid, text=a.message)
-            p = write_command(run, cmd)
-            print(f"queued: {p}")
-        return 0
-    return _control(a, {"kind": "answer", "qid": a.qid.upper(), "message": a.message})
+    from .runtime.contracts import GateAnswer
+    runs = _new_runs(a)
+    for run in runs:
+        cmd = GateAnswer(at=time.time(), id=_new_command_id(), gate_id=a.qid, text=a.message)
+        print(f"queued: {write_command(run, cmd)}")
+    return 0 if runs else 1
 
 
 def cmd_status(a: argparse.Namespace) -> int:
@@ -880,124 +663,33 @@ def cmd_show(a: argparse.Namespace) -> int:
 
 
 def cmd_stop(a: argparse.Namespace) -> int:
-    runs = resolve_runs(a.target, a.monitor)
-    if not runs:
-        print("no runs found")
-        return 1
-    now = time.time()
+    from .runtime.contracts import StopOrch
+    runs = _new_runs(a)
     for run in runs:
-        if _is_new_run(run, a.target):
-            from .runtime.contracts import StopOrch
-            cmd = StopOrch(at=now, id=_new_command_id(), agents=bool(getattr(a, "agents", False)))
-            p = write_command(run, cmd)
-            print(f"stop requested: {p}")
-        else:
-            (run / "STOP").write_text(time.strftime("%Y-%m-%dT%H:%M:%S"), encoding="utf-8")
-            print(f"stop requested: {run}")
-    return 0
-
-
-def cmd_reset_sessions(a: argparse.Namespace) -> int:
-    """Clear the agents' conversations of the latest managed run; the run keeps its place and records."""
-    from .managed import ManagedRunner
-    from .recorder import Recorder
-    cfg = load_config(a.target)
-    mons = [m for m in cfg.monitors if not a.monitor or m.name in a.monitor]
-    if not mons:
-        print("no monitors selected")
-        return 1
-    rc = 0
-    for m in mons:
-        if m.controller.mode != "managed":
-            print(f"{m.name}: only managed runs have sessions to reset")
-            rc = 1
-            continue
-        rec = Recorder.latest(m.output_dir, m.name)
-        if rec is None:
-            print(f"{m.name}: no run yet")
-            rc = 1
-            continue
-        if rec.state.get("status") in ("running", "awaiting_approval", "waiting_job") and not a.force:
-            print(f"{m.name}: the run looks active ({rec.state.get('status')}); stop it first (Ctrl-C or `orch stop`), "
-                  f"or add --force if it is not running")
-            rc = 1
-            continue
-        r = ManagedRunner(m, threading.Event(), resume=True, log=print)
-        r.rec = rec
-        done = r.reset_sessions(a.agent or None)
-        print(f"{m.name}: fresh sessions for {', '.join(done) or 'nobody'} in {rec.run_dir.name}; "
-              f"each gets a handover on its next turn. Continue with `orch run {a.target} --resume`.")
-    return rc
-
-
-def cmd_inject(a: argparse.Namespace) -> int:
-    runs = resolve_runs(a.target, a.monitor)
-    if not runs:
-        print("no runs found")
-        return 1
-    text = a.message if a.message != "-" else sys.stdin.read()
-    for run in runs:
-        inbox = run / "inbox"
-        inbox.mkdir(exist_ok=True)
-        p = inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.json"
-        write_json(p, {"to": a.to or None, "message": text, **({"urgent": True} if a.urgent else {})})
-        print(f"urgent, queued for immediate delivery: {p}" if a.urgent else f"queued for next round: {p}")
-    return 0
-
-
-def _drop_message(run: Path, text: str, to: Optional[List[str]], urgent: bool) -> Path:
-    """Write one human message into run/inbox/ (the same file format `inject` uses)."""
-    inbox = run / "inbox"
-    inbox.mkdir(exist_ok=True)
-    p = inbox / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.json"
-    write_json(p, {"to": to or None, "message": text, **({"urgent": True} if urgent else {})})
-    return p
+        cmd = StopOrch(at=time.time(), id=_new_command_id(), agents=bool(getattr(a, "agents", False)))
+        print(f"stop requested: {write_command(run, cmd)}")
+    return 0 if runs else 1
 
 
 def cmd_tell(a: argparse.Namespace) -> int:
-    """Message one agent (critic or worker) directly: `orch tell <run> <agent> "<text>" [--urgent]`."""
-    runs = resolve_runs(a.target, a.monitor)
-    if not runs:
-        print("no runs found")
-        return 1
+    """Message one agent directly: `orch tell <run> <agent> "<text>"`."""
+    from .runtime.contracts import Chat
     text = a.message if a.message != "-" else sys.stdin.read()
     if not text.strip():
         print("empty message")
         return 1
-    status = 0
-    now = time.time()
+    runs = _new_runs(a)
+    status = 0 if runs else 1
     for run in runs:
-        if _is_new_run(run, a.target):
-            from .runtime.contracts import Chat
-            st = read_json(run / "state.json", {}) or {}
-            snap_agents = ((st.get("runtime") or {}).get("snap") or {}).get("agents") or {}
-            cfg = read_json(run / "config.json", {}) or {}
-            names = list(snap_agents.keys()) or [x.get("name") for x in cfg.get("agents", []) if isinstance(x, dict)]
-            if names and a.agent not in names:
-                print(f"{run}: no agent named {a.agent!r} (agents: {', '.join(n for n in names if n)})")
-                status = 1
-                continue
-            cmd = Chat(agent=a.agent, at=now, id=_new_command_id(), text=text)
-            p = write_command(run, cmd)
-            print(f"queued for {a.agent}: {p}")
-            continue
-        cfg = read_json(run / "config.json", {}) or {}
-        names = [x.get("name") for x in cfg.get("agents", []) if isinstance(x, dict)]
+        st = read_json(run / "state.json", {}) or {}
+        names = list((((st.get("runtime") or {}).get("snap") or {}).get("agents") or {}).keys())
         if names and a.agent not in names:
-            print(f"{run}: no agent named {a.agent!r} (agents: {', '.join(n for n in names if n)})")
+            print(f"{run}: no agent named {a.agent!r} (agents: {', '.join(names)})")
             status = 1
             continue
-        p = _drop_message(run, text, [a.agent], a.urgent)
-        print(f"urgent, queued for immediate delivery to {a.agent}: {p}" if a.urgent
-              else f"queued for {a.agent}'s next turn: {p}")
+        p = write_command(run, Chat(agent=a.agent, at=time.time(), id=_new_command_id(), text=text))
+        print(f"queued for {a.agent}: {p}")
     return status
-
-
-def hook_settings(python: str = "python3") -> Dict[str, Any]:
-    """The Claude Code hook configuration for orch/hooks/terminal_relay.py (to merge into a settings file)."""
-    script = str(Path(__file__).resolve().parent / "hooks" / "terminal_relay.py")
-    entry = [{"hooks": [{"type": "command", "command": f"{python} {script}", "timeout": 10}]}]
-    return {"hooks": {ev: entry for ev in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")}}
 
 
 def _terminal_new_run(a: argparse.Namespace, run: Path) -> int:
@@ -1076,36 +768,9 @@ def _terminal_new_run(a: argparse.Namespace, run: Path) -> int:
 
 
 def cmd_terminal(a: argparse.Namespace) -> int:
-    """Open an agent's session (the manager's by default) in a terminal without two writers: prints the command
-    that resumes it with the environment the relay hook reads, or (--hooks) the hook configuration to install.
-    Nothing is written to any settings file."""
-    if a.hooks:
-        print("# Merge into .claude/settings.local.json of the project (or ~/.claude/settings.json). orch does not")
-        print("# write it for you. The hook does nothing outside an orch run, nor in the turns orch runs itself.")
-        print(json.dumps(hook_settings(), indent=2))
-        return 0
-    runs = resolve_runs(a.target, a.monitor)
-    if not runs:
-        print("no runs found")
-        return 1
-    run = runs[0]
-    if _is_new_run(run, a.target):
-        return _terminal_new_run(a, run)
-    st = read_json(run / "state.json", {}) or {}
-    sessions = st.get("sessions") or {}
-    name = a.agent or next((n for n, x in sessions.items() if (x or {}).get("role") == "manager"), None)
-    sid = ((sessions.get(name) or {}) if name else {}).get("session_id")
-    if not sid:
-        print(f"{run}: {name or 'the manager'} has no session yet")
-        return 1
-    cfg = read_json(run / "config.json", {}) or {}
-    ag = next((x for x in cfg.get("agents", []) if isinstance(x, dict) and x.get("name") == name), {})
-    cwd = ag.get("working_dir") or cfg.get("working_dir") or "."
-    print(f"cd {shlex.quote(str(cwd))} && ORCH_RUN_DIR={shlex.quote(str(run))} ORCH_AGENT={shlex.quote(name)} "
-          f"claude --resume {shlex.quote(sid)}")
-    print("# with the relay hook installed (`orch terminal --hooks`), orch holds this agent's turns while the session "
-          "is open and routes its <message> tags.")
-    return 0
+    """Open an agent's session (the manager's by default) in a terminal: Orch holds its messages meanwhile (TERM)."""
+    runs = _new_runs(a)
+    return _terminal_new_run(a, runs[0]) if runs else 1
 
 
 def cmd_report(a: argparse.Namespace) -> int:
@@ -1141,10 +806,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("config", nargs="?", default=".", help="config file or project folder (default: ./.orch)")
     p.add_argument("-m", "--monitor", action="append", help="only this monitor (repeatable); default: all enabled")
     p.add_argument("--resume", action="store_true", help="continue each monitor's latest unfinished run and sessions")
-    p.add_argument("--dry-run", action="store_true", help="replace every backend with the mock backend")
-    p.add_argument("--plan", action="store_true",
-                   help="with --resume: print what the resume will do for each agent, then stop (nothing runs)")
-    p.add_argument("--max-rounds", type=int, help="override max_rounds for this invocation")
     p.add_argument("--serve", action="store_true", help="also start the board (local web page) for these runs")
     p.add_argument("--port", type=int, default=8765, help="board port (default 8765; the next free one is used)")
     p.add_argument("--host", default="127.0.0.1",
@@ -1153,7 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--open", action="store_true", help="open the board in the browser")
     p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("serve", help="start the board for existing runs (config: chat with the manager enabled)")
+    p = sub.add_parser("serve", help="start the board for saved runs, without running them")
     p.add_argument("target", nargs="?", default=".", help="project folder or config (default: ./.orch), or a run dir")
     p.add_argument("-m", "--monitor", action="append")
     p.add_argument("--port", type=int, default=8765)
@@ -1163,14 +824,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--open", action="store_true")
     p.set_defaults(func=cmd_serve)
 
-    p = sub.add_parser("approve", help="managed mode: approve the plan / milestone the run is waiting on")
+    p = sub.add_parser("approve", help="approve the plan / milestone the run is waiting on")
     p.add_argument("target", nargs="?", default=".")
     p.add_argument("-m", "--monitor", action="append")
     p.add_argument("--note", help="a note for the manager along with the approval")
     p.add_argument("--revise", metavar="TEXT", help="send it back instead, with what still needs work")
     p.set_defaults(func=cmd_approve)
 
-    p = sub.add_parser("answer", help="managed mode: answer an open question, e.g. orch answer cfg.yaml Q3 \"B\"")
+    p = sub.add_parser("answer", help="answer an open question, e.g. orch answer . Q3 \"B\"")
     p.add_argument("target")
     p.add_argument("qid")
     p.add_argument("message")
@@ -1190,15 +851,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--width", type=int, default=90)
     p.set_defaults(func=cmd_show)
 
-    p = sub.add_parser("reset-sessions", help="managed mode: clear the agents' conversations and carry on from where "
-                                              "the run is (each agent gets a handover)")
-    p.add_argument("target", help="config or project folder")
-    p.add_argument("-m", "--monitor", action="append")
-    p.add_argument("--agent", action="append", help="only this agent (repeatable); default: all three roles")
-    p.add_argument("--force", action="store_true", help="even if the run's status says it is still active")
-    p.set_defaults(func=cmd_reset_sessions)
-
-    p = sub.add_parser("stop", help="ask a running monitor to stop after its current turn")
+    p = sub.add_parser("stop", help="close Orch for a run (the agents carry on unless --agents)")
     p.add_argument("target")
     p.add_argument("-m", "--monitor", action="append")
     p.add_argument("--agents", action="store_true", help="also stop the running agents and their jobs")
@@ -1206,37 +859,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("tell", help="message one agent directly, e.g. orch tell <run> critic \"focus on X\"")
     p.add_argument("target")
-    p.add_argument("agent", help="agent name from config.json, e.g. critic or worker")
+    p.add_argument("agent", help="agent id, e.g. critic or worker-1")
     p.add_argument("message", help="text, or - to read stdin")
     p.add_argument("-m", "--monitor", action="append")
-    p.add_argument("--urgent", action="store_true",
-                   help="deliver now: a running turn is interrupted or, for managed critic/worker, the message "
-                        "is injected into the live session")
     p.set_defaults(func=cmd_tell)
 
-    p = sub.add_parser("inject", help="send a human message into the next round")
-    p.add_argument("target")
-    p.add_argument("message", help="text, or - to read stdin")
-    p.add_argument("-m", "--monitor", action="append")
-    p.add_argument("--to", action="append", help="only these agents (pipeline); annotated for the llm controller")
-    p.add_argument("--urgent", action="store_true",
-                   help="don't wait for the next turn: if the agent is mid-turn it is stopped and carries on with this "
-                        "message in the same session (managed: critic check-ins leave the worker running)")
-    p.set_defaults(func=cmd_inject)
-
-    p = sub.add_parser("audit", help="managed mode: audit how the agents talk (the auditor's findings go to audit.md)")
+    p = sub.add_parser("audit", help="audit how the agents talk (the auditor's findings go to audit.md)")
     p.add_argument("target", nargs="?", default=".", help="project root, config file or run dir")
     p.add_argument("--monitor", action="append", help="only these monitors")
     p.add_argument("--rounds", help="N or A-B (default: the last audit_every rounds)")
     p.add_argument("--digest", action="store_true", help="print the digest the auditor would read; no model call")
     p.set_defaults(func=cmd_audit)
 
-    p = sub.add_parser("terminal", help="managed mode: the command that opens an agent's session in a terminal "
-                                        "(its messages are routed), or --hooks: the relay hook settings to install")
+    p = sub.add_parser("terminal", help="open an agent's session in a terminal (Orch holds its messages meanwhile)")
     p.add_argument("target", nargs="?", default=".")
     p.add_argument("agent", nargs="?", default=None, help="agent name (default: the manager)")
     p.add_argument("--monitor", action="append")
-    p.add_argument("--hooks", action="store_true", help="print the Claude Code hook settings (writes nothing)")
     p.set_defaults(func=cmd_terminal)
 
     p = sub.add_parser("report", help="regenerate HTML reports")

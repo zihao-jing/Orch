@@ -732,10 +732,8 @@ def _writing_file(value: Any, base: Path, proj: Optional[Path]) -> str:
 def _project_raw(orch_dir: Path) -> Dict[str, Any]:
     """Turn a .orch folder (one workflow made of agent folders) into the structure of a config file."""
     ps = project_settings(orch_dir)
-    is_new_rt = str(ps.get("runtime", "") or "").strip() == "new"
-    if is_new_rt:
-        from .runtime import migrate as rt_migrate
-        rt_migrate.backup_prompts(orch_dir)
+    from .runtime import migrate as rt_migrate
+    rt_migrate.backup_prompts(orch_dir)  # one runtime now (N): Orch's prompts, a project's own copy kept as .bak
     mon: Dict[str, Any] = {}
     owner: Dict[str, str] = {}
     ctrl: Dict[str, Any] = {}
@@ -752,18 +750,14 @@ def _project_raw(orch_dir: Path) -> Dict[str, Any]:
                 raise ConfigError(f"{k!r} is set differently in agents/{owner[k]} and agents/{d.name}")
             owner[k] = d.name
             (mon if k in MONITOR_KEYS else ctrl)[k] = v
-        if is_new_rt or str(mon.get("runtime", "") or "").strip() == "new":
-            role = ROLE_ALIASES.get(str(raw.get("role", "worker")), str(raw.get("role", "worker")))
-            if role in ("manager", "verifier", "monitor"):
-                raw.pop("system_prompt", None)
-                rt_name = "critic" if role == "verifier" else role
-                raw["system_prompt_file"] = str(Path(__file__).with_name("runtime") / "prompts" / f"{rt_name}.md")
-            elif role == "worker" and not raw.get("task") and (d / "system_prompt.md").is_file():
-                raw["task"] = (d / "system_prompt.md").read_text(encoding="utf-8").strip()
+        role = ROLE_ALIASES.get(str(raw.get("role", "worker")), str(raw.get("role", "worker")))
+        if role in ("manager", "verifier", "monitor"):
+            raw.pop("system_prompt", None)
+            rt_name = "critic" if role == "verifier" else role
+            raw["system_prompt_file"] = str(Path(__file__).with_name("runtime") / "prompts" / f"{rt_name}.md")
+        elif role == "worker" and not raw.get("task") and (d / "system_prompt.md").is_file():
+            raw["task"] = (d / "system_prompt.md").read_text(encoding="utf-8").strip()
         agents.append(raw)
-    if str(mon.get("runtime", "") or "").strip() == "new" and not is_new_rt:
-        from .runtime import migrate as rt_migrate
-        rt_migrate.backup_prompts(orch_dir)
     agents.sort(key=lambda a: order.get(ROLE_ALIASES.get(str(a.get("role")), str(a.get("role"))), 3))
     roles = {ROLE_ALIASES.get(str(a.get("role")), str(a.get("role"))) for a in agents}
     ctrl.setdefault("mode", "managed" if "manager" in roles else "pipeline")
@@ -926,21 +920,20 @@ def load_config(path: str) -> Config:
             if controller.mode == "managed" and a.role in ("manager", "verifier", "worker"):
                 own = proj / "style-rules.md" if proj else None
                 a.style_path = str(own if own and own.is_file() else PROMPTS_DIR / "style-rules.md")
-        m_runtime = str(mraw.get("runtime", "") or raw.get("runtime", "") or "").strip()
-        if m_runtime == "new":
-            from .runtime import migrate as rt_migrate
-            for a in agents:
-                if a.role in ("manager", "verifier", "monitor"):
-                    defaults_sp = rt_migrate._orch_prompts_for(a.role)
-                    if a.system_prompt_path:
-                        sp_p = Path(a.system_prompt_path)
-                        if sp_p.is_file() and PROMPTS_DIR not in sp_p.parents and rt_migrate.RUNTIME_PROMPTS_DIR not in sp_p.parents:
-                            txt = sp_p.read_text(encoding="utf-8").strip()
-                            if txt and txt not in defaults_sp:
-                                os.replace(sp_p, Path(str(sp_p) + ".bak"))
-                    a.system_prompt = ""
-                    rt_name = "critic" if a.role == "verifier" else a.role
-                    a.system_prompt_path = str(rt_migrate.RUNTIME_PROMPTS_DIR / f"{rt_name}.md")
+        m_runtime = "new"  # the only runtime (N); a `runtime:` key is still accepted
+        from .runtime import migrate as rt_migrate
+        for a in agents:
+            if a.role in ("manager", "verifier", "monitor"):
+                defaults_sp = rt_migrate._orch_prompts_for(a.role)
+                if a.system_prompt_path:
+                    sp_p = Path(a.system_prompt_path)
+                    if sp_p.is_file() and PROMPTS_DIR not in sp_p.parents and rt_migrate.RUNTIME_PROMPTS_DIR not in sp_p.parents:
+                        txt = sp_p.read_text(encoding="utf-8").strip()
+                        if txt and txt not in defaults_sp:
+                            os.replace(sp_p, Path(str(sp_p) + ".bak"))
+                a.system_prompt = ""
+                rt_name = "critic" if a.role == "verifier" else a.role
+                a.system_prompt_path = str(rt_migrate.RUNTIME_PROMPTS_DIR / f"{rt_name}.md")
         m_known = {"name", "workspace", "working_dir", "goal", "max_rounds", "controller", "agents",
                    "defaults", "output_dir", "enabled", "runtime"}
         unknown = set(mraw) - m_known
@@ -960,7 +953,7 @@ def load_config(path: str) -> Config:
             runtime=m_runtime,
         ))
 
-    top_runtime = str(raw.get("runtime", "") or (monitors[0].runtime if monitors else "") or "").strip()
+    top_runtime = "new"
     settings_dict = {k: raw[k] for k in SETTINGS_KEYS if k in raw}
     cfg = Config(path=str(cfg_path), output_dir=output_dir, monitors=monitors, runtime=top_runtime, settings=settings_dict)
     validate(cfg)
@@ -968,6 +961,15 @@ def load_config(path: str) -> Config:
 
 
 # --------------------------------------------------------------------------- validation
+
+
+def require_managed(cfg: Config) -> None:
+    """DEL: the pipeline and controller modes were removed; `orch run` and `orch validate` refuse them (a config file
+    still loads, so its settings can be read)."""
+    for m in cfg.monitors:
+        if m.controller.mode != "managed":
+            raise ConfigError(f"monitor {m.name!r}: the {m.controller.mode} mode was removed: a run needs a manager, a "
+                              f"critic and workers (orch init --project writes one)")
 
 
 def validate(cfg: Config, check_paths: bool = False) -> List[str]:

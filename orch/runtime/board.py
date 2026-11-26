@@ -316,6 +316,61 @@ class Board:
         return self._run_folders().get(key)  # only folders found by listing: no path from the request is used
 
 
+class Viewer:
+    """A saved run shown without its Orch (`orch serve`): read again when state.json changes, since an `orch run` may be
+    writing it. A command goes into the run's commands/ folder, where the Orch that runs it (if any) takes it."""
+
+    def __init__(self, run_dir: Path):
+        self.run_dir = Path(run_dir)
+        self._key: Any = None
+        self._store: Any = None
+        self._snap: Optional[Snapshot] = None
+        self._lock = threading.Lock()
+
+    def snapshot(self) -> Snapshot:
+        from .adapters.base import SystemClock
+        from .store import Store
+        f = self.run_dir / "state.json"
+        try:
+            key = (f.stat().st_mtime_ns, f.stat().st_size)
+        except OSError:
+            key = None
+        with self._lock:
+            if self._snap is None or key != self._key:
+                st = read_json(f, {}) or {}
+                if "runtime" in st:
+                    self._store = Store(self.run_dir, SystemClock(), readonly=True)
+                    self._snap = self._store.snapshot()
+                else:
+                    self._store, self._snap = None, _old_snapshot(self.run_dir, st)
+                self._key = key
+            return self._snap
+
+    def state(self) -> Dict[str, Any]:
+        return public_state(self.snapshot())
+
+    def submit(self, command: Any) -> Dict[str, Any]:
+        self.snapshot()
+        if self._store is None:
+            return {"ok": False, "error": "an old run: it can be read, not changed"}
+        from ..cli import write_command
+        write_command(self.run_dir, command)
+        return {"ok": True, "queued": True}
+
+    def message(self, id: str) -> Optional[Message]:
+        self.snapshot()
+        return self._store.message(id) if self._store is not None else self._snap.messages.get(id)
+
+    def messages(self, before: int = 0, limit: int = 50, q: str = "", agent: str = "") -> Tuple[List[Message], bool]:
+        self.snapshot()
+        if self._store is not None:
+            return self._store.messages(before, limit, q, agent)
+        ms = [m for m in sorted(self._snap.messages.values(), key=lambda m: -m.seq)
+              if (not before or m.seq < before) and (not q or q.lower() in m.body.lower())
+              and (not agent or agent in (m.sender, m.recipient))]
+        return ms[:limit], len(ms) > limit
+
+
 def _live_item(line: str) -> Optional[Dict[str, Any]]:
     try:
         d = json.loads(line)

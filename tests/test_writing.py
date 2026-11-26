@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from orch.config import load_config  # noqa: E402
 from role_view_checks import leaks  # noqa: E402
-from test_orch import make_cfg, managed, run, turns  # noqa: E402
+from test_orch import make_cfg, managed, turns
 
 RULES = "# Writing rules\n\n- Tables before prose."
 
@@ -52,15 +52,6 @@ class TestWriting(unittest.TestCase):
         mon = self.mon({"writing": "off"})
         self.assertNotIn("# Writing rules", mon.agent("boss").current_system_prompt())
 
-    def test_a_run_sends_them_once_with_the_system_prompt(self):
-        status, rec = run(make_cfg(self.tmp, [managed(controller={"writing": str(self.file)})]))
-        self.assertEqual(status, "completed")
-        ts = [t for t in turns(rec) if t["agent"] in ("boss", "critic", "writer")]
-        for name in ("boss", "critic", "writer"):  # each agent's first turn carries them in its system prompt
-            first = next(t for t in ts if t["agent"] == name)
-            self.assertIn("# Writing rules", first.get("system_prompt") or "", name)
-        for t in ts:
-            self.assertNotIn("# Writing rules", t["input"], t["turn_id"])  # not repeated in the messages
 
 
 if __name__ == "__main__":
