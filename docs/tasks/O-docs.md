@@ -56,3 +56,31 @@ Do not change `docs/redesign.md`, `docs/probes/`, `docs/tasks/` (except your rep
 ## Report (append below)
 
 Files changed, keys you removed or kept-unsure, test counts.
+
+### Summary of Changes
+
+- **`README.md`** (266 lines): Rewrote for the current runtime (`orch/runtime/`). Covered roles (`manager`, `critic`, `worker`, `monitor`, `auditor`), installation, `orch init --project`, `.orch/settings.yaml` and `.orch/agents/<name>/agent.yaml` keys, prompt handling, running/resuming (`orch run`, `--resume`, `--serve`), the dashboard (status board, discussions & chat, gates, adding/closing workers, model switch with smoke tests and handover, terminal take-over, night mode, Update button, audit page), all CLI commands from `build_parser()`, read-only viewing and migration of old runs, and supported CLIs (Claude Code, Codex app-server, OpenCode, Qoder with explicit `--model`). Removed all descriptions of pipeline and controller modes, `orch inject`, `orch reset-sessions`, `--dry-run`, `--plan`, `--max-rounds`, urgent messages, the review file, preference files, prompt copies, the terminal hook, and the old parallel mode.
+- **`orch/example_config.yaml`**: Replaced the old pipeline/llm examples with a single `managed` example (`manager`, `critic`, `worker`) using top-level `output_dir`, `models`, `retry_waits`, `fallback_cooldown` and only active runtime keys. Verified `python3 -m orch validate orch/example_config.yaml` passes.
+- **`orch/cli.py`**: Updated the string templates in `init_project()`, `AUDITOR_YAML`, and `MONITOR_YAML` to drop unused keys and shorten comments without touching code:
+  - **Keys removed from `init_project()` / template constants**:
+    - `agents/manager/agent.yaml`: `timeout`, `retries`, `# check_every`, and the `milestone_rounds` comment reference.
+    - `agents/critic/agent.yaml`: `timeout`, `retries`, `checklist`, `milestone_rounds`, `checkin_every`, `# job_wait`, `# check_session`, `# job_ignore`.
+    - `agents/worker/agent.yaml`: `safety_timeout`, `check_every`, `retries`, `# compact_between_steps`, `# snapshot`.
+    - `AUDITOR_YAML`: `timeout`.
+    - `MONITOR_YAML`: `timeout`, `check_session`.
+  - **Keys kept**:
+    - `AUDITOR_YAML`: kept `audit_every: 10` and `audit_points: 5` (passed from `mon.controller` to `Engine` in `_run_new_runtime` and asserted in `TestProjectFolder`).
+    - `agents/manager/agent.yaml`: kept `max_rounds: 400`, `goal_file: goal.md`, `approve_plan: true`, `approve_milestones: true`, `# min_score: 4`.
+    - `agents/worker/agent.yaml`: kept `fresh_session: compact`.
+- **`tests/test_orch.py`** (`TestProjectFolder` only):
+  - Updated 3 assertions in `test_init_layout_settings_split_and_default_prompts` that checked values removed from `init_project()` templates:
+    1. Replaced `(c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds)` with `(c.mode, c.approve_plan, c.approve_milestones, mon.max_rounds) == ("managed", True, True, 400)` (`checklist` and `milestone_rounds` were removed from `critic/agent.yaml`).
+    2. Replaced `(mo.backend, mo.backend_options["model"], mo.check_session)` with `(mo.backend, mo.backend_options["model"]) == ("opencode", "alibaba-token-plan-cn/qwen3.8-flash")` (`check_session` was removed from `MONITOR_YAML`).
+    3. Replaced `(mon.agent("worker").turn_limit(True), mon.agent("worker").check_every) == (0.0, 20.0)` with `mon.agent("worker").fresh_session == "compact"` (`safety_timeout` and `check_every` were removed from `worker/agent.yaml`).
+
+### Test Counts
+
+- `python3 -m orch validate orch/example_config.yaml`: passed (0 errors, 0 warnings).
+- `python3 tests/run.py test_orch`: 21 ran, 21 ok, 0 failed, 0 errors.
+- Full test suite (`python3 tests/run.py`): 773 ran, 767 ok, 6 skipped, 0 failed, 0 errors.
+

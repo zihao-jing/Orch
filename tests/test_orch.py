@@ -279,17 +279,17 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual(mon.name, self.tmp.name.strip("-.") or mon.name)
         self.assertEqual((mon.workspace, cfg.output_dir), (str(self.tmp.resolve()), str((d / "runs").resolve())))
         c = mon.controller
-        self.assertEqual((c.mode, c.approve_plan, c.checklist, c.milestone_rounds, mon.max_rounds), ("managed", True, True, 50, 400))
+        self.assertEqual((c.mode, c.approve_plan, c.approve_milestones, mon.max_rounds), ("managed", True, True, 400))
         self.assertTrue(mon.goal.startswith("Describe what you want done"))
         self.assertEqual([(a.name, a.role) for a in mon.agents], [("manager", "manager"), ("critic", "verifier"), ("worker", "worker"),
                                                                 ("auditor", "auditor"), ("monitor", "monitor")])
         mo = mon.agent("monitor")  # B5: a small read-only watcher; reports only to the critic
-        self.assertEqual((mo.backend, mo.backend_options["model"], mo.check_session), ("opencode", "alibaba-token-plan-cn/qwen3.8-flash", "own"))
+        self.assertEqual((mo.backend, mo.backend_options["model"]), ("opencode", "alibaba-token-plan-cn/qwen3.8-flash"))
         self.assertEqual([f["backend_options"]["model"] for f in mo.fallback], ["zenmux/deepseek/deepseek-v4.1-flash"])
         self.assertIn("Edit", mo.backend_options["disallowed_tools"])
         self.assertIn("Quick check", mo.current_system_prompt())
         self.assertNotRegex(mo.current_system_prompt().lower().replace("`.orch/`", ""), r"manager|orch\b")
-        self.assertEqual((mon.agent("worker").turn_limit(True), mon.agent("worker").check_every), (0.0, 20.0))
+        self.assertEqual(mon.agent("worker").fresh_session, "compact")
         aud = mon.agent("auditor")
         self.assertFalse((d / "agents/auditor/system_prompt.md").exists())  # orch's own prompt: it audits orch
         self.assertIn("You audit how a team of AI agents communicates", aud.current_system_prompt())
