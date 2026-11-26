@@ -20,7 +20,6 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import yaml
 
 from .. import config
-from .adapters.base import AdapterError
 from .contracts import (Action, Adapter, Agent, AgentSpec, ChooseModel, Choice, Clock, CommandReply, ErrorClass, Event,
                         Lifecycle, ModelInfo, ModelReported, ProcessExited, Refusal, SaveChoice, SmokeResult, Snapshot,
                         StartSwitch, Switch, SwitchReason, SwitchStep, TextKey, TextRef, TurnEnded, TurnStatus)
@@ -260,8 +259,8 @@ def smoke_test(adapter: Adapter, spec: AgentSpec, clock: Clock, wait: Callable[[
                     done = result(False, ev.detail or f"exit {ev.exit_code}", ErrorClass.TRANSIENT)
             if done is None:
                 wait(0.5)
-    except AdapterError as e:
-        done = result(False, str(e), e.error)
+    except Exception as e:  # noqa: BLE001  base.AdapterError carries its class; anything else is the CLI's too
+        done = result(False, str(e), getattr(e, "error", None) or ErrorClass.OTHER)
     finally:
         try:
             adapter.stop()
