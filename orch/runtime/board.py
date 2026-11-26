@@ -185,6 +185,7 @@ class Board:
         self.runtime, self.run_dir, self.words, self.runs_root = runtime, Path(run_dir), words, runs_root
         self._lock = threading.Lock()
         self._at, self._state, self._hash, self.rev = -1e9, None, "", 0
+        self._finished_turns: Dict[str, Dict[str, Any]] = {}
         self.streams = threading.BoundedSemaphore(MAX_SSE)
 
     # -- state
@@ -258,16 +259,15 @@ class Board:
         notes = one("notes") != "0"
         hidden = {x for x in one("off").split(",") if x}  # agents switched off; a line belongs to its writer
         roles = {aid: a.get("role", "") for aid, a in (self.state().get("agents") or {}).items()}
-        selected, total = [], 0
-        cursor = before
+        matches = []
+        cursor = 0
         while levels:
             batch, more = self.runtime.messages(before=cursor, limit=500, q=search, agent=agent)
-            for m in sorted(batch, key=lambda item: item.seq, reverse=True):
+            for m in batch:
                 if _message_level(m, roles) not in levels or (not notes and _orch_note(m)) or _owner(m) in hidden:
                     continue
-                total += 1
-                if len(selected) < limit:
-                    selected.append(m)
+                summary = self._turn_summary(m.turn) if m.turn else {}
+                matches.append((summary.get("ended") or m.created, m.seq, m, summary))
             if not batch or not more:
                 break
             next_cursor = min(m.seq for m in batch)
@@ -275,19 +275,20 @@ class Board:
                 break
             cursor = next_cursor
 
-        turns = {}
+        matches.sort(key=lambda item: item[:2])
+        if before:
+            end = next((i for i, item in enumerate(matches) if item[1] == before), 0)
+            matches = matches[:end]
         rows = []
-        for m in reversed(selected):
+        for _, _, m, summary in matches[-limit:]:
             row = self._message_row(m)
             if _orch_note(m):
                 row["orch_note"] = True
-            if m.turn:
-                if m.turn not in turns:
-                    turns[m.turn] = self._turn_summary(m.turn)
-                if turns[m.turn]:
-                    row["written_by"] = turns[m.turn]
+            if summary:
+                row["written_by"] = {k: v for k, v in summary.items() if k != "ended"}
+                row["ended"] = summary.get("ended", 0)
             rows.append(row)
-        return {"messages": rows, "more": total > len(rows), "remaining": total - len(rows)}
+        return {"messages": rows, "more": len(matches) > limit, "remaining": len(matches) - len(rows)}
 
     def _message_row(self, m: Message) -> Dict[str, Any]:
         d = to_dict(m)
@@ -295,6 +296,8 @@ class Board:
         return self.shown(d)
 
     def _turn_summary(self, tid: str) -> Dict[str, Any]:
+        if tid in self._finished_turns:
+            return self._finished_turns[tid]
         match = re.fullmatch(r"(r[0-9]+)-(t[0-9]+-[A-Za-z0-9_-]+)", tid)
         if not match:
             return {}
@@ -302,8 +305,11 @@ class Board:
         t = read_json(self.run_dir / "rounds" / folder / (name + ".json")) or {}
         if t.get("turn_id") != tid:
             return {}
-        return {"model": t.get("model") or "", "input_chars": len(t.get("input") or ""),
-                "output_chars": len(t.get("output") or "")}
+        summary = {"model": t.get("model") or "", "input_chars": len(t.get("input") or ""),
+                   "output_chars": len(t.get("output") or ""), "ended": _epoch(t.get("ended_at"))}
+        if summary["ended"]:
+            self._finished_turns[tid] = summary
+        return summary
 
     def message(self, mid: str) -> Optional[Dict[str, Any]]:
         """One full message, with `rendered`: runtime.message(id); None if the engine does not know it."""
@@ -421,6 +427,10 @@ class Board:
         try:
             snap = _old_snapshot(rd, st) if old else from_dict(Snapshot, st["runtime"]["snap"])
             d = public_state(snap)
+            archive = Board(self.runtime, rd)
+            for m in d.get("messages", {}).values():
+                if m.get("turn"):
+                    m["ended"] = archive._turn_summary(m["turn"]).get("ended", 0)
         except (ValueError, TypeError, KeyError, AttributeError):
             return {"error": "unreadable run"}
         return {**self.shown(d), "old": old, "rev": 0}
@@ -557,7 +567,7 @@ def _old_snapshot(rd: Path, st: Dict[str, Any]) -> Snapshot:
         src, dst = _FLOW.get(str(t.get("purpose")), (role.value, "user"))
         messages[t["turn_id"]] = Message(
             t["turn_id"], sender=aid, recipient=dst if src == role.value else src, body=str(t.get("output") or ""),
-            needs_answer=False, turn=t["turn_id"], created=_epoch(t.get("started_at")), seq=0,
+            needs_answer=False, turn=t["turn_id"], created=_epoch(t.get("ended_at")) or _epoch(t.get("started_at")), seq=0,
             status=MessageStatus.ANSWERED)
     for c in _chat_rows(rd):  # the board chat, merged in by id
         cid, peer = str(c.get("id") or ""), str(c.get("who") or c.get("with") or "")

@@ -17,8 +17,6 @@
   const detail = new Map();
   let timeline = { rows: [], remaining: 0, limit: L.MESSAGE_PAGE, busy: false, queued: false };
   let headVersion = "";
-  // agents whose lines are hidden; new agents show
-  let hiddenWho = new Set((() => { try { return JSON.parse(store.get("orch-message-hidden") || "[]"); } catch (e) { return []; } })());
   let who = "manager";          // the talk panel's recipient
   let seenSeq = null, modalRefresh = null;
   let goldText = null, auditText = null, auditNotes = null, goldEdit = false, notesEdit = false, lastSide = 0;
@@ -28,6 +26,8 @@
     get(k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
     set(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* no storage: fine */ } },
   };
+  // agents whose lines are hidden; new agents show
+  let hiddenWho = new Set((() => { try { return JSON.parse(store.get("orch-message-hidden") || "[]"); } catch (e) { return []; } })());
   let drafts = {};
   try { drafts = JSON.parse(window.sessionStorage.getItem("orch-drafts") || "{}"); } catch (e) { drafts = {}; }
   function saveDrafts() { try { window.sessionStorage.setItem("orch-drafts", JSON.stringify(drafts)); } catch (e) { /* ignore */ } }
@@ -791,7 +791,7 @@
     const preview = h("span", { class: "pv" });
     const tools = h("div", { class: "writing-tools" }), body = h("div", { class: "writing-text" });
     const row = h("details", { class: "msg writing-msg", data: { message: reply.id } },
-      h("summary", {}, h("span", { class: "tm" }, L.stamp(reply.created, nowSrv())),
+      h("summary", {}, h("span", { class: "tm", title: "Started writing" }, L.stamp(reply.created, nowSrv())),
         h("span", { class: "route" }, h("b", {}, nm(reply.sender))), preview,
         h("span", { class: "st-slot" }, h("span", { class: "st wait" }, "Writing")),
         reply.model ? h("span", { class: "by", title: reply.model }, L.shortModel(reply.model)) : null),
@@ -909,7 +909,7 @@
     const size = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const d = h("details", { class: cls.filter(Boolean).join(" "), data: { message: m.id } },
       h("summary", { title: [fullRoute, hint].filter(Boolean).join(" · ") },
-        h("span", { class: "tm" }, L.stamp(m.created, nowSrv())),
+        h("span", { class: "tm", title: m.ended ? "Finished" : "Sent" }, L.stamp(m.ended || m.created, nowSrv())),
         h("span", { class: "route" }, h("b", {}, L.agentName(named, m.sender)), h("span", { class: "to" }, " → " + toText)),
         h("span", { class: "pv" }, parts.length > 1 ? h("span", { class: "count", title: parts.length + " messages from this output" }, parts.length) : null,
           L.preview(L.messageText(m))),
@@ -981,7 +981,7 @@
       if (matches(reply.body) || matches(reply.input) || reply.toolLines.some(matches)) extra.push(reply);
     }
     if (!ready && !extra.length) return;
-    const list = extra.length ? extra.concat(stored).sort((a, b) => (b.created || 0) - (a.created || 0)) : stored;
+    const list = extra.length ? extra.concat(stored).sort((a, b) => (b.ended || b.created || 0) - (a.ended || a.created || 0)) : stored;
     patchRows($("messages"), list, m => m.chunks ? writingRow(m) : msgRow(m), m =>
       m.chunks ? JSON.stringify([m.id, nm(m.sender), m.model]) :
         JSON.stringify([m, nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
@@ -992,7 +992,7 @@
     do {
       const page = await getJson("api/messages?" + L.pageQuery({ ...filter, limit: Math.min(limit - rows.length, 500), before }));
       if (!page.messages.length) { remaining = 0; break; }
-      rows = L.mergeMessages([rows, page.messages]);
+      rows = [...page.messages, ...rows];
       remaining = Number(page.remaining) || 0;
       before = rows[0].seq;
     } while (remaining && rows.length < limit);
@@ -1009,7 +1009,7 @@
       const before = olderCount && view.rows.length ? view.rows[0].seq : 0;
       const result = await requestTimeline(messageFilter(), olderCount || view.limit, before);
       if (timeline !== view || old) return;
-      view.rows = before ? L.mergeMessages([result.rows, view.rows]) : result.rows;
+      view.rows = before ? [...result.rows, ...view.rows] : result.rows;
       view.remaining = result.remaining;
       if (olderCount) view.limit += olderCount;
       view.ready = true;
@@ -1037,8 +1037,10 @@
       store.set("orch-message-notes", e.target.checked ? "1" : "0");
       resetTimeline();
     });
+    $("msearch").value = store.get("orch-message-search") || "";
     let timer = 0;
     $("msearch").addEventListener("input", () => {
+      store.set("orch-message-search", $("msearch").value);
       clearTimeout(timer);
       timer = setTimeout(resetTimeline, 250);
     });
@@ -1293,7 +1295,7 @@
     $("runstate").textContent = "Read only";
     const snapshotAgents = j.agents && !Array.isArray(j.agents);
     const team = snapshotAgents ? Object.values(j.agents) : (j.agents || []);
-    const items = j.messages ? L.sortedMessages(j.messages) :
+    const items = j.messages ? Object.values(j.messages).sort((a, b) => (a.ended || a.created) - (b.ended || b.created) || a.seq - b.seq) :
       (j.tl_items || []).concat((j.chat || []).map(c => ({ ts: c.ts, from: c.role === "human" ? "You" : (c.who || c.role), to: "", text: c.text })))
         .sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
     paint($("team"), "old" + r.id, () => team.map(a => h("div", { class: "agent" },
@@ -1303,12 +1305,12 @@
     const { rows, remaining } = L.latest(items, listLimit("old-messages"));
     $("message-count").textContent = rows.length + " of " + items.length;
     paint($("messages"), "old" + r.id + ":" + rows.length, () => items.length ? [
-      listMore("old-messages", remaining, () => renderOld(j, r)),
-      rows.map(it => j.messages ? msgRow(it, r.id, j.agents) :
+      rows.reverse().map(it => j.messages ? msgRow(it, r.id, j.agents) :
         h("details", { class: "msg" }, h("summary", {}, h("span", { class: "tm" }, String(it.ts || "").slice(11, 16)),
           h("span", { class: "route" }, L.plainName(it.from || "") + (it.to ? " → " + L.plainName(it.to) : "")),
           h("span", { class: "pv" }, L.preview(it.text || it.preview || it.title || ""))),
         h("div", { class: "fb" }, md(it.text || it.preview || it.title || "")))),
+      listMore("old-messages", remaining, () => renderOld(j, r)),
     ] : h("p", { class: "empty" }, "Nothing recorded."));
   }
 

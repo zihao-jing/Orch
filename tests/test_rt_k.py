@@ -374,7 +374,7 @@ async function fetchStub(url, opt) {
   }
   return json({}, false, 404);
 }
-const store = {}, clipboard = [];
+const store = scenario === "restoredFilters" ? {"orch-message-hidden": '["critic"]', "orch-message-notes": "0", "orch-message-search": "Hello manager"} : {}, clipboard = [];
 const win = {
   OrchLogic: require(path.join(dir, 'logic.js')),
   localStorage: {getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }},
@@ -681,6 +681,13 @@ global.SC = {
     assert.ok(detail('mr').open && fold(detail('mr'), "The manager's whole reply").open);
     assert.strictEqual(gets.filter(u => u.startsWith('api/turn')).length, 1);
   },
+  async restoredFilters({assert, $, byText, gets}) {
+    assert.strictEqual(byText($('who'), 'Critic').attrs['aria-pressed'], 'false');
+    assert.strictEqual($('msearch').value, 'Hello manager');
+    assert.strictEqual($('orch-notes').checked, false);
+    const first = new URLSearchParams(gets.find(u => u.startsWith('api/messages?')).split('?')[1]);
+    assert.deepStrictEqual([first.get('off'), first.get('q'), first.get('notes')], ['critic', 'Hello manager', '0']);
+  },
   async timelinePage({assert, $, byText, click, gets, refresh, getState, settle, store, type}) {
     const state = getState();
     for (let seq = 6; seq <= 83; seq++) {
@@ -713,6 +720,7 @@ global.SC = {
     assert.ok(ids().length < 83);
     assert.strictEqual(store['orch-message-notes'], '0');
     type($('msearch'), 'Hello manager');
+    assert.strictEqual(store['orch-message-search'], 'Hello manager');
     await new Promise(resolve => setTimeout(resolve, 12));
     await settle();
     assert.deepStrictEqual(ids(), ['mu']);
@@ -1056,6 +1064,9 @@ class TestSmoke(unittest.TestCase):
 
     def test_UI_5_UI_2_message_details(self):
         self.run_scenario("messageDetail")
+
+    def test_UI_2_restores_filters_before_fetching(self):
+        self.run_scenario("restoredFilters")
 
     def test_UI_2_timeline_controls(self):
         self.run_scenario("timelinePage")

@@ -49,6 +49,20 @@ class DashboardDataTest(unittest.TestCase):
         off = board.messages({"timeline": ["1"], "limit": ["500"], "off": ["lead,lookout"]})
         self.assertEqual({m["id"] for m in off["messages"]}, {"worker"})
 
+    def test_finish_time_decides_which_page_contains_a_reply(self):
+        turn = "r001-t01-lead"
+        folder = self.path / "rounds/r001"
+        folder.mkdir(parents=True)
+        (folder / "t01-lead.json").write_text(json.dumps({"turn_id": turn, "ended_at": 300}))
+        rows = [C.Message("slow", "lead", "user", turn=turn, seq=1, created=100),
+                C.Message("sent", "user", "lead", seq=2, created=200)]
+        board = Board(TimelineRuntime(rows), self.path)
+        args = {"timeline": ["1"], "limit": ["1"]}
+        top, = board.messages(args)["messages"]
+        self.assertEqual((top["id"], top["ended"]), ("slow", 300))
+        older, = board.messages({**args, "before": [str(top["seq"])]})["messages"]
+        self.assertEqual(older["id"], "sent")
+
     def test_UI_2_summary_has_model_and_character_counts_without_full_text(self):
         turn = "r001-t01-lead"
         folder = self.path / "rounds" / "r001"
