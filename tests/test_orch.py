@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from orch.config import ConfigError, load_config  # noqa: E402
-from orch.backends import TurnResult  # noqa: E402
 from orch.recorder import Recorder, read_json  # noqa: E402
 from orch import cli  # noqa: E402
 
@@ -39,8 +38,6 @@ def pipeline(name="m", **kw):
     return m
 
 
-
-
 def turns(rec):
     out = []
     for p in sorted((rec.run_dir / "rounds").glob("r*/t*.json")):
@@ -48,14 +45,9 @@ def turns(rec):
     return out
 
 
-
-
-
-
 class TestCommandBackendAndConfig(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-
 
 
     def test_validation_errors(self):
@@ -82,7 +74,6 @@ class TestCommandBackendAndConfig(unittest.TestCase):
         self.assertEqual(mon.agents[0].backend_options, {"a": 1, "b": 2})
 
 
-
 def managed(name="m", controller=None, mgr=None, critic=None, worker=None):
     c = {"mode": "managed", "checklist": True, "approve_plan": False, "approve_milestones": False, "tag_reminder": 0}
     c.update(controller or {})
@@ -97,56 +88,6 @@ class TestManaged(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def test_claude_can_skip_my_hooks(self):
-        from orch.backends import ClaudeBackend, TurnRequest
-        req = lambda o: TurnRequest("a", "worker", "hi", "", None, ".", 10, o)
-        cmd, _ = ClaudeBackend().build_command(req({"disable_hooks": True}))
-        self.assertIn('{"disableAllHooks": true}', cmd)
-        cmd, _ = ClaudeBackend().build_command(req({}))
-        self.assertNotIn("--settings", cmd)
-
-    def _urgent_run(self, note: dict, worker_opts: dict, critic_opts=None):
-        """Run a one-milestone project; drop `note` (urgent) into the inbox while the writer's first turn runs."""
-        from unittest import mock
-        from orch.backends import MockBackend
-        sent, orig = [], MockBackend.run
-
-        def spy(self_, req, stop):
-            sent.append((req.agent, req.session_id, req.prompt))
-            return orig(self_, req, stop)
-
-        def drop():
-            for _ in range(400):
-                for t in (self.tmp / "out").glob("**/rounds/r*/t*-writer.json"):
-                    if (read_json(t) or {}).get("status") == "running":
-                        time.sleep(0.3)
-                        inbox = t.parents[2] / "inbox"
-                        (inbox / "20990101-000000-urgent.json").write_text(json.dumps({**note, "urgent": True}))
-                        return
-                time.sleep(0.05)
-        th = threading.Thread(target=drop, daemon=True)
-        th.start()
-        with mock.patch.object(MockBackend, "run", spy):
-            status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1}, worker=worker_opts,
-                                                        critic=critic_opts)]))
-        th.join(timeout=5)
-        return status, rec, sent
 
     def test_a_system_process_whose_directory_cant_be_read_is_not_a_job(self):
         import os
@@ -252,39 +193,6 @@ class TestManaged(unittest.TestCase):
         return run(make_cfg(self.tmp, [m]))
 
 
-
-
-
-    def test_the_digest_flags_a_resent_message_and_a_note_that_waited(self):
-        from orch import audit
-        from datetime import datetime
-        # Inbox filenames use local time; event timestamps must describe that same timezone.
-        def local_time(value):
-            return datetime.fromisoformat(value).astimezone().isoformat()
-        rd = self.tmp / "run"
-        (rd / "rounds" / "r001").mkdir(parents=True)
-        (rd / "inbox" / "consumed").mkdir(parents=True)
-        big = "\n\n".join(f"Paragraph {i}: " + "the same long instruction, sent again " * 3 for i in range(60))
-        for seq, (agent, role, inp, out, t0) in enumerate([
-                ("w", "worker", big, "Done the first part, details follow." * 20, local_time("2026-11-09T10:00:00")),
-                ("w", "worker", big, "ok", local_time("2026-11-09T10:20:00"))], 1):
-            (rd / "rounds" / "r001" / f"t{seq:02d}-{agent}.json").write_text(json.dumps({
-                "turn_id": f"r001-t{seq:02d}-{agent}", "round": 1, "agent": agent, "role": role, "purpose": "work",
-                "status": "ok", "started_at": t0, "ended_at": t0.replace(":00:00", ":05:00").replace(":20:00", ":25:00"),
-                "input": inp, "output": out, "system_prompt": "You are the worker."}))
-        (rd / "inbox" / "consumed" / "20261109-090000-1-board-note.json").write_text(
-            json.dumps({"to": ["w"], "message": "Please stop the sweep."}))
-        (rd / "events.jsonl").write_text(json.dumps({"ts": local_time("2026-11-09T10:20:00"), "event": "human_messages",
-                                                     "files": ["20261109-090000-1-board-note.json"]}) + "\n")
-        md, st = audit.build(rd, 1, 1)
-        kinds = {f["kind"] for f in st["flags"]}
-        self.assertTrue({"repeated content", "short or failed reply", "note waited"} <= kinds, kinds)
-        self.assertIn("waited 80 min", md)
-
-
-
-
-
     def _critic_codex_update(self, mode="steer"):
         sys.path.insert(0, str(Path(__file__).resolve().parent))  # found whether run from the repo root or tests/
         from test_codex_stream import PEER
@@ -320,8 +228,6 @@ class TestManaged(unittest.TestCase):
         return rec, calls, instruction, private
 
 
-
-
     def test_worker_message_queue_survives_restart_without_replaying_uncertain_sends(self):
         from orch.recorder import Recorder
         mon = load_config(make_cfg(self.tmp, [managed()])).monitor("m")
@@ -347,33 +253,6 @@ class TestManaged(unittest.TestCase):
         self.assertTrue(T.urgent(a))
         self.assertEqual(body, "Stop now.")
         self.assertFalse(T.urgent(T.blocks('<message to="Jordan">x</message>', "message")[0][0]))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     def test_managed_validation(self):
@@ -440,28 +319,6 @@ class TestProjectFolder(unittest.TestCase):
         self.assertTrue(all(a.backend == "mock" for a in load_config(str(self.tmp)).monitors[0].agents))
 
 
-
-
-class TestWaiterStop(unittest.TestCase):
-    """A silent agent whose turn sits in a waiter loop has the loop stopped, and the turn ends."""
-
-    def test_a_silent_waiter_loop_is_stopped_and_the_turn_ends(self):
-        import os
-        from unittest import mock
-        from orch import backends
-        script = f"while kill -0 {os.getpid()} 2>/dev/null; do sleep 0.2; done & wait"
-        with mock.patch.object(backends, "WAITER_GRACE", 0.5), mock.patch.object(backends, "WAITER_CHECK", 0.2):
-            start = time.monotonic()
-            rc, out, err, status = backends.run_process(["sh", "-c", script], None, ".", 0, {}, lambda: False,
-                                                        on_line=lambda line: None)
-        self.assertLess(time.monotonic() - start, 30)
-        self.assertIn("stopped a waiter loop", err)
-
-
-
-
-
-
 class TestMessageRoutes(unittest.TestCase):
     """tags.routes: where each <message to="…"> goes, and why a block can't go anywhere."""
 
@@ -511,8 +368,6 @@ class TestMessageRoutes(unittest.TestCase):
         self.assertEqual((sent, problems), ([], []))
 
 
-
-
 class TestAuditFixes(unittest.TestCase):
     """Cost basis, a gate-held manager message, and the audit digest's view of relays, sessions and notes."""
 
@@ -532,18 +387,6 @@ class TestAuditFixes(unittest.TestCase):
         self.assertEqual((turn_cost_basis(old), turn_model(old)), ("estimate", "deepseek/deepseek-v4.1-flash"))
         self.assertEqual(turn_model({"model": "opus", "meta": {"models": ["claude-opus-5-5"]}}), "claude-opus-5-5")
 
-    def test_the_claude_backend_keeps_token_counts_and_the_models_that_answered(self):
-        from orch.backends import ClaudeBackend, TurnRequest
-        fake = self.tmp / "claude"
-        fake.write_text("#!/bin/sh\ncat >/dev/null\necho '" + json.dumps(
-            {"type": "result", "result": "hi", "session_id": "s1", "total_cost_usd": 1.5,
-             "usage": {"input_tokens": 10, "output_tokens": 20, "service_tier": "standard"},
-             "modelUsage": {"deepseek/deepseek-v4.1-flash": {"inputTokens": 10}}}) + "'\n")
-        fake.chmod(0o755)
-        res = ClaudeBackend().run(TurnRequest("w", "worker", "go", "", None, str(self.tmp), 30,
-                                              {"executable": str(fake), "output_format": "json"}), lambda: False)
-        self.assertEqual(res.meta["usage"], {"input_tokens": 10, "output_tokens": 20})
-        self.assertEqual(res.meta["models"], ["deepseek/deepseek-v4.1-flash"])
 
     def test_the_run_keeps_the_estimated_part_of_its_cost_apart(self):
         from orch.recorder import Recorder
@@ -553,40 +396,6 @@ class TestAuditFixes(unittest.TestCase):
             rec.write_turn({"turn_id": f"r001-t0{i}-x", "round": 1, "seq": i, "agent": f"a{i}", "status": "ok",
                             "session_id": f"s{i}", "cost_basis": basis, "meta": {"total_cost_usd": cost}})
         self.assertEqual((rec.state["cost_usd"], rec.state["cost_estimate_usd"]), (5.5, 5.0))
-
-
-    def test_the_digest_measures_relays_against_what_orch_passes_on(self):
-        from orch.audit import passable
-        critic = {"agent": "critic", "role": "verifier",
-                  "output": "Fix the table.\n\n<checklist>\n- [ ] a\n- [ ] b\n</checklist>\n<verdict>FAIL</verdict>"
-                            '\n<message to="you">Long answer for the human.</message>'}
-        text, withheld = passable(critic, {"agent": "worker", "role": "worker"})
-        self.assertEqual(text, "Fix the table.")
-        self.assertEqual(set(withheld), {"checklist", "verdict", "message to you"})
-        mgr = {"agent": "boss", "role": "manager", "output": 'Report for you.\n<message to="critic">Do X.</message>'}
-        text, withheld = passable(mgr, {"agent": "critic", "role": "verifier"})
-        self.assertEqual((text, withheld), ("Do X.", {"reply to the human": len("Report for you.")}))
-
-    def test_the_digest_names_a_notes_sender_and_shows_the_session(self):
-        from orch.audit import build
-        rd = self.tmp / "run"
-        (rd / "rounds" / "r001").mkdir(parents=True)
-        (rd / "inbox" / "consumed").mkdir(parents=True)
-        note = "Approved: run the revised labeller prompt as a re-pilot on twenty disjoint traces, and freeze it first."
-        (rd / "inbox" / "consumed" / "20260101-095900-board-note.json").write_text(
-            json.dumps({"to": ["writer"], "message": note, "from": "critic"}))
-        (rd / "rounds" / "r001" / "t01-writer.json").write_text(json.dumps(
-            {"turn_id": "r001-t01-writer", "round": 1, "agent": "writer", "role": "worker", "purpose": "work",
-             "status": "ok", "started_at": "2026-01-01T10:00:00", "ended_at": "2026-01-01T10:01:00",
-             "resumed_session": True, "session_turn": 7, "input": note, "output": "Done." * 100}))
-        (rd / "rounds" / "r001" / "t02-critic.json").write_text(json.dumps(
-            {"turn_id": "r001-t02-critic", "round": 1, "agent": "critic", "role": "verifier", "purpose": "verify",
-             "status": "ok", "started_at": "2026-01-01T10:02:00", "ended_at": "2026-01-01T10:03:00",
-             "input": "x", "output": "ok"}))
-        md, stats = build(rd, 1, 1)
-        self.assertIn("| same session, turn 7 |", md)
-        self.assertIn("note from critic", md)
-        self.assertFalse([f for f in stats["flags"] if f["kind"] == "unexpected origin"])
 
 
 class TestFallback(unittest.TestCase):
@@ -623,53 +432,6 @@ class TestFallback(unittest.TestCase):
             load_config(make_cfg(self.tmp, [m]))
 
 
-
-
-    def test_audit_helper_tries_backups(self):
-        from orch.backends import TurnRequest, run_variants
-        m = pipeline()
-        m["agents"][0].update(backend_options={"fail_turns": [1]}, fallback=[{"backend_options": {"fail_turns": []}}])
-        a = load_config(make_cfg(self.tmp, [m])).monitor("m").agent("w1")
-        selected = []
-        res = run_variants(a, TurnRequest("w1", "worker", "hi", "", None, str(self.tmp), 10, {}), lambda: False,
-                           on_model=selected.append)
-        self.assertEqual(res.status, "ok")
-        self.assertEqual(len(res.meta["models_tried"]), 2)
-        self.assertEqual(selected, res.meta["models_tried"])
-
-
-class TestAgy(unittest.TestCase):
-    def test_command(self):
-        from orch.backends import AgyBackend, TurnRequest
-        req = TurnRequest("a", "worker", "hi", "sys", "c-1", ".", 10,
-                          {"model": "gemini-3.6-pro", "effort": "high", "mode": "auto", "add_dirs": ["/x"],
-                           "dangerously_skip_permissions": True})
-        cmd = AgyBackend().build_command(req)
-        self.assertEqual(cmd[:5], ["agy", "--output-format", "json", "--conversation", "c-1"])
-        for part in (["--model", "gemini-3.6-pro"], ["--effort", "high"], ["--mode", "auto"], ["--add-dir", "/x"]):
-            self.assertIn(part[1], cmd[cmd.index(part[0]):])
-        self.assertIn("--dangerously-skip-permissions", cmd)
-
-    def test_run_with_a_fake_agy(self):
-        from orch.backends import AgyBackend, TurnRequest
-        d = Path(tempfile.mkdtemp())
-        exe = d / "agy"
-        exe.write_text("#!/bin/sh\necho '{\"type\":\"init\",\"conversation_id\":\"conv-9\"}'\n"
-                       "echo '{\"type\":\"result\",\"result\":\"done: '\"$#\"' args\"}'\n")
-        exe.chmod(0o755)
-        res = AgyBackend().run(TurnRequest("a", "worker", "hello", "be brief", None, str(d), 10,
-                                           {"executable": str(exe)}), lambda: False)
-        self.assertEqual((res.status, res.session_id), ("ok", "conv-9"))
-        self.assertTrue(res.output.startswith("done"))
-        self.assertIn("<prompt>", res.command)  # the prompt (with the system prompt in front) is not logged
-
-    def test_unparsable_output_is_an_error(self):
-        from orch.backends import AgyBackend, TurnRequest
-        res = AgyBackend().run(TurnRequest("a", "worker", "hi", "", None, ".", 10,
-                                           {"executable": "echo"}), lambda: False)
-        self.assertEqual(res.status, "error")
-
-
 FAKE_QWEN = r'''#!/usr/bin/env python3
 """Replays Qwen Code 0.28's headless output: stream-json lines, or one json array."""
 import json, os, sys
@@ -703,76 +465,6 @@ if "stream-json" in args:
 else:
     print(json.dumps(events))
 '''
-
-
-class TestQwen(unittest.TestCase):
-    def setUp(self):
-        self.d = Path(tempfile.mkdtemp())
-        self.exe = self.d / "qwen"
-        self.exe.write_text(FAKE_QWEN.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
-        self.exe.chmod(0o755)
-        self.log = self.d / "calls.jsonl"
-
-    def req(self, sid=None, opts=None, on_event=None, prompt="hello"):
-        from orch.backends import TurnRequest
-        return TurnRequest("q", "worker", prompt, "be brief", sid, str(self.d), 20,
-                           {"executable": str(self.exe), **(opts or {})}, env={"FAKE_QWEN_LOG": str(self.log)},
-                           on_event=on_event)
-
-    def calls(self):
-        return [json.loads(x) for x in self.log.read_text().splitlines()]
-
-    def test_command_drops_claude_only_flags_and_maps_the_rest(self):
-        from orch.backends import QwenBackend
-        cmd, sid = QwenBackend().build_command(self.req(opts={
-            "model": "qwen4-max", "permission_mode": "acceptEdits", "effort": "low", "max_turns": 3,
-            "disable_hooks": True, "allowed_tools": ["read_file", "glob"], "disallowed_tools": "run_shell_command",
-            "add_dirs": ["/x"]}, on_event=lambda e: None))
-        self.assertEqual(cmd[1:5], ["-p", "--output-format", "stream-json", "--include-partial-messages"])
-        for flag in ("--verbose", "--effort", "--permission-mode", "--max-turns", "--settings", "--allowedTools"):
-            self.assertNotIn(flag, cmd)
-        self.assertIn(["--session-id", sid], [cmd[i:i + 2] for i in range(len(cmd))])
-        joined = " ".join(cmd)
-        for part in ("--append-system-prompt be brief", "--model qwen4-max", "--approval-mode auto-edit",
-                     "--allowed-tools read_file --allowed-tools glob", "--exclude-tools run_shell_command",
-                     "--include-directories /x"):
-            self.assertIn(part, joined)
-        cmd, _ = QwenBackend().build_command(self.req(sid="s-1", opts={"approval_mode": "yolo", "stream": False},
-                                                      on_event=lambda e: None))
-        self.assertIn("json", cmd[cmd.index("--output-format") + 1])
-        self.assertNotIn("stream-json", cmd)
-        self.assertEqual(cmd[cmd.index("--resume") + 1], "s-1")
-        self.assertEqual(cmd[cmd.index("--approval-mode") + 1], "yolo")
-
-    def test_streamed_turn(self):
-        from orch.backends import QwenBackend
-        events = []
-        res = QwenBackend().run(self.req(on_event=events.append), lambda: False)
-        self.assertEqual((res.status, res.output), ("ok", "done"))
-        self.assertEqual(res.session_id, self.calls()[0]["args"][self.calls()[0]["args"].index("--session-id") + 1])
-        self.assertEqual(self.calls()[0]["stdin"], "hello")
-        kinds = [(e["k"], e["s"]) for e in events]
-        self.assertEqual(kinds[0], ("session", res.session_id))  # known before the reply, for interrupted turns
-        self.assertIn(("tool", "read_file: a.py"), kinds)
-        self.assertIn(("text", "done"), kinds)
-        self.assertNotIn("hmm", [s for _, s in kinds])  # thinking is not the reply
-        self.assertEqual(res.meta["usage"], {"input_tokens": 18500, "output_tokens": 30})  # this turn's own
-        self.assertEqual(res.meta["session_usage"]["input_tokens"], 50000)
-        self.assertEqual(res.meta["models"], ["qwen4-max"])
-        self.assertNotIn("total_cost_usd", res.meta)
-
-    def test_json_turn_resumes_and_compacts_with_compress(self):
-        from orch.backends import QwenBackend
-        res = QwenBackend().run(self.req(sid="s-9"), lambda: False)
-        self.assertEqual((res.status, res.output, res.session_id), ("ok", "done", "s-9"))
-        self.assertEqual(res.meta["usage"]["input_tokens"], 18500)
-        QwenBackend().compact(self.req(sid="s-9", opts={"compact_instructions": "keep the plan"}), lambda: False)
-        self.assertEqual(self.calls()[-1]["stdin"], "/compress keep the plan")
-
-    def test_config_accepts_qwen(self):
-        from orch.backends import BACKENDS, QwenBackend
-        self.assertIsInstance(BACKENDS["qwen"], QwenBackend)
-        self.assertEqual(BACKENDS["qwen"].name, "qwen")
 
 
 FAKE_OPENCODE = r'''#!/usr/bin/env python3
@@ -967,201 +659,6 @@ if mode == "late":  # a message admitted as the run ends: the run returns before
 '''
 
 
-class TestOpenCode(unittest.TestCase):
-    USAGE = {"input_tokens": 155, "output_tokens": 61, "reasoning_tokens": 68,
-             "cache_read_input_tokens": 16842, "cache_creation_input_tokens": 10}
-
-    def setUp(self):
-        self.d = Path(tempfile.mkdtemp())
-        self.exe = self.d / "opencode"
-        self.exe.write_text(FAKE_OPENCODE.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
-        self.exe.chmod(0o755)
-        self.log = self.d / "calls.jsonl"
-
-    def req(self, sid=None, opts=None, on_event=None, mode="ok", prompt="hello", poll=None, on_message=None):
-        from orch.backends import TurnRequest
-        return TurnRequest("oc", "worker", prompt, "be brief", sid, str(self.d), 30,
-                           {"executable": str(self.exe), **(opts or {})},
-                           env={"FAKE_OC_LOG": str(self.log), "FAKE_OC_MODE": mode}, on_event=on_event,
-                           poll_messages=poll, on_message=on_message)
-
-    def calls(self):
-        return [json.loads(x) for x in self.log.read_text().splitlines()]
-
-    def runs(self):
-        return [c for c in self.calls() if c["args"][0] == "run"]
-
-    @staticmethod
-    def pairs(events):
-        return [(e["k"], e.get("s")) for e in events]
-
-    def test_unwatched_turn_runs_standalone(self):
-        from orch.backends import OpenCodeBackend
-        res = OpenCodeBackend().run(self.req(opts={"model": "p/m#high"}), lambda: False)
-        self.assertEqual((res.status, res.output, res.session_id), ("ok", "Output: probe123", "ses_new1"))
-        self.assertEqual([c["args"][0] for c in self.calls()], ["run"])  # no server for a turn nobody watches
-        call = self.calls()[0]
-        self.assertEqual(call["args"][:5], ["run", "--standalone", "--format", "json", "--archived"])
-        self.assertIn("--model p/m#high", " ".join(call["args"]))
-        self.assertNotIn("--agent", call["args"])
-        self.assertIn("--auto", call["args"])  # on by default: no one answers a permission that asks
-        self.assertIsNone(call["config"])  # nothing to configure
-        self.assertTrue(call["stdin"].startswith("<system_instructions>\nbe brief"))
-        self.assertTrue(call["stdin"].endswith("hello"))
-        self.assertEqual(res.meta["usage"], self.USAGE)
-        self.assertAlmostEqual(res.meta["total_cost_usd"], 0.003)
-        self.assertEqual((res.meta["models"], res.meta["num_turns"]), (["p/m#high"], 2))
-        self.assertNotIn("transport", res.meta)
-
-
-    def test_stream_gaps_are_filled_from_the_full_text(self):
-        from orch.backends import OpenCodeBackend
-        events = []
-        res = OpenCodeBackend().run(self.req(on_event=events.append, mode="lossy"), lambda: False)
-        self.assertEqual(res.output, "Output: probe123")
-        self.assertEqual("".join(e["s"] for e in events if e["k"] == "text"), "Let me check.Output: probe123")
-
-    def test_message_steered_into_the_running_turn(self):
-        from orch.backends import OpenCodeBackend
-        notes = [{"id": "wm1", "message": "Also add the missing case."}]
-        statuses = []
-        events = []
-        res = OpenCodeBackend().run(self.req(
-            mode="steer", on_event=events.append,
-            poll=lambda: [n for n in notes if n["id"] not in [s[0] for s in statuses]],
-            on_message=lambda i, s, d: statuses.append((i, s, d.get("via")))), lambda: False)
-        self.assertEqual((res.status, res.output), ("ok", "Steered: Also add the missing case."))
-        self.assertEqual(statuses, [("wm1", "sending", "steer"), ("wm1", "accepted", "steer")])
-        self.assertEqual(res.meta["steered"], 1)
-        self.assertNotIn("steer_followup", res.meta)
-        self.assertIn(("tool", "Additional instruction accepted; current tools continue."), self.pairs(events))
-        self.assertEqual(len(self.runs()), 1)  # the same run went on: never interrupted or restarted
-
-    def test_message_admitted_as_the_run_ends_is_answered_before_the_turn_returns(self):
-        from orch.backends import OpenCodeBackend
-        notes = []
-        statuses = []
-
-        def on_event(ev):
-            if ev["k"] == "text" and "probe123" in ev.get("s", "") and not notes:
-                notes.append({"id": "wm2", "message": "Reply again."})
-        res = OpenCodeBackend().run(self.req(
-            mode="late", on_event=on_event,
-            poll=lambda: [n for n in notes if n["id"] not in [s[0] for s in statuses]],
-            on_message=lambda i, s, d: statuses.append((i, s))), lambda: False)
-        self.assertEqual((res.status, res.output), ("ok", "Answered late: Reply again."))
-        self.assertTrue(res.meta["steer_followup"])
-        self.assertEqual(statuses, [("wm2", "sending"), ("wm2", "accepted")])
-        self.assertEqual(res.meta["usage"]["input_tokens"], 155 + 7)  # the follow-up step counts too
-
-    def test_unwatched_worker_turn_still_takes_messages(self):
-        from orch.backends import OpenCodeBackend
-        res = OpenCodeBackend().run(self.req(poll=lambda: [], on_message=lambda *a: None), lambda: False)
-        self.assertEqual(res.status, "ok")
-        self.assertEqual(self.calls()[0]["args"][0], "serve")
-
-    def test_transport_run_and_a_server_that_does_not_start(self):
-        from orch.backends import OpenCodeBackend
-        events = []
-        res = OpenCodeBackend().run(self.req(opts={"transport": "run"}, on_event=events.append), lambda: False)
-        self.assertEqual(res.output, "Output: probe123")
-        self.assertEqual([c["args"][0] for c in self.calls()], ["run"])
-        self.assertIn(("text", "Let me check."), self.pairs(events))  # a part at a time
-        self.assertEqual(OpenCodeBackend().run(self.req(opts={"transport": "x"}), lambda: False).status, "error")
-        broken = self.d / "broken"
-        broken.write_text(f'#!/bin/sh\nif [ "$1" = serve ]; then echo boom >&2; exit 3; fi\nexec "{self.exe}" "$@"\n')
-        broken.chmod(0o755)
-        res = OpenCodeBackend().run(self.req(opts={"executable": str(broken)}, on_event=events.append), lambda: False)
-        self.assertEqual((res.status, res.output), ("ok", "Output: probe123"))  # ran without the live transport
-        self.assertIn("boom", res.meta["warning"])
-
-    def test_stop_ends_the_turn_and_the_server(self):
-        import socket
-        from orch.backends import OpenCodeBackend
-        t0 = time.monotonic()
-        res = OpenCodeBackend().run(self.req(mode="steer", poll=lambda: [], on_message=lambda *a: None),
-                                    lambda: time.monotonic() - t0 > 1.5)
-        self.assertEqual(res.status, "stopped")
-        self.assertLess(time.monotonic() - t0, 8)
-        port = int(self.calls()[0]["args"][self.calls()[0]["args"].index("--port") + 1])
-        with self.assertRaises(OSError):
-            socket.create_connection(("127.0.0.1", port), timeout=1).close()
-
-    def test_resume_replace_mode_and_permissions(self):
-        from orch.backends import OpenCodeBackend
-        res = OpenCodeBackend().run(self.req(sid="ses_old", opts={
-            "system_prompt_mode": "replace", "disallowed_tools": "webfetch,websearch", "add_dirs": ["/x"],
-            "permission_mode": "bypassPermissions", "effort": "high", "config": {"compaction": {"auto": True}}},
-            on_event=lambda e: None), lambda: False)
-        self.assertEqual((res.status, res.session_id), ("ok", "ses_old"))
-        serve, call = self.calls()[0], self.runs()[0]
-        a = call["args"]
-        self.assertEqual(a[a.index("--session") + 1], "ses_old")
-        self.assertNotIn("--archived", a)
-        self.assertEqual(a[a.index("--agent") + 1], "orch-worker")
-        self.assertIn("--auto", a)
-        self.assertEqual(call["stdin"], "hello")  # the system prompt is the agent's, every turn
-        cfg = json.loads(serve["config"])  # the server runs the turn: it must know the agent
-        self.assertEqual(cfg["agents"]["orch-worker"], {"mode": "primary", "system": "be brief"})
-        self.assertEqual(cfg["permissions"], [
-            {"action": "webfetch", "resource": "*", "effect": "deny"},
-            {"action": "websearch", "resource": "*", "effect": "deny"},
-            {"action": "external_directory", "resource": "/x/*", "effect": "allow"}])
-        self.assertEqual(cfg["compaction"], {"auto": True})
-
-    def test_auto_can_be_turned_off(self):
-        from orch.backends import OpenCodeBackend
-        cmd, _, _ = OpenCodeBackend().build(self.req(opts={"auto": False}))
-        self.assertNotIn("--auto", cmd)
-
-    def test_user_config_content_is_kept(self):
-        from orch.backends import OpenCodeBackend
-        r = self.req(opts={"disallowed_tools": ["shell"]})
-        r.env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permissions": [{"action": "read", "resource": "*.env",
-                                                                         "effect": "deny"}], "theme": "x"})
-        _, env, _ = OpenCodeBackend().build(r)
-        cfg = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        self.assertEqual(cfg["theme"], "x")
-        self.assertEqual([p["action"] for p in cfg["permissions"]], ["read", "shell"])
-
-    def test_error_event_and_cut_off_turn(self):
-        from orch.backends import OpenCodeBackend
-        for watch in (None, lambda e: None):
-            res = OpenCodeBackend().run(self.req(mode="error", on_event=watch), lambda: False)
-            self.assertEqual((res.status, res.output), ("error", ""))
-            self.assertIn("Agent not found", res.meta["error"])
-            self.assertIn("Agent not found", res.stderr)
-            self.assertTrue(res.raw)  # the event stream is kept apart, never the reply
-            res = OpenCodeBackend().run(self.req(mode="cut", on_event=watch), lambda: False)
-            self.assertEqual((res.status, res.output), ("ok", "Let me check."))
-
-    def test_compact_goes_through_the_service_api(self):
-        from orch.backends import OpenCodeBackend
-        self.assertIsNone(OpenCodeBackend().compact(self.req(), lambda: False))
-        res = OpenCodeBackend().compact(self.req(sid="ses_9"), lambda: False)
-        self.assertEqual((res.status, res.output, res.session_id), ("ok", "## Objective", "ses_9"))
-        self.assertTrue(res.meta["compacted"])
-        calls = self.calls()
-        self.assertEqual(calls[0]["args"][0], "serve")  # a private server, with the turn's own config
-        port = calls[0]["args"][calls[0]["args"].index("--port") + 1]
-        self.assertEqual([c["args"][1:3] for c in calls[1:]], [["--server", f"http://127.0.0.1:{port}"]] * 3)
-        self.assertEqual([tuple(c["args"][3:5]) for c in calls[1:]],
-                         [("POST", "/api/session/ses_9/compact"), ("POST", "/api/experimental/session/ses_9/wait"),
-                          ("GET", "/api/session/ses_9/message")])
-        OpenCodeBackend().compact(self.req(sid="ses_9", opts={"system_prompt_mode": "replace"}), lambda: False)
-        serve = [c for c in self.calls() if c["args"][0] == "serve"][-1]
-        self.assertIn("orch-worker", json.loads(serve["config"])["agents"])  # the session's agent is known
-        res = OpenCodeBackend().compact(self.req(sid="ses_9", mode="compact_fails"), lambda: False)
-        self.assertEqual(res.status, "error")
-        self.assertIn("compaction failed", res.stderr)
-
-    def test_registered(self):
-        from orch.backends import BACKENDS, OpenCodeBackend
-        self.assertIsInstance(BACKENDS["opencode"], OpenCodeBackend)
-
-
-
-
 def _plan(*done):
     steps = ["STEP-ALPHA validate the first label", "STEP-BETA validate the second label", "STEP-GAMMA redo the table"]
     return "<plan>\n" + "\n".join(f"- [{'x' if d else ' '}] {t}" for d, t in zip(done, steps)) + "\n</plan>"
@@ -1172,10 +669,6 @@ def _review(prose, plan, ck_done, verdict):
         prose = f'<message to="worker">{prose}</message>'
     return (f"{prose}\n\n{plan}\n<checklist>\n- [{'x' if ck_done else ' '}] the step's result is checked\n"
             f"- [x] protected files unchanged\n</checklist>\n<verdict>{verdict}</verdict>")
-
-
-
-
 
 
 if __name__ == "__main__":

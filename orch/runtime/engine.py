@@ -41,6 +41,8 @@ class Engine:
         self._lock = threading.RLock()
         self._commands: SimpleQueue = SimpleQueue()
         self._smoked: SimpleQueue = SimpleQueue()
+        self._audited: SimpleQueue = SimpleQueue()  # (record) from the audit thread
+        self._audit_stop = threading.Event()
         self._smoke_stop = threading.Event()
         self._smokes = set()
         self._pending_sends = {}
@@ -117,6 +119,8 @@ class Engine:
                 self._event(C.JobsChecked(agent.id, started.at, started.key))
         self._event(started)
         self._starting = False
+        if self.store.snapshot().run.audit_running:  # an audit cut off by the end of Orch
+            self._audit_done(None)
         self._flush_sends()
 
     def step(self) -> bool:
@@ -145,6 +149,13 @@ class Engine:
                 self._event(result)
                 self.store.intent_done(intent.id)
                 self._smokes.discard(intent.id)
+                happened = True
+            while True:
+                try:
+                    record = self._audited.get_nowait()
+                except Empty:
+                    break
+                self._audit_done(record)
                 happened = True
             for name, adapter in list(self.adapters.items()):
                 if self.adapters.get(name) is adapter:
@@ -175,6 +186,7 @@ class Engine:
                 return
             self._closed = True
             self._smoke_stop.set()
+            self._audit_stop.set()
             try:
                 for name in list(self.adapters):
                     self._detach(name)
@@ -290,6 +302,9 @@ class Engine:
         if isinstance(ev, C.SetNight):
             self.store.configure(night=ev.on)
             return [C.CommandReply(ev.id)]
+        if isinstance(ev, C.AuditRun):
+            why = self._audit(snap)
+            return [C.CommandReply(ev.id, ok=not why, data={"why": why} if why else {"audit": "started"})]
         if isinstance(ev, C.AuditNotes) and snap.run.audit_notes_path:
             path = Path(snap.run.workspace, snap.run.audit_notes_path)
             old = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -759,6 +774,49 @@ class Engine:
 
         threading.Thread(target=test, name=f"orch-smoke-{name}", daemon=True).start()
         return False
+
+    # The audit (AUD): one auditor process per audit, in a thread of its own; the record comes back through step()
+
+    def _audit(self, snap: C.Snapshot) -> str:
+        """Start an audit; "" when started, else why not."""
+        from . import audit
+        if snap.run.audit_running:
+            return "an audit is already running"
+        agent = next(iter(snap.by_role(C.Role.AUDITOR)), None) or next(iter(snap.by_role(C.Role.CRITIC)), None)
+        if agent is None:
+            return "no auditor and no critic to take its settings from"
+        choice = agent.choice
+        if choice.backend not in self.factories:
+            return f"no adapter for {choice.backend}"
+        path = self._agent_yaml(agent.id)
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        prompt = (texts.PROMPTS / "auditor.md").read_text(encoding="utf-8")
+        spec = C.AgentSpec("auditor", C.Role.AUDITOR, models.resolve(choice, self.settings, data or {}),
+                           str(self.run_dir / "audits"), prompt, str(self.run_dir))
+        messages, _ = self.store.messages(limit=0)
+        adapter = self.factories[choice.backend]()
+        self.store.configure(run=replace(snap.run, audit_running=True))
+        done, stop = self._audited, self._audit_stop
+        points = int(self.settings.get("audit_points", audit.POINTS) or audit.POINTS)
+
+        def work() -> None:
+            try:
+                record = audit.run_audit(self.run_dir, snap, messages, adapter, spec, stop=stop.is_set, points=points)
+            except Exception as exc:
+                LOG.exception("audit failed")
+                record = {"status": "error", "reply": f"{type(exc).__name__}: {exc}"}
+            done.put(record)
+
+        (self.run_dir / "audits").mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=work, name="orch-audit", daemon=True).start()
+        return ""
+
+    def _audit_done(self, record: Optional[Dict[str, Any]]) -> None:
+        run = self.store.snapshot().run
+        if run.audit_running:
+            self.store.configure(run=replace(run, audit_running=False))
+        if record is not None:
+            LOG.info("audit ended: %s", record.get("status"))
 
     def _open_terminal(self, action: C.OpenTerminal) -> None:
         terminal = action.terminal

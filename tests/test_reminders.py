@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from orch import audit  # noqa: E402
 from orch import reminders as R  # noqa: E402
 from orch.config import ConfigError, load_config  # noqa: E402
 from orch.templates import render  # noqa: E402
@@ -110,9 +109,6 @@ class TestConfig(unittest.TestCase):
     def test_old_tag_reminder_template_overrides_still_load(self):
         mon = load_config(cfg_with(self.tmp, {"templates": {"tag_reminder_critic": "old text"}})).monitor("m")
         self.assertNotIn("tag_reminder_critic", mon.controller.templates)
-
-
-
 
 
 if __name__ == "__main__":

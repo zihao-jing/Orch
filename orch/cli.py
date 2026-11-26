@@ -213,68 +213,25 @@ timeout: 600
 check_session: own          # own: one continuing session for its checks; side: a fresh session per check
 """
 
-NO_TOOLS = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit"]
-
-
-def default_auditor(m: Any) -> Any:
-    """An auditor for `orch audit` when the project has none: orch's prompt, the critic's backend, no tools."""
-    from .config import AgentConfig, PROMPTS_DIR
-    c = m.by_role("verifier")[0] if m.by_role("verifier") else m.agents[0]
-    opts = {**c.backend_options, "effort": "low"}
-    if c.backend == "claude":
-        opts.update(disallowed_tools=NO_TOOLS, disable_hooks=True)
-    elif c.backend == "qoder":
-        opts.update(disallowed_tools=NO_TOOLS)
-    home = Path(c.state_file).parent.parent / "auditor" / "state.md" if c.state_file else ""
-    return AgentConfig(name="auditor", role="auditor", backend=c.backend, backend_options=opts, env=dict(c.env),
-                       working_dir=c.working_dir or m.working_dir, timeout=900,
-                       system_prompt_path=str(PROMPTS_DIR / "auditor.md"), state_file=str(home))
-
-
 def cmd_audit(a: argparse.Namespace) -> int:
-    """Audit how the agents of the latest run talked: --digest prints what the auditor would read (no model call)."""
-    from . import audit
-    cfg = _load(a.target, check_paths=False)
-    runs = resolve_runs(a.target, a.monitor)
-    if not runs:
-        print("no runs found")
-        return 1
-    rc = 0
+    """Audit how the agents of the latest run talked (AUD): the running Orch starts one auditor process; the points
+    appear on the dashboard's audit page and in audit.md. --digest prints what the auditor would read (no model call)."""
+    from .runtime import audit
+    from .runtime.contracts import AuditRun
+    from .runtime.store import Store
+    from .runtime.adapters.base import SystemClock
+    runs = _new_runs(a)
     for run in runs:
-        st = read_json(run / "state.json", {}) or {}
-        try:
-            m = cfg.monitor(st.get("monitor", ""))
-        except ConfigError as e:
-            print(e)
-            rc = 1
-            continue
-        last = int(st.get("round", 0) or 0)
-        span = m.controller.audit_every or 10
-        if a.rounds:
-            mm = re.match(r"^(\d+)(?:\s*[-–]\s*(\d+))?$", a.rounds.strip())
-            if not mm:
-                raise SystemExit("--rounds takes N or A-B, e.g. --rounds 35-44")
-            lo, hi = int(mm.group(1)), int(mm.group(2) or mm.group(1))
-        else:
-            lo, hi = max(1, last - span + 1), last
-        ag = (m.by_role("auditor") or [None])[0]
-        made = ag is None
-        ag = ag or default_auditor(m)
         if a.digest:
-            md, _stats = audit.build(run, lo, hi, audit.findings_lines(audit.findings_path(ag, run)))
-            print(md)
+            store = Store(run, SystemClock(), readonly=True)
+            snap = store.snapshot()
+            messages, _ = store.messages(limit=0)
+            print(audit.build(run, dataclasses.replace(snap, now=time.time()), messages,
+                              audit.findings_lines(audit.findings_path(snap, run)))[0])
             continue
-        if made:
-            print(f"{m.name}: no agent with role: auditor; using orch's default ({ag.backend}, the critic's settings)")
-        print(f"{m.name}: auditing rounds {lo}–{hi} of {run.name} …")
-        res = audit.run_audit(m, ag, run, lo, hi, None, log=print)
-        if res.get("status") != "ok":
-            print(f"audit did not finish: {res.get('status')} (record in {run / 'audits'})")
-            rc = 1
-            continue
-        print(res.get("points") or "Nothing new.")
-        print(f"\nfindings: {res.get('file')}  (${res.get('cost_usd', 0):.2f}, digest {res.get('digest_chars')} chars)")
-    return rc
+        print(f"queued: {write_command(run, AuditRun(at=time.time(), id=_new_command_id()))}")
+        print("the running Orch starts the audit; the points appear on the dashboard's audit page")
+    return 0 if runs else 1
 
 
 def _load(path: str, check_paths: bool) -> Config:
@@ -867,7 +824,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("audit", help="audit how the agents talk (the auditor's findings go to audit.md)")
     p.add_argument("target", nargs="?", default=".", help="project root, config file or run dir")
     p.add_argument("--monitor", action="append", help="only these monitors")
-    p.add_argument("--rounds", help="N or A-B (default: the last audit_every rounds)")
     p.add_argument("--digest", action="store_true", help="print the digest the auditor would read; no model call")
     p.set_defaults(func=cmd_audit)
 

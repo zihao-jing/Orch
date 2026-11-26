@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from rt_helpers import *
-from orch import audit, report, timeline
+from orch import report, timeline
 from orch.runtime import store as S
 from orch.runtime.store import Store, StoreError
 
@@ -429,26 +429,6 @@ class TestTurnFiles(Base):
         self.fact(TurnEnded, "critic", text="More.", meta={"total_cost_usd": 0.75})
         self.fact(TurnStarted)
 
-    def test_readable_by_report_timeline_and_audit(self):
-        self.run_turns()
-        p = timeline.turn_path(self.dir, "r001-t01-critic")
-        d = json.loads(p.read_text())
-        self.assertEqual((d["role"], d["purpose"], d["status"], d["input"], d["duration_s"], d["milestone"],
-                          d["session_id"], d["resumed_session"], d["system_prompt"]),
-                         ("verifier", "verify", "ok", "<a1>", 20.0, 1, "s-critic", False, "You are the critic."))
-        self.assertEqual(p.with_name("t01-critic.output.md").read_text(), d["output"])
-        self.assertEqual(p.with_name("t01-critic.input.md").read_text(), "<a1>")
-        turns = audit.load_turns(self.dir)
-        self.assertEqual([t["turn_id"] for t in turns], ["r001-t01-critic", "r002-t01-critic"])
-        self.assertEqual([(t["meta"]["turn_cost_usd"], t["session_turn"]) for t in turns], [(0.5, 1), (0.25, 2)])
-        digest, stats = audit.build(self.dir, 1, 2)
-        self.assertEqual(stats["turns"], 2)
-        self.assertIn("r002-t01-critic", digest)
-        page = report.render_run_report(self.dir)
-        self.assertIn("All done.", page)
-        self.assertIn("$0.75", page)
-        self.assertIn("r002-t02-worker-1", page)  # the one still running
-        self.assertIn(self.dir.name, report.render_index(self.tmp))
 
     def test_continues_the_numbers_of_an_older_record(self):
         (self.dir / "rounds" / "r004").mkdir(parents=True)
