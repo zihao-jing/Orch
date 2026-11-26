@@ -177,6 +177,16 @@ class TestCriticReplies(unittest.TestCase):
         self.assertEqual(rej.message.text.values, {"to": "worker-2", "available": ["worker-1"]})
         assert_has(self, acts, Reject, rejected__recipient="worker-2")
 
+    def test_one_label_to_several_workers_gives_each_a_copy(self):
+        snap = snapshot(workers=2)
+        _, acts = routed(snap, "critic", '<message to="worker-1, worker-2">Same task.</message><message to="worker-1 and worker-3">x</message>'
+                                         'Report to the manager.')
+        to = sorted((a.message.recipient, a.message.body) for a in acts if isinstance(a, Send) and a.message.recipient != "critic")
+        self.assertEqual(to, [("manager", "Report to the manager."), ("worker-1", "Same task."), ("worker-1", "x"),
+                              ("worker-2", "Same task.")])
+        rej = assert_has(self, acts, Reject, key=TextKey.UNKNOWN_WORKER)
+        self.assertEqual(rej.message.text.values["to"], "worker-3")
+
     def test_MSG_8_no_workers_the_manager_asks_the_user(self):
         snap = snapshot(workers=0)
         _, acts = routed(snap, "critic", '<message to="worker-1">hello</message>')

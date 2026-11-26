@@ -53,7 +53,9 @@ class TestPageFiles(unittest.TestCase):
         self.assertEqual(used - listed, set())
 
     CLI_ONLY = {"TerminalOpen", "TerminalClose"}  # they come from `orch terminal`; the page shows its command
-    NO_CONTROL = {"SendToCritic"}  # refused: a chat with a worker stays between the user and the worker
+    # SendToCritic is refused (a chat with a worker stays with the user); StopOrch has no button so it cannot be hit by
+    # accident: Orch is closed from the terminal
+    NO_CONTROL = {"SendToCritic", "StopOrch"}
 
     def test_UI_3_every_user_command_has_a_control(self):
         js = read("app.js") + read("logic.js")
@@ -195,6 +197,13 @@ const T = {
     assert.ok(L.awaitsAnswer({status: 'delivered', needs_answer: true}));
     assert.ok(!L.awaitsAnswer({status: 'answered', needs_answer: true}));
   },
+  groupReplies() {
+    const m = (id, to, body, extra) => ({id, sender: 'critic', recipient: to, body, turn: 't1', status: 'delivered', ...extra});
+    const rows = L.groupReplies([m('a', 'manager', 'Report.'), m('b', 'worker-2', 'Same task.'), m('c', 'worker-1', 'Same task.'),
+                                 {id: 'd', sender: 'critic', recipient: 'worker-1', body: 'Same task.', turn: 't0', status: 'delivered'}]);
+    assert.deepStrictEqual(rows.map(r => [r.id, r.also || [], !!r.sameReply]),
+      [['a', [], false], ['b', ['worker-1'], true], ['d', [], false]]);
+  },
   time() {
     assert.strictEqual(L.ago(0, 130), '–'); assert.strictEqual(L.ago(null, 130), '–');
     assert.strictEqual(L.ago(100, 130), 'just now'); assert.strictEqual(L.ago(100, 100 + 600), '10 min ago');
@@ -261,6 +270,9 @@ class TestLogic(unittest.TestCase):
 
     def test_UI_1_times(self):
         self.run_js("time")
+
+    def test_one_reply_to_several_is_grouped(self):
+        self.run_js("groupReplies")
 
 
 # ------------------------------------------------------------------------------------------------ smoke run
@@ -472,8 +484,8 @@ global.SC = {
     await click(byText($('dlg-a'), 'Add worker')); assert.strictEqual(lastPost().type, 'WorkerAdd');
     await click($('stopbtn')); assert.ok($('dlg').open);
     await click(byText($('dlg-a'), 'Stop agents')); assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StopAgents', []]);
-    await click($('morebtn')); await click(byText($('dlg-a'), 'Update and restart'));
-    await click(byText($('dlg-a'), 'Update')); assert.strictEqual(lastPost().type, 'UpdateOrch');
+    await click($('updatebtn')); await click(byText($('dlg-a'), 'Update')); assert.strictEqual(lastPost().type, 'UpdateOrch');
+    assert.ok(!$('header-actions').textContent.includes('Close'));   // no Close Orch on the page: too easy to hit
   },
   async addWorkerModel({assert, $, byText, click, lastPost}) {
     await click($('addworker'));
@@ -481,11 +493,6 @@ global.SC = {
     sel.value = 'alpha'; sel.fire('change');
     await click(byText($('dlg-a'), 'Add worker'));
     assert.deepStrictEqual([lastPost().type, lastPost().model_id, lastPost().effort], ['WorkerAdd', 'alpha', 'low']);
-  },
-  async closeOrch({assert, $, byText, click, lastPost}) {
-    await click($('morebtn')); await click(byText($('dlg-a'), 'Close Orch and stop agents'));
-    await click(byText($('dlg-a'), 'Stop everything'));
-    assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StopOrch', true]);
   },
   async startAgents({assert, $, click, lastPost, getState, setState, refresh}) {
     const s = getState(); s.agents['worker-1'].stopped_by_user = true; setState(s); await refresh();
@@ -517,7 +524,7 @@ global.SC = {
     assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().text], ['Chat', 'manager', 'please continue']);
     assert.strictEqual($('talkin').value, '');
     await click(byText($('talkacts'), 'Discuss')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['DiscussionStart', 'manager']);
-    const terminal = byText($('talkacts'), 'Open in terminal');
+    const terminal = byText($('talkacts'), 'Terminal');
     assert.strictEqual(terminal.attrs.title, 'orch terminal demo manager');
     await click(terminal);
     assert.deepStrictEqual(clipboard, ['orch terminal demo manager']);
@@ -609,9 +616,8 @@ global.SC = {
     const row = detail('mu');
     await open(row);
     assert.ok(!gets.some(u => u.startsWith('api/message?')));
-    await open(fold(row, 'What Manager received'));
-    assert.ok(row.textContent.includes('SENT TEXT'));
-    assert.ok(row.textContent.includes('with Orch’s additions'));
+    assert.ok(!fold(row, 'What Manager received'));   // what the recipient got is not shown
+    assert.ok(!row.children[1].textContent.includes('Delivered.'));   // the status sits in the head line, not before the text
     const written = detail('mr');
     await open(written);
     assert.ok(!gets.some(u => u.startsWith('api/turn')));
@@ -854,8 +860,6 @@ class TestSmoke(unittest.TestCase):
     def test_UI_3_add_worker_on_a_chosen_model(self):
         self.run_scenario("addWorkerModel")
 
-    def test_UI_3_close_orch_and_stop_agents(self):
-        self.run_scenario("closeOrch")
 
     def test_UI_3_start_agents_after_stop(self):
         def m(d):

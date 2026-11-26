@@ -25,6 +25,12 @@ def _open_workers(snap: Snapshot) -> List[Agent]:
     return snap.workers
 
 
+def recipients(to: str) -> List[str]:
+    """The names in one `to`: `worker-1, worker-2` or `worker-1 and worker-2` gives each its own copy."""
+    names = [n for n in re.split(r"\s*(?:,|;|&|\band\b)\s*", to or "") if n.strip()]
+    return list(dict.fromkeys(names)) or [to]
+
+
 def resolve(snap: Snapshot, sender: str, to: str) -> Tuple[Optional[str], Optional[Problem]]:
     """(recipient id or USER, None), (None, NO_RECIPIENT) for an address this sender may not use, or (None, None)
     for a name that is no open worker or agent (MSG-8)."""
@@ -118,13 +124,13 @@ def _upper(snap: Snapshot, out: _Out, agent: Agent, turn) -> None:
     held_by_question = bool(reply.questions) and not drafting and not snap.night and agent.role == Role.MANAGER
     broken = list(reply.broken)
     sent: List[Message] = []
-    for om in reply.messages:
-        to, problem = resolve(snap, me, om.to)
+    for om, name in ((om, name) for om in reply.messages for name in recipients(om.to)):
+        to, problem = resolve(snap, me, name)
         if problem:
-            broken.append(BrokenLabel(f'<message to="{om.to}">', problem, om.body))
+            broken.append(BrokenLabel(f'<message to="{name}">', problem, om.body))
         elif to is None:
             if not drafting:  # a draft is not sent, so nothing is rejected
-                _reject(snap, out, agent, om.to, om.body, trigger, turn.id)
+                _reject(snap, out, agent, name, om.body, trigger, turn.id)
         elif to == USER:
             out.add(ToUser, out.message(me, USER, om.body, trigger=trigger, turn=turn.id))
         else:

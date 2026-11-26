@@ -414,7 +414,8 @@
   }
   function terminalLink(a) {
     const command = termCommand(a);
-    return h("button", { type: "button", class: "link", title: command, on: { click: () => copyCommand(command) } }, "Open in terminal");
+    return h("button", { type: "button", class: "link term", title: command,
+      "aria-label": "Copy the terminal command for " + nm(a.id), on: { click: () => copyCommand(command) } }, "Terminal");
   }
   function menu(title) {
     const panel = h("div", { class: "menu-items" });
@@ -474,12 +475,12 @@
     shownJobs.rows.forEach(j => body.append(h("div", { class: "agent-line job" }, h("span", { class: "label" }, "Job"), L.jobLine(j, t))));
     add(body, listMore(jobKey, shownJobs.remaining, renderTeam));
     const controls = h("div", { class: "agent-actions" });
-    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "sm", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
-    controls.append(h("button", { type: "button", class: "sm", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"));
+    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "link", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
+    controls.append(h("button", { type: "button", class: "link", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"));
     if (a.role !== "monitor" && a.lifecycle === "open") controls.append(terminalLink(a));
     body.append(controls);
     const activity = h("div", { class: "activity-body", data: { livelog: a.id }, hidden: !openAct.has(a.id) });
-    controls.append(h("button", { type: "button", class: "sm", title: "Show this agent’s recent output and tools",
+    controls.append(h("button", { type: "button", class: "link", title: "Show this agent’s recent output and tools",
       on: { click: ev => {
         activity.hidden = !activity.hidden;
         ev.currentTarget.textContent = activity.hidden ? "Activity" : "Hide activity";
@@ -487,15 +488,15 @@
         else { openAct.add(a.id); paintActivity(a.id); loadLive(a.id, "open"); }
       } } }, openAct.has(a.id) ? "Hide activity" : "Activity"));
     body.append(activity);
-    if (a.role === "worker") L.workerActions(a).forEach(type => (type === "WorkerDelete" ? items : controls).append(h("button", { type: "button",
-      class: type === "WorkerDelete" ? "danger-text" : "sm",
+    if (a.role === "worker") L.workerActions(a).forEach(type => (type === "WorkerReopen" ? controls : items).append(h("button", { type: "button",
+      class: { WorkerDelete: "danger-text", WorkerReopen: "link" }[type] || "",
       title: { WorkerClose: "Close this worker and keep its session", WorkerReopen: "Reopen this worker in its saved session", WorkerDelete: "Permanently remove this worker from the team" }[type],
       on: { click: ev => workerAct(type, a, ev.currentTarget) } },
       { WorkerClose: "Close", WorkerReopen: "Reopen", WorkerDelete: "Delete" }[type])));
     if (a.lifecycle === "open") controls.append(a.stopped_by_user
-      ? h("button", { type: "button", class: "sm", title: "Resume this agent in its saved session", on: { click: act("StartAgents", { agents: [a.id] }) } }, "Start")
-      : h("button", { type: "button", class: "sm", title: "Stop this agent and its jobs", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
-    if (items.children.length) controls.append(actions);   // only Delete stays behind ⋯
+      ? h("button", { type: "button", class: "link", title: "Resume this agent in its saved session", on: { click: act("StartAgents", { agents: [a.id] }) } }, "Start")
+      : h("button", { type: "button", class: "link danger-link", title: "Stop this agent and its jobs", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
+    if (items.children.length) controls.append(actions);   // Close and Delete stay behind ⋯
     return box;
   }
   function railDot(a) {
@@ -548,6 +549,7 @@
       step.items.map(item => h("li", { class: item[0] ? "done" : "open" },
         h("span", { class: "bx", title: item[0] ? "Complete" : "To do" }, item[0] ? "✓" : "○"), h("span", {}, spanNodes(L.markdown(item[1])[0] ? L.markdown(item[1])[0].lines[0] : []))))]));
   }
+  let ckOpen = store.get("orch-checklist-open") === "1";
   function renderProgress() {
     const ms = S.milestones || [], ck = S.checklist || {};
     const cur = ms.find(m => m.status === "current");
@@ -555,18 +557,21 @@
     paint($("progress"), JSON.stringify([ms, ck, shown && shown.id]), () => {
       if (!ms.length) return h("p", { class: "empty" }, "No milestones yet.");
       const [d, n] = L.progress(ck);
-      const out = [h("div", { class: "ms" }, ms.map(m => h("div", { class: "mscard" + (m.status === "current" ? " cur" : "") + (shown && shown.id === m.id ? " picked" : "") },
-          h("div", { class: "mute small" }, L.MS_STATUS[m.status] || ""), h("div", { class: "t" }, m.title),
+      const out = [h("ol", { class: "ms" }, ms.map((m, i) => h("li", { class: "mscard ms-" + m.status + (shown && shown.id === m.id ? " picked" : "") },
+          h("div", { class: "ms-top" }, h("span", { class: "ms-num", "aria-hidden": "true" }, m.status === "done" ? "✓" : String(i + 1)),
+            h("span", { class: "ms-status" }, L.MS_STATUS[m.status] || ""),
+            m.score !== null && m.score !== undefined && m.status === "done" ? h("span", { class: "ms-score", title: "Score out of 5" }, m.score + " / 5") : null),
+          h("div", { class: "t" }, m.title),
           m.status === "current" && n ? [h("div", { class: "bar" }, h("i", { style: "width:" + Math.round(100 * d / n) + "%" })), h("div", { class: "mute small" }, d + " of " + n + " done")] : null,
-          m.score !== null && m.score !== undefined && m.status === "done" ? h("div", { class: "mute small" }, "Score " + m.score) : null,
           h("div", { class: "milestone-actions" },
-            m.checklist_path && !(shown && shown.id === m.id) ? h("button", { type: "button", class: "link", on: { click: () => { ckPick = m.id; renderProgress(); } } }, "Checklist") : null,
-            m.text || (m.rubric || []).length ? h("details", {}, h("summary", { class: "link" }, "Details"), m.text ? md(m.text) : null,
-              (m.rubric || []).length ? [h("div", { class: "mute small" }, "Rubric"), h("ul", {}, m.rubric.map(r => h("li", {}, r)))] : null) : null,
-            m.status === "done" ? h("button", { type: "button", class: "link", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen") : null))))];
+            m.checklist_path && !(shown && shown.id === m.id) ? h("button", { type: "button", class: "link", on: { click: () => { ckPick = m.id; ckOpen = true; renderProgress(); } } }, "Checklist") : null,
+            m.status === "done" ? h("button", { type: "button", class: "link", on: { click: act("ReopenMilestone", { milestone_id: m.id }) } }, "Reopen") : null),
+          m.text || (m.rubric || []).length ? h("details", { class: "ms-details" }, h("summary", { class: "link" }, "Details"), m.text ? md(m.text) : null,
+            (m.rubric || []).length ? [h("div", { class: "ms-sub" }, "Rubric"), h("ul", {}, m.rubric.map(r => h("li", {}, r)))] : null) : null)))];
       if (shown) {
-        const box = h("div", { class: "ck-box" }, h("div", { class: "ck-head" }, h("h3", {}, "Checklist"),
+        const box = h("details", { class: "ck-box", open: ckOpen }, h("summary", { class: "ck-head" }, h("h3", {}, "Checklist"),
           h("span", { class: "mute small" }, shown.title + (shown.status === "current" && n ? " · " + d + " of " + n + " done" : ""))));
+        box.addEventListener("toggle", () => { ckOpen = box.open; store.set("orch-checklist-open", ckOpen ? "1" : "0"); });
         if (shown.status === "current") box.append(checklistList(ck));
         else {
           const holder = h("div", {}, h("p", { class: "mute" }, "Loading…"));
@@ -617,12 +622,12 @@
   }
 
   function messageBody(m, run, named) {
-    const hint = L.statusHint(m), meta = m.written_by || {};
+    const meta = m.written_by || {};
     const sized = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const facts = [meta.model ? "Written by " + L.shortModel(meta.model) : "",
-      sized ? L.characterSize(meta.input_chars) + " characters in, " + L.characterSize(meta.output_chars) + " out" : "", hint].filter(Boolean);
-    const fb = h("div", { class: "fb" }, facts.length ? h("p", { class: "detail-hint", title: meta.model || "" }, facts.join(" · ")) : null,
-      md(L.messageText(m)));
+      sized ? L.characterSize(meta.input_chars) + " characters in, " + L.characterSize(meta.output_chars) + " out" : ""].filter(Boolean);
+    const fb = h("div", { class: "fb" }, md(L.messageText(m)),
+      facts.length ? h("p", { class: "detail-hint", title: meta.model || "" }, facts.join(" · ")) : null);
     if (m.turn) {
       const getTurn = () => cached("api/turn?id=" + encodeURIComponent(m.turn) + (run ? "&run=" + encodeURIComponent(run) : ""));
       const sender = L.agentName(named, m.sender);
@@ -636,29 +641,27 @@
         return md(turn.output || turn.text || "Nothing was recorded.");
       }, "Everything that turn wrote, including text sent in other messages."));
     }
-    if (!run && named[m.recipient] && !m.drop) {
-      const recipient = L.agentName(named, m.recipient);
-      fb.append(fold(m.id + ":received", "What " + recipient + " received", async () => {
-        const result = await cached("api/message?id=" + encodeURIComponent(m.id));
-        return h("pre", {}, (result.message || {}).rendered || "No delivered text was recorded.");
-      }, "The message as delivered, with Orch’s additions."));
-    }
     return fb;
   }
 
   function msgRow(m, run, named = agents()) {
     const level = L.messageLevel(m, named), note = L.isNotice(m), awaiting = L.awaitsAnswer(m);
-    const cls = ["msg", "level-" + level, m.recipient === "user" ? "touser" : "", awaiting ? "awaiting" : "", note ? "notice-row" : m.orch_note ? "housekeeping" : ""];
+    const cls = ["msg", "level-" + level, m.sameReply ? "same-reply" : "", m.recipient === "user" ? "touser" : "", awaiting ? "awaiting" : "", note ? "notice-row" : m.orch_note ? "housekeeping" : ""];
     const meta = m.written_by || {}, exception = L.messageException(m), hint = L.statusHint(m);
-    const route = L.agentName(named, m.sender) + " → " + L.agentName(named, m.recipient);
+    const to = [m.recipient].concat(m.also || []);
+    const allWorkers = to.length > 1 && to.every(r => (named[r] || {}).role === "worker");
+    const route = L.agentName(named, m.sender) + " → " + (allWorkers ? to.length + " workers" : to.map(r => L.agentName(named, r)).join(", "));
+    const fullRoute = L.agentName(named, m.sender) + " → " + to.map(r => L.agentName(named, r)).join(", ");
     const size = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const d = h("details", { class: cls.filter(Boolean).join(" "), data: { message: m.id } },
-      h("summary", { title: [route, hint].filter(Boolean).join(" · ") },
-        h("span", { class: "tm" }, L.stamp(m.created, nowSrv())),
+      h("summary", { title: [fullRoute, hint].filter(Boolean).join(" · ") },
+        h("span", { class: "tm", title: m.sameReply ? "Written in the same reply as the row above" : "" }, m.sameReply ? "" : L.stamp(m.created, nowSrv())),
         h("span", { class: "lv", title: (L.LEVELS[level] || [""])[0], "aria-hidden": "true" }),
         h("span", { class: "route" }, route),
-        exception ? h("span", { class: "st " + L.messageTone(m), title: hint }, exception) : null,
         h("span", { class: "pv" }, L.preview(L.messageText(m))),
+        h("span", { class: "st-slot" }, exception || L.messageStatus(m) ? h("span", { class: "st " + L.messageTone(m) + (exception ? "" : " plain"),
+          title: hint }, exception || L.messageStatus(m)) : null),
+        h("span", { class: "by", title: meta.model ? "Written by " + meta.model : "" }, meta.model ? L.shortModel(meta.model) : ""),
         size && meta.input_chars > 30000 ? h("span", { class: "sz large", title: meta.input_chars.toLocaleString() +
           " input characters: more than 30,000" }, L.characterSize(meta.input_chars) + " in") : null));
     function expand() {
@@ -701,7 +704,7 @@
     $("message-count").textContent = ready ? (remaining ? shown + " of " + total : shown + (shown === 1 ? " message" : " messages")) : "Loading…";
     if (!ready) return;
     // the newest on top; older pages load below
-    patchRows($("messages"), rows.slice().reverse(), m => msgRow(m), m =>
+    patchRows($("messages"), L.groupReplies(rows.slice().reverse()), m => msgRow(m), m =>
       JSON.stringify([m, nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
   }
 
@@ -963,12 +966,8 @@
   }
 
   // other dialogs
-  async function more() {
-    const v = await modal("More", h("p", { class: "mute" }, "Orch itself."), [
-      { label: "Update and restart", value: "u" }, { label: "Close Orch", value: "c" }, { label: "Close Orch and stop agents", value: "a", cls: "danger" }, { label: "Back", value: "" }]);
-    if (v === "u" && await confirmBox("Update Orch?", "Orch takes in the new version and restarts. The agents carry on.", "Update")) cmd("UpdateOrch", {});
-    if (v === "c" && await confirmBox("Close Orch?", "Agents and jobs keep running. Start Orch again to see them.", "Close Orch")) cmd("StopOrch", { agents: false });
-    if (v === "a" && await confirmBox("Close Orch and stop the agents?", "Agents and their jobs stop.", "Stop everything", "danger")) cmd("StopOrch", { agents: true });
+  async function updateOrch() {
+    if (await confirmBox("Update Orch?", "Orch takes in the new version and restarts. The agents carry on.", "Update")) cmd("UpdateOrch", {});
   }
   async function changeMilestones() {
     const t = draft("changems", "textarea", { rows: 5, "aria-label": "What should change", placeholder: "What should change in the milestones?" });
@@ -1061,7 +1060,7 @@
     });
     $("nightbtn").addEventListener("click", ev => cmd("SetNight", { on: !(S && S.night) }, ev.currentTarget));
     $("stopbtn").addEventListener("click", stopStart);
-    $("morebtn").addEventListener("click", more);
+    $("updatebtn").addEventListener("click", updateOrch);
     $("runsbtn").addEventListener("click", runs);
     $("addworker").addEventListener("click", addWorker);
     $("teamfold").addEventListener("click", () => setTeamFolded(!teamFolded));

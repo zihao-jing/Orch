@@ -135,6 +135,22 @@
     return "";
   }
 
+  // one reply that wrote to several agents: the same text to several becomes one row with all its recipients,
+  // and every row after the first of a reply is marked, so the page shows them as one block (rows: newest first)
+  function groupReplies(rows) {
+    const out = [];
+    rows.forEach(m => {
+      const prev = out[out.length - 1];
+      const same = !!(prev && m.turn && prev.turn === m.turn && prev.sender === m.sender);
+      if (same && m.body && prev.body === m.body && !m.text && !prev.text && m.status === prev.status && !m.drop && !prev.drop) {
+        out[out.length - 1] = { ...prev, also: (prev.also || []).concat(m.recipient) };
+        return;
+      }
+      out.push(same ? { ...m, sameReply: true } : m);
+    });
+    return out;
+  }
+
   function awaitsAnswer(m) {
     return m.needs_answer && !m.drop && (m.status === "waiting" || m.status === "delivered");
   }
@@ -337,7 +353,7 @@
     messageStatus, messageTone, isNotice, agentTags, jobLine, workerActions, sortedMessages, mergeMessages, talkLog,
     openGates, answeredWaiting, gateAnswer, newId, backoff, applyChoice, efforts, markdown, preview,
     progress, LEVELS, MESSAGE_PAGE, LIST_PAGE, messageLevel, latest, pageQuery, shortModel, characterSize,
-    messageException, awaitsAnswer, statusHint,
+    messageException, awaitsAnswer, statusHint, groupReplies,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.OrchLogic = api;
