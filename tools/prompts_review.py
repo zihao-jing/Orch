@@ -146,7 +146,7 @@ def vals(k):
 
 
 def block(text):
-    return "```text\n" + text.strip() + "\n```"
+    return text.strip()
 
 
 def team():
@@ -163,7 +163,7 @@ def main():
     out = ["# Orch prompts for review", "",
            "Everything the new runtime writes to an agent or the user, filled in with sample values (team: the manager, "
            "the critic, worker-1, worker-2, the monitor; golden board `/proj/.orch/golden.md`). Generated from the code "
-           "on the `redesign` branch; the source of each part is named. Edit the source, not this file.", "",
+           "on the `redesign` branch; the source of each part is named. Running the tool again overwrites this file.", "",
            "## How an agent's input is made", "",
            "- **System prompt**, once per session: `prompts/<role>.md` + `prompts/protocol/<role>.md` + \"How to "
            "write\" (the `## All` and `## <role>` rules of `prompts/style.md`). The monitor gets no writing rules. "
