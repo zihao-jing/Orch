@@ -15,11 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orch import audit  # noqa: E402
 from orch import reminders as R  # noqa: E402
 from orch.config import ConfigError, load_config  # noqa: E402
-from orch.controller import MonitorRunner  # noqa: E402
 from orch.templates import render  # noqa: E402
 from role_view_checks import assert_no_role_leaks, leaks  # noqa: E402
-from test_config_reload import FakeRec  # noqa: E402
-from test_orch import make_cfg, managed, run, turns  # noqa: E402
+from test_orch import make_cfg, managed, turns
 
 OLD_ROUTING = "If I asked you a question or requested an explanation"  # the fixed block on every critic review
 
@@ -113,97 +111,8 @@ class TestConfig(unittest.TestCase):
         mon = load_config(cfg_with(self.tmp, {"templates": {"tag_reminder_critic": "old text"}})).monitor("m")
         self.assertNotIn("tag_reminder_critic", mon.controller.templates)
 
-    def test_hot_reload_of_a_changed_reminder(self):
-        path = Path(cfg_with(self.tmp, {"reminders": {"concise": {"every": 2}}}))
-        mon = load_config(str(path)).monitor("m")
-        r = MonitorRunner(mon, threading.Event(), log=lambda s: None)
-        r.rec = FakeRec()
-        r.rec.state = {"sessions": {}, "fwd": {}}
-        cfg = json.loads(path.read_text())
-        cfg["monitors"][0]["controller"]["reminders"] = {"concise": {"every": 2, "text": "Short, please."}}
-        path.write_text(json.dumps(cfg))
-        r.refresh_agent(mon.agents[2])
-        rem = next(x for x in mon.controller.reminders if x["id"] == "concise")
-        self.assertEqual(rem["text"], "Short, please.")
-        self.assertEqual(r.rec.events[-1], ("reminders_reloaded", {"changed": ["concise"]}))
-        r.rec.events.clear()
-        r.refresh_agent(mon.agents[2])  # no change, nothing reported
-        self.assertEqual(r.rec.events, [])
 
 
-class TestManagedRun(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-
-    def test_no_fixed_reminder_on_consecutive_critic_reviews(self):
-        status, rec = run(make_cfg(self.tmp, [managed(controller={"tag_reminder": None},
-                                                      mgr={"milestones": 1}, critic={"pass_after": 5})]))
-        self.assertEqual(status, "completed")
-        reviews = [t for t in turns(rec) if t["agent"] == "critic" and t["purpose"] == "verify"]
-        self.assertGreaterEqual(len(reviews), 4)
-        for t in reviews:
-            self.assertNotIn(OLD_ROUTING, t["input"])
-            self.assertNotIn("reply_routing", t.get("reminders") or [])
-        # the critic's first two turns (brief, first review) come before the 3+ turn reminders are due; only the
-        # style reminder (every 2-3 turns) can be there by the first review
-        self.assertFalse(set(reviews[0].get("reminders") or []) - {"style_rules", "communication_protocol"})
-        self.assertLess(sum(bool(t.get("reminders")) for t in reviews), len(reviews))  # not on every review
-        sent = [t.get("reminders") or [] for t in turns(rec)]
-        self.assertTrue(any(sent))  # some reminders do go out, at intervals
-        for t in turns(rec):
-            if t.get("reminders"):
-                self.assertTrue(t["input"].rstrip().endswith("</system-reminder>"))  # at the end of the message
-                self.assertEqual(t["input"].count("<system-reminder>"), len(t["reminders"]))
-        worker = [t for t in turns(rec) if t["agent"] == "writer"]
-        self.assertIn("report_length", worker[2].get("reminders") or [])  # every 3rd worker turn
-        self.assertIn("Keep the report short; put details in files.", worker[2]["input"])
-        self.assertNotIn("report_length", (worker[0].get("reminders") or []) + (worker[1].get("reminders") or []))
-        # the counters are kept in the run state, per agent
-        st = json.loads((rec.run_dir / "state.json").read_text())
-        self.assertEqual(st["reminders"]["writer"]["report_length"]["n"], len(worker))
-
-    def test_counters_survive_resume(self):
-        cfg_path = make_cfg(self.tmp, [managed(mgr={"milestones": 1})])
-        status, rec = run(cfg_path)
-        from orch.managed import ManagedRunner
-        saved = json.loads((rec.run_dir / "state.json").read_text())
-        n = saved["reminders"]["writer"]["report_length"]["n"]
-        r = ManagedRunner(load_config(cfg_path).monitor("m"), threading.Event(), resume=True, log=lambda s: None)
-        rec.state = saved
-        r.rec = rec
-        sent = [r.add_reminders(r.workers[0], "Do the step.", "work")[1] for _ in range(3)]
-        self.assertEqual(rec.state["reminders"]["writer"]["report_length"]["n"], n + 3)
-        self.assertEqual(sum("report_length" in s for s in sent), 1)  # every 3rd, counted on from the saved count
-
-    def test_reminders_never_name_a_layer_above(self):
-        names = {"critic": "Jordan", "worker": "Sam"}
-        for rem in R.parse(None):
-            for role, above in (("critic", ["Alex"]), ("worker", ["Alex", "Jordan"])):
-                text = render(R.text_for(rem, role), **names)
-                self.assertFalse(leaks(text, {"critic": "verifier"}.get(role, role), above), (rem["id"], role, text))
-        every = {k: {"every": 1} for k in ("concise", "protocol", "report_length")}
-        status, rec = run(make_cfg(self.tmp, [managed(
-            controller={"reminders": every, "checkin_every": 1},
-            mgr={"milestones": 1, "replies": {"ack": ['<message to="Jordan">Please explain the table to me.</message>']}},
-            critic={"pass_after": 3})]))
-        self.assertEqual(status, "completed")
-        ts = turns(rec)
-        self.assertTrue(any("reply_routing" in (t.get("reminders") or []) for t in ts))
-        self.assertTrue(all("concise" in (t.get("reminders") or []) for t in ts if t["role"] != "auditor"))
-        assert_no_role_leaks(self, rec, load_config(str(self.tmp / "cfg.json")).monitor("m"))
-
-    def test_short_reply_check_reads_the_request_not_the_reminder(self):
-        status, rec = run(make_cfg(self.tmp, [managed(mgr={"milestones": 1})]))
-        p = sorted((rec.run_dir / "rounds").glob("r*/t*-writer.json"))[0]
-        t = json.loads(p.read_text())
-        t["input"] = ("Please rerun the ablation with three seeds and report the table.\n\n"
-                      + R.wrap("Night mode is on: nobody is watching the run. Decide everything yourself.") + "\n")
-        t["output"] = "OK."
-        p.write_text(json.dumps(t))
-        _, stats = audit.build(rec.run_dir, 0, 99)
-        flag = next(f for f in stats["flags"] if f["kind"] == "short or failed reply" and f["turn"] == t["turn_id"])
-        self.assertIn("three seeds", flag["excerpt"])
-        self.assertNotIn("Night mode", flag["excerpt"])
 
 
 if __name__ == "__main__":

@@ -14,8 +14,8 @@ dependencies = ["pyyaml>=5.4"]
 orch = "orch.cli:main"
 
 [tool.setuptools]
-packages = ["orch", "orch.hooks", "orch.runtime", "orch.runtime.adapters"]
+packages = ["orch", "orch.runtime", "orch.runtime.adapters"]
 
 [tool.setuptools.package-data]
-orch = ["example_config.yaml", "board.html", "prompts/*.md", "prompts/protocol/*.md"]
+orch = ["example_config.yaml", "prompts/*.md", "prompts/protocol/*.md"]
 "orch.runtime" = ["prompts/*", "prompts/*/*", "page/*", "page/*/*"]

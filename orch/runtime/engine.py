@@ -52,6 +52,7 @@ class Engine:
         self._starting = True
         self._closed = True
         self._stop_requested = False
+        self.update_requested = False  # UpdateOrch: the CLI takes in the new code and restarts; agents carry on
         self._last_tick = clock.now()
         self.tick_s = settings.get("tick_s", 5)
         self.jobs_check_s = settings.get("jobs_check_s", 60)
@@ -284,6 +285,8 @@ class Engine:
                         ] + [C.CommandReply(ev.id)]
             return [C.HoldAgent(i, C.HoldReason.STOPPED) for i in agents if i in snap.agents] + [
                 C.CommandReply(ev.id)]
+        if isinstance(ev, C.UpdateOrch):
+            return [C.CommandReply(ev.id, data={"update_orch": True})]
         if isinstance(ev, C.SetNight):
             self.store.configure(night=ev.on)
             return [C.CommandReply(ev.id)]
@@ -336,6 +339,8 @@ class Engine:
                 extra.unlink(missing_ok=True)
             if a.data.get("stop_orch"):
                 self._stop_requested = True
+            if a.data.get("update_orch") and not replay:
+                self.update_requested = True
         elif isinstance(a, C.FailAgent):
             self._event(C.AgentFailed(a.agent, intent.created, intent.id, a.error, str(a.why)))
         elif isinstance(a, C.RestartSession):

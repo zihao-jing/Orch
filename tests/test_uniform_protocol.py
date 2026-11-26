@@ -11,10 +11,8 @@ from unittest.mock import patch
 from orch import audit, protocol, routing
 from orch.backends import MockBackend, StopRequested, TurnResult, _opencode_tool_event
 from orch.config import load_config
-from orch.managed import ManagedRunner
 from orch.timing import TurnTiming, describe
-from test_orch import make_cfg, managed, run, turns
-from test_b11_parallel import Base as ParallelBase
+from test_orch import make_cfg, managed, turns
 
 PASS = '<checklist>- [x] change checked</checklist><verdict>PASS</verdict>'
 
@@ -25,46 +23,8 @@ class TestUniformDispatch(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
-    def test_untagged_done_fail_is_upward_and_never_dispatches_acknowledgment(self):
-        cfg = make_cfg(self.root, [managed(mgr={'milestones': 1}, critic={'replies': {
-            'verify': ['Your part is finished; nothing more for you. <verdict>FAIL</verdict>']}})])
-        with patch.object(ManagedRunner, 'wait_gate', side_effect=StopRequested):
-            status, rec = run(cfg)
-        self.assertEqual(status, 'stopped')
-        ts = turns(rec)
-        self.assertEqual(len([t for t in ts if t['purpose'] == 'work']), 1)
-        pause = next(t for t in ts if t['purpose'] == 'pause')
-        self.assertIn('Your part is finished', pause['input'])
-        note = next(m for m in rec.state['messages'] if m['body'].startswith('Your part'))
-        self.assertEqual(note['to'], 'boss')
-        self.assertEqual(note['status'], 'delivered')
-        self.assertIn(note['created_at'], pause['input'])
-        self.assertIn('Progress records from the critic', pause['input'])
-        self.assertTrue(all(t['communication_protocol'] == protocol.VERSION for t in ts))
 
-    def test_pass_with_explicit_message_starts_one_turn_and_keeps_session(self):
-        cfg = make_cfg(self.root, [managed(mgr={'milestones': 1}, critic={'replies': {
-            'verify': ['Manager-only observation. <message to="Sam">Check the caption once.</message>' + PASS,
-                       'All done. ' + PASS]}})])
-        status, rec = run(cfg)
-        self.assertEqual(status, 'completed')
-        work = [t for t in turns(rec) if t['purpose'] == 'work']
-        self.assertEqual(len(work), 2)
-        self.assertEqual(work[0]['session_id'], work[1]['session_id'])
-        self.assertEqual(work[1]['input'].count('Check the caption once.'), 1)
-        self.assertNotIn('Manager-only observation', work[1]['input'])
-        message = next(m for m in rec.state['messages'] if m['body'] == 'Check the caption once.')
-        self.assertEqual(message['status'], 'delivered')
 
-    def test_final_review_is_the_report_without_a_duplicate_progress_record(self):
-        cfg = make_cfg(self.root, [managed(mgr={'milestones': 1}, critic={'replies': {
-            'verify': ['All labels hold; nothing is open. ' + PASS]}})])
-        status, rec = run(cfg)
-        self.assertEqual(status, 'completed')
-        self.assertFalse([t for t in turns(rec) if t['purpose'] == 'report'])  # no second turn for the same news
-        review = next(t for t in turns(rec) if t['purpose'] == 'review')
-        self.assertEqual(review['input'].count('All labels hold; nothing is open.'), 1)
-        self.assertNotIn('Progress records from the critic', review['input'])
 
     def test_external_role_views_have_the_same_upper_default(self):
         agents = [SimpleNamespace(name=n, role=r, called=n) for n, r in
@@ -79,49 +39,7 @@ class TestUniformDispatch(unittest.TestCase):
         self.assertEqual(sent[0]['target'].name, 'critic')
 
 
-class TestUniformParallel(ParallelBase):
-    def test_finished_worker_waits_then_explicit_message_reuses_session(self):
-        original = MockBackend._run
-        counts = {}
-        def scripted(backend, req, stop, sid):
-            if req.context.get('purpose') == 'par_review':
-                who = req.context['par_worker']
-                counts[who] = counts.get(who, 0) + 1
-                if who == 'writer' and counts[who] == 1:
-                    out = 'This assignment is done; the shared work remains open. <verdict>FAIL</verdict>'
-                elif who == 'writer-2':
-                    out = '<message to="writer">Please check the new cross-reference.</message><verdict>PASS</verdict>'
-                else:
-                    out = 'Done. <verdict>PASS</verdict>'
-                self.ck.write_text(self.ck.read_text().replace('- [ ]', '- [x]'))
-                return TurnResult('ok', out, sid, 0)
-            return original(backend, req, stop, sid)
-        cfg = self.cfg(worker={'delay_for': {'writer': {'work': .01}, 'writer-2': {'work': .3},
-                                               'writer-3': {'work': .5}}})
-        with patch.object(MockBackend, '_run', scripted):
-            status, rec = run(cfg)
-        self.assertEqual(status, 'completed')
-        work = [t for t in turns(rec) if t['purpose'] == 'work' and t['agent'] == 'writer']
-        self.assertEqual(len(work), 2)
-        self.assertEqual(work[0]['session_id'], work[1]['session_id'])
-        self.assertEqual(work[1]['input'].count('Please check the new cross-reference.'), 1)
-        self.assertNotIn('This assignment is done', work[1]['input'])
 
-    def test_all_idle_unfinished_workers_preserve_parallel_state_at_manager_wait(self):
-        cfg = self.cfg(critic={'replies': {
-            'brief': ['<workers n="3" steps="1,2,3">Independent.</workers>'],
-            'par_assign': ['<to worker="writer" step="1">Work A.</to>'
-                           '<to worker="writer-2" step="2">Work B.</to>'
-                           '<to worker="writer-3" step="3">Work C.</to>'],
-            'par_review': ['No additional assignment. <verdict>FAIL</verdict>']}})
-        with patch.object(ManagedRunner, 'wait_gate', side_effect=StopRequested):
-            status, rec = run(cfg)
-        self.assertEqual(status, 'stopped')
-        par = rec.state['managed']['par']
-        self.assertTrue(par['active'])
-        self.assertTrue(all(slot['status'] == 'blocked' for slot in par['slots'].values()))
-        self.assertEqual(len([t for t in turns(rec) if t['purpose'] == 'work']), 3)
-        self.assertEqual(len([t for t in turns(rec) if t['purpose'] == 'pause']), 1)
 
 
 class TestAuditProtocolEvidence(unittest.TestCase):

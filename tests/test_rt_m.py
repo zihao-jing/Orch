@@ -131,7 +131,7 @@ class TestRuntimeChoiceAndEngine(unittest.TestCase):
         self.assertIsInstance(eng.adapters["agy"](), AgyAdapter)
         self.assertIsInstance(eng.adapters["command"](), CommandAdapter)
 
-    def test_item1_old_mode_runs_old_code_unchanged(self):
+    def test_item1_N_a_removed_mode_is_refused_before_anything_runs(self):
         cfg_file = self.tmp / "old.yaml"
         cfg_file.write_text(
             yaml.safe_dump(
@@ -154,9 +154,9 @@ class TestRuntimeChoiceAndEngine(unittest.TestCase):
             encoding="utf-8",
         )
         with patch.object(cli, "Engine", FakeEngine):
-            with redirect_stdout(io.StringIO()):
-                rc = cli.main(["run", str(cfg_file)])
-        self.assertEqual(rc, 0)
+            with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as e:
+                cli.main(["run", str(cfg_file)])
+        self.assertIn("pipeline mode was removed", str(e.exception))
         self.assertEqual(FakeEngine.instances, [])
 
 
@@ -225,18 +225,18 @@ class TestAddWorkerAndCommands(unittest.TestCase):
         self.assertIsInstance(cmds[5], GateAnswer)
         self.assertEqual((cmds[5].gate_id, cmds[5].text), ("q1", "Option B"))
 
-    def test_item3_old_run_commands_keep_todays_behaviour(self):
+    def test_item3_N_UI_6_an_old_run_is_read_only(self):
         old_run = self.tmp / "old_run"
         old_run.mkdir(parents=True)
         write_json(old_run / "state.json", {"monitor": "m", "run_id": "1", "status": "running", "sessions": {}})
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(["stop", str(old_run)]), 0)
-            self.assertEqual(cli.main(["tell", str(old_run), "critic", "hello"]), 0)
-            self.assertEqual(cli.main(["approve", str(old_run)]), 0)
-            self.assertEqual(cli.main(["answer", str(old_run), "q1", "yes"]), 0)
-        self.assertTrue((old_run / "STOP").is_file())
-        self.assertFalse((old_run / "commands").exists())
-        self.assertEqual(len(list((old_run / "inbox").glob("*.json"))), 3)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["stop", str(old_run)]), 1)
+            self.assertEqual(cli.main(["tell", str(old_run), "critic", "hello"]), 1)
+            self.assertEqual(cli.main(["approve", str(old_run)]), 1)
+            self.assertEqual(cli.main(["answer", str(old_run), "q1", "yes"]), 1)
+        self.assertEqual(out.getvalue().count("an old run, which can only be read"), 4)
+        self.assertEqual(sorted(p.name for p in old_run.iterdir()), ["state.json"])  # nothing written
 
     def test_item4_TERM_1_terminal_for_new_run_sends_open_execs_and_closes(self):
         run_dir = self._new_run_dir()

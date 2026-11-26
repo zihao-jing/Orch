@@ -15,7 +15,6 @@ import time  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 from orch import cli  # noqa: E402
-from orch.cli import _update_ready  # noqa: E402
 
 
 def git(repo, *args):
@@ -135,111 +134,59 @@ class TestApply(unittest.TestCase):
         self.assertEqual(update.restart_argv(["orch", "run", "--port=8899"], port=8900)[-2:], ["--port", "8900"])
 
 
-class TestReady(unittest.TestCase):
-    def runner(self, status="awaiting_approval", busy=(), auditing=False):
-        rec = SimpleNamespace(state={"status": status, **({"auditing": {"lo": 1}} if auditing else {})},
-                              agent_busy=lambda name: name in busy)
-        return SimpleNamespace(rec=rec, mon=SimpleNamespace(agents=[SimpleNamespace(name="boss"),
-                                                                    SimpleNamespace(name="writer")]))
-
-    def test_only_when_every_run_waits_with_nothing_running(self):
-        self.assertTrue(_update_ready([self.runner(), self.runner("waiting_job")]))
-        self.assertFalse(_update_ready([self.runner(), self.runner("running")]))
-        self.assertFalse(_update_ready([self.runner(busy=("boss",))]))  # a board chat at the gate
-        self.assertFalse(_update_ready([self.runner(auditing=True)]))
-        self.assertFalse(_update_ready([self.runner("completed")]))  # nothing to carry on
-        self.assertFalse(_update_ready([SimpleNamespace(rec=None, mon=None)]))  # not started yet
-        self.assertFalse(_update_ready([]))
 
 
 class TestUpdateButton(unittest.TestCase):
-    """Nothing is updated until the board's Update button asks; then it waits for a quiet moment and restarts."""
+    """The dashboard's Update button (UpdateOrch): Orch takes in the new code and restarts with --resume at once; the
+    agents keep running meanwhile, so there is no waiting for a quiet moment."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.busy = set()
-        self.state = {"status": "awaiting_approval", "managed": {"gate": {"key": "plan-0-0"}}, "round": 1}
-        self.progress = []
-        rec = SimpleNamespace(state=self.state, run_dir=self.tmp, agent_busy=lambda n: n in self.busy,
-                              event=lambda *a, **k: None, progress=self.progress.append)
-        self.runners = [SimpleNamespace(rec=rec, mon=SimpleNamespace(agents=[SimpleNamespace(name="boss")]))]
-        self.thread = SimpleNamespace(is_alive=lambda: True)
-        self.stop, self.restart, self.applied = threading.Event(), {}, 0
+        self.engine = SimpleNamespace(run_dir=self.tmp, update_requested=True)
         self.heads = ["aaaaaaa1"]
+        self.applied = 0
+        p = patch.object(cli, "_STARTED_HEAD", "aaaaaaa1")
+        p.start()
+        self.addCleanup(p.stop)
 
-    def watch(self, result=None):
-        result = result or {"ok": True, "updated": True, "old": "aaaaaaa", "new": "bbbbbbb"}
-
+    def take(self, result, valid=""):
         def apply(config):
             self.applied += 1
             if result.get("updated"):
                 self.heads[0] = "bbbbbbb2"
             return result
-        for p in (patch.object(cli, "POLL_UPDATE", 0.01), patch("orch.update.apply", apply),
-                  patch("orch.update.head", lambda repo=None: self.heads[0]),
-                  patch("orch.update.validate_code", lambda config, repo=None, python=None: "")):
-            p.start()
-            self.addCleanup(p.stop)
-        self.addCleanup(self.stop.set)
-        th = threading.Thread(target=cli._auto_update, args=(SimpleNamespace(config="."), self.runners, [self.thread],
-                                                             self.stop, self.restart, lambda s: None))
-        th.start()
-        return th
+        with patch("orch.update.apply", apply), patch("orch.update.head", lambda repo=None: self.heads[0]), \
+                patch("orch.update.validate_code", lambda config, repo=None, python=None: valid), \
+                patch.object(cli.sys, "argv", ["orch", "run", "proj", "--serve"]):
+            return cli._take_update(SimpleNamespace(config="."), [self.engine], 8766)
 
-    def status(self):
-        return update.read_status(self.tmp).get("state")
-
-    def test_nothing_happens_without_the_button(self):
-        self.watch()
-        time.sleep(0.15)
-        self.assertEqual((self.applied, self.restart), (0, {}))
-
-    def test_the_button_updates_and_restarts_when_the_run_waits(self):
-        th = self.watch()
-        update.request(self.tmp)
-        th.join(2)
-        self.assertEqual(self.applied, 1)
-        self.assertEqual(self.restart, {"old": "aaaaaaa", "new": "bbbbbbb"})
-        self.assertTrue(self.stop.is_set())
-        self.assertFalse((self.tmp / update.REQUEST).exists())
-        self.assertEqual(self.status(), "restarting")
-
-    def test_while_something_runs_it_waits(self):
-        th = self.watch()
-        self.busy.add("boss")  # a board chat
-        update.request(self.tmp)
-        time.sleep(0.15)
-        self.assertEqual((self.applied, self.status()), (0, "waiting"))
-        self.busy.clear()
-        th.join(2)
-        self.assertEqual(self.restart["new"], "bbbbbbb")
+    def test_the_button_updates_and_restarts_with_resume_on_the_same_port(self):
+        argv, new = self.take({"ok": True, "updated": True, "old": "aaaaaaa", "new": "bbbbbbb"})
+        self.assertEqual((new, argv[-6:]), ("bbbbbbb", ["run", "--resume", "proj", "--serve", "--port", "8766"]))
+        self.assertEqual(update.read_status(self.tmp).get("state"), "restarting")
+        self.assertFalse(self.engine.update_requested)  # asked once, done once
 
     def test_a_failed_update_is_shown_and_nothing_restarts(self):
-        self.watch({"ok": False, "updated": False, "error": "the orch checkout has uncommitted changes"})
-        update.request(self.tmp)
-        time.sleep(0.15)
-        self.assertEqual((self.applied, self.restart), (1, {}))
-        self.assertEqual(self.status(), "failed")
-        self.assertIn("uncommitted", update.read_status(self.tmp)["error"])
-        self.assertFalse((self.tmp / update.REQUEST).exists())  # one try per click
+        self.assertIsNone(self.take({"ok": False, "updated": False, "error": "the orch checkout is not on main"}))
+        self.assertEqual(update.read_status(self.tmp).get("state"), "failed")
 
-    def test_the_board_button_writes_the_request(self):
-        from orch.board import Board, serve
-        import json
-        import urllib.request
-        rd = self.tmp / "run"
-        rd.mkdir()
-        mon = SimpleNamespace(name="m", agents=[], controller=SimpleNamespace(), working_dir=str(self.tmp))
-        srv, url = serve({"m": Board("m", lambda: rd, mon)}, port=8897)
-        try:
-            urllib.request.urlopen(urllib.request.Request(url + "api/update?m=m", data=b"{}"))
-            self.assertTrue((rd / update.REQUEST).exists())
-            j = json.loads(urllib.request.urlopen(url + "api/version?m=m").read())
-            self.assertEqual(j["progress"]["state"], "requested")
-        finally:
-            srv.shutdown()
-            srv.server_close()
+    def test_already_current_and_code_pulled_by_hand_that_fails_validate(self):
+        self.assertIsNone(self.take({"ok": True, "updated": False}))
+        self.assertEqual(update.read_status(self.tmp).get("state"), "current")
+        self.engine.update_requested = True
+        self.heads[0] = "ccccccc3"  # pulled by hand since this process started
+        self.assertIsNone(self.take({"ok": True, "updated": False}, valid="bad config"))
+        self.assertEqual(update.read_status(self.tmp).get("state"), "failed")
 
+    def test_the_engine_flags_the_request_from_the_dashboard(self):
+        from orch.runtime import contracts as C
+        from rt_helpers import snapshot
+        from orch.runtime.adapters.mock import FakeClock
+        from orch.runtime.engine import Engine
+        eng = Engine(self.tmp / "run", FakeClock(1000.0), {}, {"tick_s": 1})
+        self.addCleanup(eng.close)
+        eng.start(snapshot())
+        reply = eng.submit(C.UpdateOrch("", 1000.0, "u1"))
+        self.assertTrue(reply.get("ok", True))
+        self.assertTrue(eng.update_requested)
 
-if __name__ == "__main__":
-    unittest.main()
