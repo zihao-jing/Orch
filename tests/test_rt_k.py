@@ -201,8 +201,9 @@ const T = {
     const m = (id, to, body, extra) => ({id, sender: 'critic', recipient: to, body, turn: 't1', status: 'delivered', ...extra});
     const rows = L.groupReplies([m('a', 'manager', 'Report.'), m('b', 'worker-2', 'Same task.'), m('c', 'worker-1', 'Same task.'),
                                  {id: 'd', sender: 'critic', recipient: 'worker-1', body: 'Same task.', turn: 't0', status: 'delivered'}]);
-    assert.deepStrictEqual(rows.map(r => [r.id, r.also || [], !!r.sameReply]),
-      [['a', [], false], ['b', ['worker-1'], true], ['d', [], false]]);
+    // one line per output: the turn t1 is one item, its messages in the order written, the same text merged
+    assert.deepStrictEqual(rows.map(r => [r.id, (r.parts || []).map(p => [p.id, p.also || []])]),
+      [['c', [['c', ['worker-2']], ['a', []]]], ['d', []]]);
   },
   time() {
     assert.strictEqual(L.ago(0, 130), '–'); assert.strictEqual(L.ago(null, 130), '–');

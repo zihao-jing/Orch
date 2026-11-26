@@ -255,13 +255,15 @@ button.level-toggle { color: var(--level); display: inline-flex; align-items: ce
 .level-toggle::before { content: ""; height: 6px; width: 6px; border-radius: 50%; background: currentColor; }
 .level-toggle[aria-pressed="false"]::before { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
 .page-controls { display: flex; align-items: center; gap: 5px 10px; flex-wrap: wrap; margin-top: 8px; }
-.msg.same-reply > summary .tm { align-self: stretch; margin-block: -2px; background: linear-gradient(var(--edge), var(--edge)) 14px 0 / 1px 100% no-repeat; }
+.pv .count { display: inline-block; min-width: 16px; margin-right: 6px; padding: 0 4px; border-radius: 8px; background: var(--line); color: var(--ink2); font-size: 10.5px; font-weight: 650; text-align: center; }
+.part + .part { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.part-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--mute); }
 .msg { margin: 1px 0; }
 .msg > summary { cursor: pointer; min-height: 26px; min-width: 0; display: flex; align-items: baseline; gap: 8px; border-radius: 6px; white-space: nowrap; padding: 3px 4px; font-size: 12.5px; color: var(--ink2); list-style: none; }
 .msg > summary::-webkit-details-marker { display: none; }
 .msg.awaiting.touser > summary { background: var(--warn-bg); box-shadow: inset 3px 0 0 var(--warn); }
 .msg > summary:hover, .msg[open] > summary { background: var(--code); }
-.msg .route { flex: 0 1 150px; min-width: 78px; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.msg .route { flex: 0 1 165px; min-width: 78px; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
 .msg .route b { font-weight: 600; }
 .msg .route .to { color: var(--mute); }
 .msg.housekeeping .route b { font-weight: 500; color: var(--mute); }

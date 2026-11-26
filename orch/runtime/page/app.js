@@ -632,12 +632,19 @@
     return node;
   }
 
+  const toNames = (named, list) => list.map(r => L.agentName(named, r)).join(", ");
   function messageBody(m, run, named) {
     const meta = m.written_by || {};
     const sized = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const facts = [meta.model ? "Written by " + L.shortModel(meta.model) : "",
       sized ? L.characterSize(meta.input_chars) + " characters in, " + L.characterSize(meta.output_chars) + " out" : ""].filter(Boolean);
-    const fb = h("div", { class: "fb" }, md(L.messageText(m)),
+    // one output that wrote several messages: each with whom it went to and how it stands
+    const texts = m.parts ? m.parts.map(p => h("div", { class: "part" },
+        h("div", { class: "part-head" }, h("span", {}, "→ " + toNames(named, [p.recipient].concat(p.also || []))),
+          h("span", { class: "st " + L.messageTone(p) + (L.messageException(p) ? "" : " plain") }, L.messageException(p) || L.messageStatus(p))),
+        md(L.messageText(p))))
+      : [md(L.messageText(m))];
+    const fb = h("div", { class: "fb" }, texts,
       facts.length ? h("p", { class: "detail-hint", title: meta.model || "" }, facts.join(" · ")) : null);
     if (m.turn) {
       const getTurn = () => cached("api/turn?id=" + encodeURIComponent(m.turn) + (run ? "&run=" + encodeURIComponent(run) : ""));
@@ -656,21 +663,27 @@
   }
 
   function msgRow(m, run, named = agents()) {
-    const level = L.messageLevel(m, named), note = L.isNotice(m), awaiting = L.awaitsAnswer(m);
-    const cls = ["msg", "level-" + level, m.sameReply ? "same-reply" : "", m.recipient === "user" ? "touser" : "", awaiting ? "awaiting" : "", note ? "notice-row" : m.orch_note ? "housekeeping" : ""];
-    const meta = m.written_by || {}, exception = L.messageException(m), hint = L.statusHint(m);
-    const to = [m.recipient].concat(m.also || []);
+    const parts = m.parts || [m];
+    const level = L.messageLevel(m, named), note = L.isNotice(m);
+    const awaitsYou = parts.some(p => p.recipient === "user" && L.awaitsAnswer(p));
+    const cls = ["msg", "level-" + level, parts.some(p => p.recipient === "user") ? "touser" : "", awaitsYou ? "awaiting" : "", note ? "notice-row" : m.orch_note ? "housekeeping" : ""];
+    const meta = m.written_by || {}, odd = parts.find(p => L.messageException(p)) || m;
+    const exception = L.messageException(odd), hint = parts.length > 1 ? "" : L.statusHint(m);
+    const rank = r => ({ user: 0, manager: 1, critic: 2 })[r] ?? 3;
+    const to = [...new Set([m.recipient].concat(parts.flatMap(p => [p.recipient].concat(p.also || []))))]
+      .sort((a, b) => rank(a) - rank(b));
     const allWorkers = to.length > 1 && to.every(r => (named[r] || {}).role === "worker");
-    const toText = allWorkers ? to.length + " workers" : to.map(r => L.agentName(named, r)).join(", ");
-    const fullRoute = L.agentName(named, m.sender) + " → " + to.map(r => L.agentName(named, r)).join(", ");
+    const toText = allWorkers ? to.length + " workers" : to.length > 2 ? L.agentName(named, to[0]) + " +" + (to.length - 1) : toNames(named, to);
+    const fullRoute = L.agentName(named, m.sender) + " → " + toNames(named, to) + (parts.length > 1 ? " (" + parts.length + " messages)" : "");
     const size = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const d = h("details", { class: cls.filter(Boolean).join(" "), data: { message: m.id } },
       h("summary", { title: [fullRoute, hint].filter(Boolean).join(" · ") },
-        h("span", { class: "tm", title: m.sameReply ? "Written in the same reply as the row above" : "" }, m.sameReply ? "" : L.stamp(m.created, nowSrv())),
+        h("span", { class: "tm" }, L.stamp(m.created, nowSrv())),
         h("span", { class: "route" }, h("b", {}, L.agentName(named, m.sender)), h("span", { class: "to" }, " → " + toText)),
-        h("span", { class: "pv" }, L.preview(L.messageText(m))),
-        h("span", { class: "st-slot" }, exception || L.messageStatus(m) ? h("span", { class: "st " + L.messageTone(m) + (exception ? "" : " plain"),
-          title: hint }, exception || L.messageStatus(m)) : null),
+        h("span", { class: "pv" }, parts.length > 1 ? h("span", { class: "count", title: parts.length + " messages from this output" }, parts.length) : null,
+          L.preview(L.messageText(m))),
+        h("span", { class: "st-slot" }, exception || L.messageStatus(odd) ? h("span", { class: "st " + L.messageTone(odd) + (exception ? "" : " plain"),
+          title: hint }, exception || L.messageStatus(odd)) : null),
         h("span", { class: "by", title: meta.model ? "Written by " + meta.model : "" }, meta.model ? L.shortModel(meta.model) : ""),
         size && meta.input_chars > 30000 ? h("span", { class: "sz large", title: meta.input_chars.toLocaleString() +
           " input characters: more than 30,000" }, L.characterSize(meta.input_chars) + " in") : null));

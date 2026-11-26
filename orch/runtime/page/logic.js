@@ -135,20 +135,31 @@
     return "";
   }
 
-  // one reply that wrote to several agents: the same text to several becomes one row with all its recipients,
-  // and every row after the first of a reply is marked, so the page shows them as one block (rows: newest first)
+  // one line per agent output: the messages one turn of an agent wrote become one item, its parts in the order
+  // written; the same text to several recipients is one part with all of them (rows: newest first)
   function groupReplies(rows) {
-    const out = [];
+    const out = [], byTurn = new Map();
     rows.forEach(m => {
-      const prev = out[out.length - 1];
-      const same = !!(prev && m.turn && prev.turn === m.turn && prev.sender === m.sender);
-      if (same && m.body && prev.body === m.body && !m.text && !prev.text && m.status === prev.status && !m.drop && !prev.drop) {
-        out[out.length - 1] = { ...prev, also: (prev.also || []).concat(m.recipient) };
-        return;
-      }
-      out.push(same ? { ...m, sameReply: true } : m);
+      const key = m.turn && m.sender !== "orch" ? m.turn + "|" + m.sender : "";
+      if (key && byTurn.has(key)) { byTurn.get(key).push(m); return; }
+      const list = [m];
+      if (key) byTurn.set(key, list);
+      out.push(list);
     });
-    return out;
+    return out.map(list => {
+      if (list.length === 1) return list[0];
+      const parts = [];
+      list.slice().reverse().forEach(m => {
+        const same = parts.find(p => m.body && p.body === m.body && !m.text && !p.text && p.status === m.status && !m.drop && !p.drop);
+        if (same) same.also = (same.also || []).concat(m.recipient);
+        else parts.push({ ...m });
+      });
+      if (parts.length === 1) return parts[0];
+      // the headline shows the part to the one above (you, the manager, the critic): it sums the output up
+      const rank = p => ({ user: 0, manager: 1, critic: 2 })[p.recipient] ?? 3;
+      const head = parts.reduce((a, b) => rank(b) < rank(a) ? b : a);
+      return { ...head, id: parts[0].id, parts };
+    });
   }
 
   function awaitsAnswer(m) {
