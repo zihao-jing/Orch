@@ -242,16 +242,39 @@
   // The page turns it into DOM nodes with textContent, never into HTML.
   function spans(line) {
     const out = [];
-    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)/g;
+    // `code`, **bold**, *italic* and [text](a web address); a link to anything else stays text
+    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|((?<![*\w])\*[^*\s](?:[^*]*[^*\s])?\*(?![*\w]))|(\[([^\]]+)\]\((https?:\/\/[^)\s]+)\))/g;
     let i = 0, m;
     while ((m = re.exec(line))) {
       if (m.index > i) out.push({ t: "text", s: line.slice(i, m.index) });
       const tok = m[0];
-      out.push(tok[0] === "`" ? { t: "code", s: tok.slice(1, -1) } : { t: "b", s: tok.slice(2, -2) });
+      out.push(m[1] ? { t: "code", s: tok.slice(1, -1) } : m[2] ? { t: "b", s: tok.slice(2, -2) }
+        : m[3] ? { t: "i", s: tok.slice(1, -1) } : { t: "a", s: m[5], href: m[6] });
       i = m.index + tok.length;
     }
     if (i < line.length) out.push({ t: "text", s: line.slice(i) });
     return out;
+  }
+  // a table row "| a | b |" as its cells; a | inside `code` stays in its cell
+  function tableCells(line) {
+    let s = line.trim();
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+    const cells = [];
+    let cur = "", code = false;
+    for (let k = 0; k < s.length; k++) {
+      const c = s[k];
+      if (c === "\\" && s[k + 1] === "|") { cur += "|"; k++; continue; }
+      if (c === "`") code = !code;
+      if (c === "|" && !code) { cells.push(cur.trim()); cur = ""; continue; }
+      cur += c;
+    }
+    cells.push(cur.trim());
+    return cells;
+  }
+  const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  function isTableStart(lines, i) {
+    return /\|/.test(lines[i] || "") && TABLE_SEP.test(lines[i + 1] || "") && /\|/.test(lines[i + 1] || "");
   }
   function markdown(src) {
     const L = String(src || "").replace(/\r/g, "").split("\n"), out = [];
@@ -264,6 +287,24 @@
         while (i < L.length && !/^\s*```/.test(L[i])) b.push(L[i++]);
         i++; out.push({ t: "code", s: b.join("\n") }); continue;
       }
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l)) { out.push({ t: "hr" }); i++; continue; }
+      if (/^\s*>/.test(l)) {
+        const q = [];
+        while (i < L.length && /^\s*>/.test(L[i])) q.push(L[i++].replace(/^\s*>\s?/, ""));
+        out.push({ t: "quote", blocks: markdown(q.join("\n")) }); continue;
+      }
+      if (isTableStart(L, i)) {
+        const head = tableCells(L[i]);
+        const align = tableCells(L[i + 1]).map(c => /^:-+:$/.test(c) ? "center" : /-:$/.test(c) ? "right" : "");
+        const rows = [];
+        i += 2;
+        while (i < L.length && L[i].trim() && /\|/.test(L[i])) {
+          const cells = tableCells(L[i++]);
+          rows.push(head.map((_, k) => spans(cells[k] || "")));
+        }
+        out.push({ t: "table", head: head.map(spans), align: head.map((_, k) => align[k] || ""), rows: rows });
+        continue;
+      }
       const hm = l.match(/^#{1,4}\s+(.*)/);
       if (hm) { out.push({ t: "h", c: spans(hm[1]) }); i++; continue; }
       if (LI.test(l)) {
@@ -273,7 +314,8 @@
       }
       if (!l.trim()) { i++; continue; }
       const p = [];
-      while (i < L.length && L[i].trim() && !/^\s*```/.test(L[i]) && !/^#{1,4}\s/.test(L[i]) && !LI.test(L[i])) p.push(L[i++]);
+      while (i < L.length && L[i].trim() && !/^\s*```/.test(L[i]) && !/^#{1,4}\s/.test(L[i]) && !LI.test(L[i]) &&
+        !isTableStart(L, i) && !/^\s*>/.test(L[i]) && !/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(L[i])) p.push(L[i++]);
       out.push({ t: "p", lines: p.map(spans) });
     }
     return out;

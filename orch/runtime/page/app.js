@@ -68,21 +68,33 @@
 
   // the text of a user or an agent as small Markdown, built as nodes
   function spanNodes(list) {
-    return list.map(s => s.t === "code" ? h("code", {}, s.s) : s.t === "b" ? h("b", {}, s.s) : s.s);
+    return list.map(s => s.t === "code" ? h("code", {}, s.s) : s.t === "b" ? h("b", {}, s.s) : s.t === "i" ? h("i", {}, s.s)
+      : s.t === "a" ? h("a", { href: s.href, target: "_blank", rel: "noopener noreferrer" }, s.s) : s.s);
   }
   function md(text) {
     const box = h("div", { class: "md" });
-    L.markdown(text).forEach(b => {
+    mdInto(box, L.markdown(text));
+    return box;
+  }
+  function mdInto(box, blocks) {
+    blocks.forEach(b => {
       if (b.t === "code") box.append(h("pre", {}, b.s));
+      else if (b.t === "hr") box.append(h("hr"));
+      else if (b.t === "quote") { const q = h("blockquote"); mdInto(q, b.blocks); box.append(q); }
       else if (b.t === "h") box.append(h("h4", {}, spanNodes(b.c)));
       else if (b.t === "ul" || b.t === "ol") box.append(h(b.t, {}, b.items.map(i => h("li", {}, spanNodes(i)))));
+      else if (b.t === "table") {
+        const cell = (tag, c, k) => h(tag, b.align[k] ? { style: "text-align:" + b.align[k] } : {}, spanNodes(c));
+        box.append(h("div", { class: "table-wrap" }, h("table", {},
+          h("thead", {}, h("tr", {}, b.head.map((c, k) => cell("th", c, k)))),
+          h("tbody", {}, b.rows.map(r => h("tr", {}, r.map((c, k) => cell("td", c, k))))))));
+      }
       else {
         const p = h("p");
         b.lines.forEach((ln, i) => { if (i) p.append(h("br")); add(p, spanNodes(ln)); });
         box.append(p);
       }
     });
-    return box;
   }
 
   // rebuild a part of the page only when its data changed; keep the focus and the typed text

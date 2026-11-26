@@ -120,6 +120,15 @@ const T = {
     const b = L.markdown('Hello **you** and `x`\n\n- a\n- b\n\n```\n<b>raw</b>\n```');
     assert.strictEqual(b[0].t, 'p'); assert.strictEqual(b[1].t, 'ul'); assert.strictEqual(b[2].t, 'code');
     assert.strictEqual(b[2].s, '<b>raw</b>');   // kept as plain text; the page puts it in as text
+    const t = L.markdown('Scores:\n| Criterion | Score |\n|---|---:|\n| greets `a|b` | **5** |\n| tests | 4.5 |\nAfter.');
+    assert.deepStrictEqual(t.map(x => x.t), ['p', 'table', 'p']);
+    assert.deepStrictEqual(t[1].align, ['', 'right']);
+    assert.strictEqual(t[1].rows.length, 2);
+    assert.deepStrictEqual(t[1].rows[0][0], [{t: 'text', s: 'greets '}, {t: 'code', s: 'a|b'}]);
+    assert.strictEqual(L.markdown('a | b is not a table')[0].t, 'p');
+    const o = L.markdown('> said\n---\n*it* x*y* [d](https://e.org) [x](javascript:1)');
+    assert.deepStrictEqual(o.map(x => x.t), ['quote', 'hr', 'p']);
+    assert.deepStrictEqual(o[2].lines[0].map(x => x.t), ['i', 'text', 'a', 'text']);
   },
   gateAnswer() {
     const g = {id: 'g1'};
