@@ -225,6 +225,19 @@ class EngineAudit(RuntimeCase):
         self.assertEqual(audits(), 2)  # the final one
         self.advance(3)
         self.assertEqual(audits(), 2)
+        fake["rounds"] = 4  # a model switch after the end: no audit for it alone
+        self.advance(3)
+        self.assertEqual(audits(), 2)
+        self.restart()  # the engine reads "finished" back from the records
+        self.engine.settings["audit_every"] = 2
+        real = self.engine.store.snapshot
+        self.engine.store.snapshot = lambda: replace(real(), **fake)
+        self.advance(3)
+        self.assertEqual(audits(), 2)
+        fake["rounds"] = 5  # a full stretch after the final audit
+        self.advance(2)
+        wait()
+        self.assertEqual(audits(), 3)
 
     def test_an_audit_cut_off_by_a_restart_is_cleared(self):
         self.start()

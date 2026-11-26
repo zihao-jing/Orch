@@ -350,7 +350,7 @@ def run_audit(run_dir: Path, snap: Snapshot, messages: Sequence[Message], adapte
     stamp = datetime.fromtimestamp(snap.now).strftime("%Y%m%d-%H%M%S")
     rec_dir = run_dir / "audits"
     rec_dir.mkdir(parents=True, exist_ok=True)
-    record: Dict[str, Any] = {"since": seen["since"], "until": seen["until"], "rounds_at": snap.rounds,
+    record: Dict[str, Any] = {"since": seen["since"], "until": seen["until"], "rounds_at": snap.rounds, "finished": snap.finished,
                               "messages": seen["messages"],
                               "turns": seen["turns"], "facts": seen["facts"], "findings_file": str(path)}
     if not seen["messages"] and not seen["turns"]:

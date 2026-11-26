@@ -44,6 +44,7 @@ class Engine:
         self._audited: SimpleQueue = SimpleQueue()  # (record) from the audit thread
         self._audit_stop = threading.Event()
         self._audit_rounds: Optional[int] = None  # snap.rounds when the last audit started
+        self._audit_final = False  # the last audit started while the run was finished
         self._smoke_stop = threading.Event()
         self._smokes = set()
         self._pending_sends = {}
@@ -798,7 +799,7 @@ class Engine:
         messages, _ = self.store.messages(limit=0)
         adapter = self.factories[choice.backend]()
         self.store.configure(run=replace(snap.run, audit_running=True))
-        self._audit_rounds = snap.rounds
+        self._audit_rounds, self._audit_final = snap.rounds, snap.finished
         done, stop = self._audited, self._audit_stop
         points = int(self.settings.get("audit_points", audit.POINTS) or audit.POINTS)
 
@@ -822,9 +823,11 @@ class Engine:
             return
         if self._audit_rounds is None:
             from . import audit
-            self._audit_rounds = max([0] + [int(r.get("rounds_at") or 0) for r in audit.records(self.run_dir)])
+            last = max(audit.records(self.run_dir), key=lambda r: int(r.get("rounds_at") or 0), default={})
+            self._audit_rounds, self._audit_final = int(last.get("rounds_at") or 0), bool(last.get("finished"))
         new = snap.rounds - self._audit_rounds
-        if new >= every or (snap.finished and new > 0):
+        # once when the run finishes; what happens after that (a switch, a chat) waits for a full stretch
+        if new >= every or (snap.finished and new > 0 and not self._audit_final):
             why = self._audit(snap)
             if why:
                 LOG.info("automatic audit not started: %s", why)
