@@ -10,7 +10,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 from .contracts import (
     Action, Agent, BrokenLabel, Chat, CommandReply, Decision, Drop, DropReason, Ending, Event, HoldReason, Hold, Lifecycle,
-    Message, Problem, Refusal, Reject, ReturnToSender, Role, SaveNotes, Send, SendToCritic, Snapshot,
+    Message, Problem, Refusal, Reject, ReturnToSender, Role, Send, SendToCritic, Snapshot,
     Tell, TextKey, TextRef, ToUser, Trigger, TurnEnded, TurnStatus, USER, new_id)
 
 NAME = "routing"
@@ -144,8 +144,6 @@ def _upper(snap: Snapshot, out: _Out, agent: Agent, turn) -> None:
             out.add(ToUser, out.message(me, USER, reply.untagged, trigger=trigger, turn=turn.id))
         if reply.summary and not (reply.questions or reply.pauses or reply.decision in (Decision.ACCEPT, Decision.PAUSE)):
             out.add(ToUser, out.message(me, USER, reply.summary, trigger=trigger, turn=turn.id))  # no gate carries it
-        if reply.state and agent.role == Role.MANAGER:
-            out.actions.append(SaveNotes(me, reply.state))
     if not drafting:
         _broken(snap, out, agent, turn, broken)
 

@@ -83,14 +83,14 @@ ORCH = "orch"
 
 # the names of the modules, in the order they decide about one event (3.5)
 MODULE_ORDER = ("recovery", "models", "workers", "routing", "gates", "terminal", "discussion", "milestones",
-                "golden", "supervisor")
+                "supervisor")
 
 # what the engine imports from each package; signatures are in "Entry points" below
 ENTRY_POINTS = {
     "recovery": "module() -> Module", "models": "module(...) -> Module; resolve; catalog; smoke_test; save_choice",
     "workers": "module() -> Module", "routing": "module() -> Module", "gates": "module() -> Module",
     "discussion": "module() -> Module", "terminal": "module() -> Module",
-    "milestones": "module() -> Module; read_checklist", "golden": "module() -> Module; read_board",
+    "milestones": "module() -> Module; read_checklist", "golden": "read_board",
     "supervisor": "module() -> Module", "labels": "parse", "texts": "render; words; system_prompt",
     "store": "Store", "engine": "Engine", "board": "serve(runtime: Runtime, ...)",
 }
@@ -339,7 +339,7 @@ class TextKey(_Str):
     RESTART_CONTINUE = "restart_continue"  # after RestartSession (SIL-4)
     MESSAGE_AGAIN = "message_again"  # the unfinished message, again to the new model (MOD-6)
     SESSION_RETURN = "session_return"  # an earlier session reopened: what happened since (SES-4)
-    SESSION_FRESH = "session_fresh"  # a new session without a switch (assumption 3); the engine sends it
+    SESSION_FRESH = "session_fresh"  # a new manager session without a switch (assumption 3); the engine sends it
     # handover (SES-5)
     HANDOVER_WRITE = "handover_write"  # to the old model
     HANDOVER_REQUEST_CRITIC = "handover_request_critic"  # the critic writes a worker's instruction
@@ -379,14 +379,12 @@ class TextKey(_Str):
     REM_GOLDEN_PATH = "rem_golden_path"  # new or compacted session, or the board changed (PRM-5)
     REM_GOLDEN_KEEP = "rem_golden_keep"
     REM_GOLDEN_SIZE = "rem_golden_size"
-    GOLDEN_LEAK = "golden_leak"  # to the manager
     REM_MESSAGE_CRITIC = "rem_message_critic"
     REM_OPEN_GATES = "rem_open_gates"
     REM_DISCUSSION = "rem_discussion"
     REM_NIGHT = "rem_night"
     REM_ASK_AND_END = "rem_ask_and_end"
     REM_WRITING = "rem_writing"
-    REM_STATE_EDITED = "rem_state_edited"  # Agent.state_edited is set and differs from given["state"]
     REM_CHECKLIST = "rem_checklist"  # to the critic: where its checklist file is (new session or new milestone)
     REM_DISCUSSION_OVER = "rem_discussion_over"  # the discussion ended without being applied
     REM_NIGHT_OVER = "rem_night_over"
@@ -441,7 +439,7 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.RESTART_CONTINUE: (),
     TextKey.MESSAGE_AGAIN: (),
     TextKey.SESSION_RETURN: ("turns_dir", "since"),  # since: time; H says where the turns from then on are
-    TextKey.SESSION_FRESH: ("state_file",),
+    TextKey.SESSION_FRESH: (),
     TextKey.HANDOVER_WRITE: ("agent",),
     TextKey.HANDOVER_REQUEST_CRITIC: ("agent", "why", "assignment"),
     TextKey.HANDOVER_REQUEST_MANAGER: ("agent", "why"),
@@ -475,14 +473,12 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.REM_GOLDEN_PATH: ("path",),
     TextKey.REM_GOLDEN_KEEP: ("path",),
     TextKey.REM_GOLDEN_SIZE: ("path", "chars", "limit"),
-    TextKey.GOLDEN_LEAK: ("path", "words"),
     TextKey.REM_MESSAGE_CRITIC: (),
     TextKey.REM_OPEN_GATES: ("gates",),
     TextKey.REM_DISCUSSION: (),
     TextKey.REM_NIGHT: (),
     TextKey.REM_ASK_AND_END: (),
     TextKey.REM_WRITING: ("rules",),
-    TextKey.REM_STATE_EDITED: ("path",),
     TextKey.REM_CHECKLIST: ("path",),
     TextKey.REM_DISCUSSION_OVER: (),
     TextKey.REM_NIGHT_OVER: (),
@@ -753,8 +749,6 @@ class Agent:
     role: Role = Role.WORKER
     display: str = ""  # how others name it
     cwd: str = ""
-    state_file: str = ""  # its state.md (SaveNotes)
-    state_edited: str = ""  # [engine] digest of state.md while it differs from what SaveNotes wrote last; else ""
     fresh_session: str = ""  # config: "compact", "new", "never" at a milestone start (assumption 3)
     lifecycle: Lifecycle = Lifecycle.OPEN  # [workers]
     status: AgentStatus = AgentStatus.IDLE  # the store derives it: Snapshot.status_of
@@ -858,7 +852,6 @@ class Reply:
     rubric: List[str] = field(default_factory=list)
     score: Optional[float] = None
     summary: str = ""
-    state: str = ""  # <state>
     broken: List[BrokenLabel] = field(default_factory=list)
     health: Optional[Health] = None  # monitor only; None: unreadable
 
@@ -967,12 +960,10 @@ class Milestone:
 
 @dataclass
 class GoldenBoard:
-    """The golden board file, read by golden.read_board (G) for each snapshot. digest, chars, words: from the file."""
+    """The golden board file, read by golden.read_board (G) for each snapshot. digest, chars: from the file."""
     path: str = ""
     digest: str = ""
     chars: int = 0
-    words: List[str] = field(default_factory=list)  # manager-only words found (leak check)
-    leak_told: str = ""  # [golden] digest the manager was told about
 
 
 @dataclass
@@ -1869,21 +1860,6 @@ class SetFinished(Action):
 
 
 @dataclass(frozen=True)
-class SetGolden(Action):
-    """Store: leak_told of `golden`."""
-    emitters: ClassVar[Tuple[str, ...]] = ("golden",)
-    golden: GoldenBoard = field(default_factory=GoldenBoard)
-
-
-@dataclass(frozen=True)
-class SaveNotes(Action):
-    """<state>. Engine: the agent's state.md."""
-    emitters: ClassVar[Tuple[str, ...]] = ("routing",)
-    agent: str = ""
-    text: str = ""
-
-
-@dataclass(frozen=True)
 class SetDiscussion(Action):
     """Store: discussions[agent] (None: ended); a running turn keeps Turn.draft."""
     emitters: ClassVar[Tuple[str, ...]] = ("discussion",)
@@ -2016,8 +1992,7 @@ class Rendered:
 # Entry points (functions with these names and arguments in the module named in ENTRY_POINTS)
 #   labels.parse(text: str, role: Role) -> Reply
 #   milestones.read_checklist(path: str, text: Optional[str]) -> Checklist       text None: missing or unreadable
-#   golden.read_board(path: str, text: Optional[str], last: GoldenBoard, names: Sequence[str]) -> GoldenBoard
-#                                                                                names: the agents' names
+#   golden.read_board(path: str, text: Optional[str], last: GoldenBoard) -> GoldenBoard
 #   texts.render(snap: Snapshot, message: Message) -> Rendered                   with the reminder; its random picks
 #                                                                                use message.id as the seed
 #   texts.words(ref: TextRef, snap: Snapshot) -> str                             gates, command replies, notices

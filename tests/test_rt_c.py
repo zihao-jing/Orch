@@ -52,12 +52,12 @@ class TestParse(unittest.TestCase):
 
     def test_LAB_3_manager_labels(self):
         text = ('Hello.<question>Which?\nA) one\nB) two</question><pause>wait</pause><decision> revise </decision>'
-                '<score>4.5</score><rubric>- a\n- b</rubric><summary>S</summary><state>St</state>'
+                '<score>4.5</score><rubric>- a\n- b</rubric><summary>S</summary>'
                 '<message to="critic">go</message><workers n="2">x</workers>')
         r = labels.parse(text, Role.MANAGER)
         self.assertEqual((r.questions[0].text, r.questions[0].options), ("Which?", ["one", "two"]))
         self.assertEqual((r.pauses, r.decision, r.score), (["wait"], Decision.REVISE, 4.5))
-        self.assertEqual((r.rubric, r.summary, r.state, r.untagged), (["a", "b"], "S", "St", "Hello."))
+        self.assertEqual((r.rubric, r.summary, r.untagged), (["a", "b"], "S", "Hello."))
         self.assertEqual([b.problem for b in r.broken], [Problem.REMOVED])
 
     def test_LAB_2_worker_has_no_labels_and_MSG_10_clean_text(self):
@@ -192,7 +192,7 @@ class TestCriticReplies(unittest.TestCase):
 
 class TestManagerReplies(unittest.TestCase):
     TEXT = ('Thinking. <question>Which db?\nA) pg\nB) sqlite</question><pause>wait for it</pause>'
-            '<message to="critic">Continue with tests.</message><message to="worker-1">Hi.</message><state>S</state>')
+            '<message to="critic">Continue with tests.</message><message to="worker-1">Hi.</message>')
 
     def test_GATE_2_scenario_6_question_holds_every_message(self):
         snap = snapshot()
@@ -202,7 +202,6 @@ class TestManagerReplies(unittest.TestCase):
         held = {a.message_id for a in find(acts, Hold, reason=HoldReason.QUESTION)}
         self.assertEqual(len(held), 3)  # critic, worker, and the notice about the worker message
         assert_has(self, acts, ToUser, body="Thinking.")
-        assert_has(self, acts, SaveNotes, agent="manager", text="S")
 
     def test_GATE_2_no_hold_at_night_or_in_a_discussion(self):
         _, acts = routed(snapshot(night=True), "manager", self.TEXT)

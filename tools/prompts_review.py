@@ -42,7 +42,6 @@ GROUPS = [
         (K.MILESTONE_CHANGE_UNREADABLE, "The manager's changed milestone list cannot be read."),
         (K.SILENCE_CHECK, "Nothing has happened for the silence time (2 min per try) and no one is writing."),
         (K.NO_WORKERS, "The critic wrote to a worker but there is none: the manager should ask the user."),
-        (K.GOLDEN_LEAK, "The manager wrote a golden-board word in a message to the critic."),
         (K.HANDOVER_REQUEST_MANAGER, "The critic moves to a new model or session: the manager writes its instruction."),
         (K.MANAGER_TAKEOVER, "A new manager session starts: where the earlier turns are saved."),
         (K.DISCUSSION_APPLY, "The user ends a discussion and applies it: the drafts become real messages."),
@@ -109,7 +108,6 @@ REMINDERS = [
     (K.REM_GOLDEN_SIZE, "manager", "Once when the board grows over the limit."),
     (K.REM_MESSAGE_CRITIC, "manager", "60%, not during a discussion."),
     (K.REM_OPEN_GATES, "manager", "With the line above, when gates are open."),
-    (K.REM_STATE_EDITED, "manager", "When the user edited the manager's notes."),
     (K.REM_NIGHT, "manager", "When night mode starts, then 25%."),
     (K.REM_NIGHT_OVER, "manager", "Once when night mode ends."),
     (K.REM_DISCUSSION, "critic, manager", "When a discussion opens, then 25%."),
@@ -124,8 +122,7 @@ BODY = {K.WORKER_FINAL: "«the worker's reply»", K.WORKER_INTERMEDIATE: "«the 
         K.LABEL_BROKEN_PASSED: "«the sender's reply»", K.MONITOR_REPORT: "«the monitor's reply»",
         K.MESSAGE_AGAIN: "«the unfinished message»", K.HANDOVER_INSTRUCTION: "«the instruction and the handover»",
         K.CRITIC_REPORT: "«the critic's plain text»", K.MILESTONE_CHANGE_REQUEST: "«the user's request»"}
-PATHS = {K.CHECKLIST_UNREADABLE: "/proj/.orch/checklist.md", K.REM_CHECKLIST: "/proj/.orch/checklist.md",
-         K.REM_STATE_EDITED: "/proj/.orch/manager-state.md"}
+PATHS = {K.CHECKLIST_UNREADABLE: "/proj/.orch/checklist.md", K.REM_CHECKLIST: "/proj/.orch/checklist.md"}
 
 
 def vals(k):

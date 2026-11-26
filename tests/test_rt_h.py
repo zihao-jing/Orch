@@ -21,7 +21,7 @@ VALUES = {
     "worker": "worker-1", "agent": "worker-1", "by": "critic", "monitor": "monitor", "sender": "critic",
     "jobs": ["train.py"], "available": ["worker-1"], "label": "<message>", "problem": "unclosed", "why": "billing",
     "assignment": "Check the labels", "question": "Done?", "to": "worker-9", "turns_dir": "/run/rounds", "since": T0,
-    "state_file": "/run/state.md", "latest": "r003-t01-manager", "goal": "Build it.", "milestone": "m1",
+    "latest": "r003-t01-manager", "goal": "Build it.", "milestone": "m1",
     "title": "Data", "text": "The data is clean.", "checklist_path": "/run/c.md", "last_title": "Setup", "attempt": 1,
     "attempts": 3, "rubric": ["Correct"], "checklist": ["- [x] Labels checked"], "decide_again": "",
     "answers": [{"kind": "question", "question": "A or B?", "answer": "A"}], "unsent": [], "path": "/run/golden.md",
@@ -222,10 +222,8 @@ class TestPrompts(unittest.TestCase):
         self.assertNotRegex(p["critic"].lower(), NEVER["critic"])
         self.assertNotRegex(p["worker-1"].lower(), NEVER["worker-1"])
         self.assertIn("/run/golden.md", p["manager"])
-        self.assertNotIn("/run/golden.md", p["critic"])  # by reminder, only while it holds nothing it must not see
-        for who in ("manager", "critic"):
-            self.assertIn("golden board", p[who].lower())
-        self.assertIn("check finished work against them", p["critic"])
+        self.assertNotIn("/run/golden.md", p["critic"])  # the critic is never pointed to the board
+        self.assertIn("golden board", p["manager"].lower())
 
     def test_WRK_9_10_11_rules_are_in_the_prompts(self):
         p = self.prompts()
@@ -354,31 +352,29 @@ class TestReminders(unittest.TestCase):
         self.assertNotIn("<message", out)
 
     def test_PRM_4_PRM_5_golden_board_path_when_new_changed_or_compacted(self):
-        for who in ("critic", "manager"):
-            snap = snapshot(BOARD)
-            got, given = keys(snap, message("x1", who))
-            self.assertTrue({"rem_golden_path", "rem_golden_use"} <= set(got))
-            give(snap, who, **given)
-            self.assertFalse({"rem_golden_path", "rem_golden_use"} & set(keys(snap, message("x2", who))[0]))
-            self.assertIn("rem_golden_use", keys(snap, message("x2", who), True)[0])
-            snap.golden = replace(snap.golden, digest="d2")
-            self.assertIn("rem_golden_path", keys(snap, message("x3", who))[0])
-            snap.agents[who].session.given.clear()  # compacted
-            self.assertIn("rem_golden_path", keys(snap, message("x3", who))[0])
+        snap = snapshot(BOARD)
+        got, given = keys(snap, message("x1", "manager"))
+        self.assertTrue({"rem_golden_path", "rem_golden_use"} <= set(got))
+        give(snap, "manager", **given)
+        self.assertFalse({"rem_golden_path", "rem_golden_use"} & set(keys(snap, message("x2", "manager"))[0]))
+        self.assertIn("rem_golden_use", keys(snap, message("x2", "manager"), True)[0])
+        snap.golden = replace(snap.golden, digest="d2")
+        self.assertIn("rem_golden_path", keys(snap, message("x3", "manager"))[0])
+        snap.agents["manager"].session.given.clear()  # compacted
+        self.assertIn("rem_golden_path", keys(snap, message("x3", "manager"))[0])
 
-    def test_PRM_5_never_to_workers_and_not_to_the_critic_while_it_leaks(self):
+    def test_PRM_5_never_to_workers_and_never_to_the_critic(self):
         snap = snapshot(BOARD)
         self.assertEqual([k for k in keys(snap, message("x1", "worker-1"), True)[0] if "golden" in k], [])
-        snap.golden = GoldenBoard("/run/golden.md", "d1", 100, ["manager"])
         self.assertEqual([k for k in keys(snap, message("x1", "critic"), True)[0] if "golden" in k], [])
         self.assertIn("rem_golden_keep", keys(snap, message("x1", "manager"), True)[0])
 
     def test_SES_the_session_being_opened_by_a_switch_has_seen_nothing(self):
         snap = seen_all(snapshot(BOARD))
-        snap.agents["critic"].switch = C.Switch("critic", step=C.SwitchStep.CONFIRMING, new_session=True)
-        self.assertIn("rem_golden_path", keys(snap, message("x1", "critic"))[0])
-        snap.agents["critic"].switch.new = snap.agents["critic"].session
-        self.assertNotIn("rem_golden_path", keys(snap, message("x1", "critic"))[0])
+        snap.agents["manager"].switch = C.Switch("manager", step=C.SwitchStep.CONFIRMING, new_session=True)
+        self.assertIn("rem_golden_path", keys(snap, message("x1", "manager"))[0])
+        snap.agents["manager"].switch.new = snap.agents["manager"].session
+        self.assertNotIn("rem_golden_path", keys(snap, message("x1", "manager"))[0])
 
     def test_PRM_4_manager_lines(self):
         snap = seen_all(snapshot(gate("g1", text="Which split?"), BOARD))
@@ -423,15 +419,6 @@ class TestReminders(unittest.TestCase):
         self.assertEqual(keys(snap, message("x2", "manager"))[0], [])
         snap.night = False
         self.assertEqual(keys(snap, message("x3", "manager"))[0], ["rem_night_over"])
-
-    def test_edited_notes_are_told_once_per_edit(self):
-        snap = seen_all(snapshot(agent("manager", state_file="/run/state.md", state_edited="s1")))
-        got, given = keys(snap, message("x1", "manager"))
-        self.assertEqual((got, given), (["rem_state_edited"], {"state": "s1"}))
-        give(snap, "manager", **given)
-        self.assertEqual(keys(snap, message("x2", "manager")), ([], {}))
-        snap.agents["manager"].state_edited = ""
-        self.assertEqual(keys(snap, message("x3", "manager")), ([], {"state": ""}))
 
     def test_WRK_11_PRM_4_worker_is_reminded_rarely(self):
         snap = snapshot()

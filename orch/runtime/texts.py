@@ -224,16 +224,10 @@ def _own_turns(t: _Text) -> str:
 
 
 def _session_fresh(t: _Text) -> str:
-    out = ("This is a new conversation. Everything done so far is in the project folder; read what you need there before "
-           "you change anything.")
-    if t.role == Role.MANAGER:
-        out += t.fill(" Your notes are in `{state_file}`.") if t.get("state_file") else ""
-        if t.snap.run.goal:
-            out += f"\n\nMy goal:\n\n{t.snap.run.goal.strip()}"
-    elif t.role == Role.CRITIC:
-        out += " Where the work stands is in your checklist, if it has one. Then wait for my instruction."
-    else:
-        out += " Also check the jobs you started."
+    """The manager's only: a critic or worker in a new session gets no message (the engine sends none)."""
+    out = "This is a new conversation."
+    if t.snap.run.goal:
+        out += f"\n\nMy goal:\n\n{t.snap.run.goal.strip()}"
     return out
 
 
@@ -252,11 +246,9 @@ def _handover_critic(t: _Text) -> str:
 
 
 def _manager_takeover(t: _Text) -> str:
-    notes = t.snap.manager.state_file if t.snap.manager else ""
     return ("You take over this work in a new conversation. To learn the goal, how we work and where things stand, read "
             f"your predecessor's turns in `{_own_turns(t)}`, the newest first ({t.get('latest')}), as far back as "
-            "you need; the first ones hold my goal and the plan."
-            + (f" Its notes are in `{notes}`." if notes else "") + " Then go on from where it stopped.")
+            "you need; the first ones hold my goal and the plan. Then go on from where it stopped.")
 
 
 def _milestone_start(t: _Text) -> str:
@@ -506,8 +498,6 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.MILESTONE_CHANGE_REQUEST: _milestone_change,
     K.MILESTONE_CHANGE_UNREADABLE: "I could not read the new list of milestones ({problem}). Please send the whole list "
                                    "again in the numbered form.",
-    K.GOLDEN_LEAK: "The golden board (`{path}`) contains words that {critic} must not see: {words}. Rewrite those entries "
-                   "as rules about the work alone; until then {critic} is not pointed to the board.",
     # monitor, discussion
     K.MONITOR_CHECK: _monitor_check,
     K.DISCUSSION_APPLY: _discussion_apply,
@@ -535,7 +525,6 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                                       else "Keep your steps and checklist in `{path}`."),
     K.REM_ASK_AND_END: "If you need an answer to go on, ask me in plain text and end your turn.",
     K.REM_WRITING: lambda t: "\n".join(t.fill(str(x)) for x in t.get("rules") or []),
-    K.REM_STATE_EDITED: "I edited your notes in `{path}`; read them and go by them.",
     # gates Orch opens, for the user
     K.GATE_PLAN: lambda t: "The plan is ready for your approval.\n\n" + _bullets(t.get("milestones")),
     K.GATE_MILESTONE: lambda t: t.fill("The milestone “{title}” is ready for your approval")

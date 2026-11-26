@@ -649,11 +649,10 @@ class TestGatesAndWork(Base):
         self.assertEqual(self.s.checklist.error, "missing")
         path.write_text("- [ ] one")
         self.assertEqual(self.s.checklist.digest, "- [ ] one")
-        self.store.read_board = lambda p, text, last, names: GoldenBoard(p, digest=text, words=list(names))
+        self.store.read_board = lambda p, text, last: GoldenBoard(p, digest=text)
         self.store.configure(golden_path="golden.md")
         (self.tmp / "golden.md").write_text("G")
-        self.act(SetGolden(GoldenBoard("", "zz", leak_told="told")))
-        self.assertEqual(self.s.golden, GoldenBoard("golden.md", "G", 0, ["manager", "the manager"], "told"))
+        self.assertEqual(self.s.golden, GoldenBoard("golden.md", "G", 0))
 
     def test_small_actions(self):
         self.make()
@@ -691,9 +690,9 @@ class TestIntents(Base):
         self.make()
         ev = self.ev(Chat, "critic", text="Hi")
         new = self.do(ev, Send(Message("m1", USER, "critic", "Hi")), ToUser(Message("u1", "critic", USER, "x")),
-                      Hold("m1", HoldReason.DRAFT), SaveNotes("critic", "n"), CommandReply(ev.id))
+                      Hold("m1", HoldReason.DRAFT), StopJob("worker-1/j1"), CommandReply(ev.id))
         self.assertEqual([(i.id, type(i.action)) for i in new],
-                         [(f"user/{ev.id}#0", Send), (f"user/{ev.id}#3", SaveNotes), (f"user/{ev.id}#4", CommandReply)])
+                         [(f"user/{ev.id}#0", Send), (f"user/{ev.id}#3", StopJob), (f"user/{ev.id}#4", CommandReply)])
         self.store.intent_done(new[0].id)
         self.store.intent_done(new[1].id, "token=abcdefgh")
         self.reopen()
@@ -718,7 +717,7 @@ class TestIntents(Base):
     def test_two_ticks_at_one_time(self):
         self.make()
         for _ in range(2):
-            self.do(Tick("", T0), SaveNotes("critic", "x"))
+            self.do(Tick("", T0), StopJob("worker-1/j1"))
         self.assertEqual(len(self.store.unfinished()), 2)
 
 
@@ -790,7 +789,7 @@ class TestFiles(Base):
     def test_older_or_newer_file(self):
         self.make()
         self.send()
-        self.act(SaveNotes("critic", "x"))
+        self.act(SetFinished())
         path = self.dir / "state.json"
         d = json.loads(path.read_text())
         r = d["runtime"]

@@ -67,7 +67,7 @@ def _add(snap: Snapshot, cmd: WorkerAdd, models: Optional[Dict[str, Any]] = None
         if picked is None:
             return _refuse(cmd, Refusal.UNKNOWN)
         choices = [picked] + choices[1:]   # its own main model; the backups of `like` stay
-    agent = Agent(wid, Role.WORKER, wid, like.cwd, "", like.fresh_session, Lifecycle.OPEN, choice=choices[0],
+    agent = Agent(wid, Role.WORKER, wid, like.cwd, like.fresh_session, Lifecycle.OPEN, choice=choices[0],
                   choices=list(choices))
     acts: List[Action] = [AddWorker(agent, like.id)]
     if picked is not None:

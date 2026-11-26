@@ -76,7 +76,7 @@ COVERAGE = {
     "UI-1": "AgentStatus public_state", "UI-2": "Message.seq Snapshot.checklist", "UI-3": "UserCommand Runtime",
     "UI-4": "AuditNotes", "UI-5": "prompt", "UI-6": "prompt",
     "PRM-1": "TextKey", "PRM-2": "prompt", "PRM-3": "Rendered", "PRM-4": "Rendered SessionRef.given Agent.open_report",
-    "PRM-5": "GoldenBoard SetGolden SessionRef.given SessionChange.COMPACTED", "PRM-6": "prompt", "PRM-7": "prompt",
+    "PRM-5": "GoldenBoard SessionRef.given SessionChange.COMPACTED", "PRM-6": "prompt", "PRM-7": "prompt",
     "PRM-8": "TextKey.MONITOR_CHECK", "PRM-9": "TextKey.CHECKLIST_COMPLETE SessionRef.given",
     "AUD-1": "prompt", "AUD-2": "Message Job Gate", "AUD-3": "AuditNotes", "AUD-4": "RunInfo.version",
 }

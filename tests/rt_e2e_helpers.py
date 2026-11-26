@@ -69,7 +69,6 @@ class RuntimeCase(unittest.TestCase):
         self.agents[name] = agent(
             name, cwd=str(self.path), proc=None, choice=choice, choices=[choice, *backups],
             sessions={}, session_key="", lifecycle=lifecycle, fresh_session="never",
-            state_file=str(self.path / (name + "-state.md")),
         )
         for option in (choice, *backups):
             bank = self.banks.setdefault(option.backend, {})

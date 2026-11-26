@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .contracts import (BrokenLabel, Decision, Health, OutMessage, Problem, Question, Reply, Role)
 
-MANAGER_LABELS = ("message", "question", "pause", "rubric", "score", "decision", "summary", "state")
+MANAGER_LABELS = ("message", "question", "pause", "rubric", "score", "decision", "summary")
 CRITIC_LABELS = ("message", "silent")
 LABELS = {Role.MANAGER: MANAGER_LABELS, Role.CRITIC: CRITIC_LABELS}
 # every name some role used to have: one the role no longer has is REMOVED
@@ -168,6 +168,4 @@ def _read(reply: Reply, name: str, attrs: Dict[str, str], body: str) -> Optional
         reply.rubric = _lines(body)
     elif name == "summary":
         reply.summary = body
-    elif name == "state":
-        reply.state = body
     return None

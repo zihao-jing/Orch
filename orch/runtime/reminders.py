@@ -98,8 +98,6 @@ def _critic(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: Di
     if unwatched and due[TextKey.REM_UNWATCHED]:
         out.append(TextRef(TextKey.REM_UNWATCHED, {"workers": unwatched}))
     _checklist(snap, seen, out, given)
-    if not snap.golden.words:  # the critic is not pointed to a board that names what it must not know
-        _golden(snap, due, seen, out, given)
     _discussion(snap, message, due, seen, out, given)
 
 
@@ -116,11 +114,6 @@ def _manager(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: D
     _golden(snap, due, seen, out, given)
     if g.path and due[TextKey.REM_GOLDEN_KEEP]:
         out.append(TextRef(TextKey.REM_GOLDEN_KEEP, {"path": g.path}))
-    me = snap.agents[message.recipient]  # only the manager keeps notes
-    if me.state_edited != seen.get("state", ""):
-        given["state"] = me.state_edited  # "" again once it wrote them anew, so a later edit is told
-        if me.state_edited:
-            out.append(TextRef(TextKey.REM_STATE_EDITED, {"path": me.state_file}))
     over = g.chars > snap.settings.golden_limit > 0
     if over and seen.get("golden_size") != "over":
         out.append(TextRef(TextKey.REM_GOLDEN_SIZE, {"path": g.path, "chars": g.chars,

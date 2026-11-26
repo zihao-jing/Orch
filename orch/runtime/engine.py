@@ -409,10 +409,6 @@ class Engine:
                 raise AdapterError(f"could not stop job {job.id}")
         elif isinstance(a, C.SetLifecycle):
             self._reconcile_lifecycle()
-        elif isinstance(a, C.SaveNotes):
-            snap = self.store.snapshot()
-            if snap.agents[a.agent].state_file:
-                self._write(Path(snap.run.workspace, snap.agents[a.agent].state_file), a.text)
         elif isinstance(a, C.RecordDecision):
             self._decision(intent, a)
         elif isinstance(a, C.OpenTerminal):
@@ -759,10 +755,10 @@ class Engine:
                 return
             if not self._open(agent.id, self._session_choice(agent), None, intent.id):
                 return
-        ev = C.EngineEvent(agent.id, intent.created, intent.id)
-        message = C.Message(C.new_id("engine", ev), recipient=agent.id, text=C.TextRef(
-            C.TextKey.SESSION_FRESH, {"state_file": agent.state_file}))
-        self._perform(self.store.act(intent.id, [C.Send(message)]))
+        if agent.role == C.Role.MANAGER:  # a critic or worker gets its next message from its lead, not this
+            ev = C.EngineEvent(agent.id, intent.created, intent.id)
+            message = C.Message(C.new_id("engine", ev), recipient=agent.id, text=C.TextRef(C.TextKey.SESSION_FRESH))
+            self._perform(self.store.act(intent.id, [C.Send(message)]))
 
     def _release_compact(self, name: str, cause: str) -> None:
         path = self._effect_path("compact", name)

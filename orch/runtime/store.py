@@ -41,8 +41,8 @@ from .contracts import (
     IntentState, Job, JobEnded, JobNoticed, JobsChecked, JobStarted, JobState, MarkFailed, MarkLost, Message,
     MessageStatus, Milestone, ModelReported, NotifyReviewReady, OpenGate, OpenTerminal, ProcessExited, ProcRef,
     Received, RecordDecision, RefreshSession, Reject, Release, ReleaseAgent, Reply, ReportJob, Resend, ResetSilence,
-    RestartSession, Retry, Role, SaveChoice, SaveNotes, Send, SendFailed, SessionChange, SessionChanged, SessionRef,
-    SetDiscussion, SetFinished, SetGolden, SetLifecycle, SetMilestones, SetWatch, Lifecycle, SmokeTest, Snapshot,
+    RestartSession, Retry, Role, SaveChoice, Send, SendFailed, SessionChange, SessionChanged, SessionRef,
+    SetDiscussion, SetFinished, SetLifecycle, SetMilestones, SetWatch, Lifecycle, SmokeTest, Snapshot,
     StartAgents, StartSwitch, StopAgents, StopJob, SwitchReason, SwitchStep, Tell, Text, TextKey, Tick, ToolEnd,
     ToolStart, Trigger, Turn, TurnEnded, TurnStarted, TurnStatus, WakeWorker, from_dict, redact, to_dict)
 
@@ -54,7 +54,7 @@ PASSING = (Text, ToolStart, ToolEnd, Tick)  # progress may repeat and is not sav
 OPENING = (SwitchStep.OPENING, SwitchStep.CONFIRMING)
 # the actions with an "Engine:" line (a Send to the user has none)
 ENGINE_ACTIONS = (Send, Release, Resend, ReleaseAgent, RecordDecision, StartSwitch, AdvanceSwitch, RestartSession,
-                  RefreshSession, SmokeTest, SaveChoice, FailAgent, AddWorker, SetLifecycle, StopJob, SaveNotes,
+                  RefreshSession, SmokeTest, SaveChoice, FailAgent, AddWorker, SetLifecycle, StopJob,
                   OpenTerminal, CloseTerminal, CommandReply)
 # what whoever creates a message fixes; the store raises if a known id comes with another content
 FIXED = ("sender", "recipient", "body", "text", "needs_answer", "trigger", "turn", "gates", "continues", "when_idle")
@@ -708,9 +708,6 @@ class _Change:
     def _do_SetFinished(self, a: SetFinished) -> None:
         self.s.finished = a.finished
 
-    def _do_SetGolden(self, a: SetGolden) -> None:
-        self.s.golden.leak_told = a.golden.leak_told
-
     def _do_SetDiscussion(self, a: SetDiscussion) -> None:
         if a.discussion is None:
             self.s.discussions.pop(a.agent, None)
@@ -1042,11 +1039,11 @@ class Store:
             c._do_AddWorker(AddWorker(agent=_take(agent)))
 
     def set_agent(self, agent: str, **kw: Any) -> None:
-        """caps and what the config says: choices, display, cwd, state_file, fresh_session."""
+        """caps and what the config says: choices, display, cwd, fresh_session."""
         with self._mutex, self._change() as c:
             a = c.known(agent)
             for k, v in kw.items():
-                if k not in ("caps", "choices", "display", "cwd", "state_file", "fresh_session"):
+                if k not in ("caps", "choices", "display", "cwd", "fresh_session"):
                     raise StoreError(f"not the engine's: {k}")
                 setattr(a, k, [_take(x) for x in v] if k == "choices" else _take(v) if k == "caps" else v)
 
@@ -1074,9 +1071,7 @@ class Store:
         if ms and ms.checklist_path and self.read_checklist:
             checklist = self.read_checklist(ms.checklist_path, self._text(ms.checklist_path))
         if golden.path and self.read_board:
-            names = [x for a in s.by_role(Role.MANAGER) for x in (a.id, a.display) if x]
-            golden = replace(self.read_board(golden.path, self._text(golden.path), golden, names),
-                             path=golden.path, leak_told=golden.leak_told)
+            golden = self.read_board(golden.path, self._text(golden.path), golden)
         return replace(s, now=self.clock.now(), checklist=checklist, golden=golden)
 
     def _text(self, path: str) -> Optional[str]:

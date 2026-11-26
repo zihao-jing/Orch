@@ -38,11 +38,11 @@ class Steps:
 
 class MiniEngine:
     """The steps of contracts.py, with one module: a chat goes to its agent, a worker's reply to the critic, the critic's
-    to the user, and each reply is noted."""
+    to the user."""
 
-    def __init__(self, run_dir, clock, clis, steps, notes):
+    def __init__(self, run_dir, clock, clis, steps):
         self.store = Store(run_dir, clock)
-        self.clock, self.steps, self.notes, self.ads = clock, steps, notes, {}
+        self.clock, self.steps, self.ads = clock, steps, {}
         for i, cli in clis.items():
             ad = self.ads[i] = MockAdapter(clock, cli)
             proc = self.store.snapshot().agents[i].proc
@@ -60,7 +60,7 @@ class MiniEngine:
         if isinstance(ev, Chat):
             return [Send(m(0, USER, ev.agent, ev.text)), CommandReply(ev.id)]
         if isinstance(ev, TurnEnded) and ev.agent == "worker-1":
-            return [Send(m(0, "worker-1", "critic", ev.text)), CountRound(""), SaveNotes(ev.agent, ev.text)]
+            return [Send(m(0, "worker-1", "critic", ev.text)), CountRound("")]
         if isinstance(ev, TurnEnded):
             return [ToUser(m(0, ev.agent, USER, ev.text))]
         return []
@@ -84,8 +84,6 @@ class MiniEngine:
 
     def perform(self):
         for i in self.store.unfinished():
-            if isinstance(i.action, SaveNotes):
-                self.steps.around("note", lambda: self.notes.append(i.action.text))()
             self.store.intent_done(i.id)  # a Send is done by the loop below, from the messages themselves
         for m in self.store.to_send():
             if self.store.begin_send(m.id, f"{m.sender}: {m.body}"):
@@ -111,10 +109,10 @@ class TestCrash(unittest.TestCase):
     COMMANDS = [Chat("worker-1", T0, "c1", text="Build it."), Chat("critic", T0, "c2", text="How is it?")]
 
     def scenario(self, at, second=0, tear=False):
-        """Run it, dying at step `at` (and at step `second` after the restart); returns (store, clis, notes, steps)."""
+        """Run it, dying at step `at` (and at step `second` after the restart); returns (store, clis, steps, died)."""
         tmp = Path(tempfile.mkdtemp(prefix="rtbc"))
         self.addCleanup(shutil.rmtree, tmp, True)
-        run, clock, notes = tmp / "p" / "r", FakeClock(T0), []
+        run, clock = tmp / "p" / "r", FakeClock(T0)
         snap = snapshot(agent("worker-1", proc=None, sessions={}, session_key=""),
                         agent("critic", proc=None, sessions={}, session_key=""))
         Store.create(run, clock, snap)._release()
@@ -130,7 +128,7 @@ class TestCrash(unittest.TestCase):
                 eng = None
                 try:
                     with mock.patch.object(Store, "_release", Store._release):
-                        eng = MiniEngine(run, clock, clis, steps, notes)
+                        eng = MiniEngine(run, clock, clis, steps)
                         eng.work(self.COMMANDS)
                     break
                 except Died as e:
@@ -148,10 +146,10 @@ class TestCrash(unittest.TestCase):
                 torn.write_bytes(p.read_bytes()[:-50])
                 os.replace(torn, p)
         eng.die()
-        return eng.store, clis, notes, first, died
+        return eng.store, clis, first, died
 
     def check(self, at, **kw):
-        store, clis, notes, steps, died = self.scenario(at, **kw)
+        store, clis, steps, died = self.scenario(at, **kw)
         s = store.snapshot()
         with self.subTest(died=died, at=at, **kw):
             for cli in clis.values():
@@ -163,7 +161,6 @@ class TestCrash(unittest.TestCase):
             self.assertEqual(len([m for m in s.messages.values() if m.recipient != USER]), 3)
             self.assertEqual({m.body for m in s.messages.values() if m.recipient == USER}, {"Reply of critic"})
             self.assertEqual(s.rounds, 1)
-            self.assertEqual(set(notes), {"Built."})  # at least once
             self.assertEqual(([], None), (store.unfinished(), store.pending))
             self.assertEqual({a.status for a in s.agents.values()}, {AgentStatus.IDLE})
             seqs = [m.seq for m in s.messages.values()]

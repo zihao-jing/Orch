@@ -22,11 +22,11 @@ def base(*records, **kw):
         recs.append(milestone("m1", checklist_path=CK, started=T0 - 500))
     if not any(isinstance(r, Checklist) for r in recs):
         recs.append(ck())
-    recs += [agent("critic", state_file="/run/critic/state.md"), RunInfo(run_dir="/run")]
+    recs += [agent("critic"), RunInfo(run_dir="/run")]
     return snapshot(*recs, **kw)
 
 
-def pipeline(snap, ev, names=("routing", "gates", "terminal", "discussion", "milestones", "golden")):
+def pipeline(snap, ev, names=("routing", "gates", "terminal", "discussion", "milestones")):
     """The modules in the engine's order, each given what the earlier ones decided (`prior`), as in 3.5."""
     import importlib
     prior = []
@@ -90,7 +90,7 @@ class TestUnreadable(unittest.TestCase):
         self.assertEqual(send.message.text.values["problem"], "missing")
         self.assertEqual(ms_of(actions)[0].asked_to_fix, "missing")
         s2 = snapshot(milestone("m1", checklist_path=CK, started=T0 - 500, asked_to_fix="missing"),
-                      ck(error="missing", complete=False), agent("critic", state_file="/run/critic/state.md"))
+                      ck(error="missing", complete=False), agent("critic"))
         self.assertEqual(decide(module(), s2, tick(s2)), [])
 
     def test_MS_2_not_before_the_critic_had_a_turn(self):
@@ -239,7 +239,7 @@ class TestApproval(unittest.TestCase):
     def snap(self, **kw):
         return snapshot(milestone("m1", checklist_path=CK, accepted=True, started=T0 - 500, rubric=["r"]),
                         milestone("m2", "pending"), gate("g1", "milestone", milestone="m1"),
-                        agent("critic", state_file="/run/critic/state.md"), ck(), RunInfo(run_dir="/run"), **kw)
+                        agent("critic"), ck(), RunInfo(run_dir="/run"), **kw)
 
     def approve(self, s, ok=True):
         return pipeline(s, event(GateAnswer, s, "", gate_id="g1", approve=ok))
@@ -272,7 +272,7 @@ class TestApproval(unittest.TestCase):
     def test_assumption_3_next_milestone_compacts_the_settled_critic(self):
         s = snapshot(milestone("m1", "done", ended=T0 - 10), milestone("m2", checklist_path="/run/checklist-2.md",
                                                         started=T0, refreshed=["manager"]),
-                     agent("critic", state_file="/run/critic/state.md"), workers=1)
+                     agent("critic"), workers=1)
         s.checklist = Checklist(path="/run/checklist-2.md")
         actions = decide(module(), s, tick(s))
         assert_has(self, actions, RefreshSession, agent="critic", mode="compact")
