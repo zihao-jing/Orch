@@ -194,12 +194,6 @@
   }
 
   // LAB-6: the latest reply of a worker that went to the user can be sent on to the critic
-  function sendableToCritic(messages, agents = {}) {
-    const last = {};
-    messages.forEach(m => { if (m.recipient === "user" && ((agents[m.sender] || {}).role === "worker" || (!agents[m.sender] && /^worker/.test(m.sender || ""))) && !m.drop) last[m.sender] = m.id; });
-    return Object.keys(last).map(k => last[k]);
-  }
-
   function openGates(gates) {
     const g = Object.keys(gates || {}).map(k => gates[k]).filter(x => !x.closed);
     const rank = { question: 0, plan: 1, milestone: 1, milestone_change: 1, pause: 2, operational: 3 };
@@ -341,7 +335,7 @@
   const api = {
     STATUS, GATE_KIND, MS_STATUS, NOTE_KEYS, plainName, agentName, clock, stamp, ago, duration, shownOf, messageText,
     messageStatus, messageTone, isNotice, agentTags, jobLine, workerActions, sortedMessages, mergeMessages, talkLog,
-    sendableToCritic, openGates, answeredWaiting, gateAnswer, newId, backoff, applyChoice, efforts, markdown, preview,
+    openGates, answeredWaiting, gateAnswer, newId, backoff, applyChoice, efforts, markdown, preview,
     progress, LEVELS, MESSAGE_PAGE, LIST_PAGE, messageLevel, latest, pageQuery, shortModel, characterSize,
     messageException, awaitsAnswer, statusHint,
   };

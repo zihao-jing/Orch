@@ -154,7 +154,6 @@ const T = {
     const ms = [{id: '1', sender: 'user', recipient: 'manager'}, {id: '2', sender: 'critic', recipient: 'user'},
                 {id: '3', sender: 'orch', recipient: 'user'}, {id: '4', sender: 'worker-1', recipient: 'user'}];
     assert.deepStrictEqual(L.talkLog(ms, 'manager', 'manager').map(m => m.id), ['1', '3']);
-    assert.deepStrictEqual(L.sendableToCritic(ms), ['4']);
   },
   workerActions() {
     assert.deepStrictEqual(L.workerActions({lifecycle: 'open'}), ['WorkerClose', 'WorkerDelete']);
@@ -536,12 +535,6 @@ global.SC = {
     assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().text], ['DiscussionApply', 'critic', 'go ahead']);
     await click(byText($('talkacts'), 'End without applying')); await click(byText($('dlg-a'), 'End it'));
     assert.deepStrictEqual([lastPost().type, lastPost().agent], ['DiscussionEnd', 'critic']);
-  },
-  async sendToCritic({assert, $, click, lastPost, byText}) {
-    await click($('talkbtn')); $('talkwho').value = 'worker-1'; $('talkwho').fire('change'); await settle_();
-    await click(byText($('talklog'), 'Send to critic'));
-    assert.strictEqual(lastPost().type, 'SendToCritic'); assert.strictEqual(lastPost().message_id, 'mw');
-    function settle_() { return new Promise(r => setTimeout(r, 5)); }
   },
   async terminalAndNotices({assert, $, click, byText, lastPost, posts}) {
     assert.ok($('notices').textContent.includes('A terminal is open on Critic'));

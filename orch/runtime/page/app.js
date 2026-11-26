@@ -616,16 +616,13 @@
     return node;
   }
 
-  function messageBody(m, sendable, run, named) {
+  function messageBody(m, run, named) {
     const hint = L.statusHint(m), meta = m.written_by || {};
     const sized = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const facts = [meta.model ? "Written by " + L.shortModel(meta.model) : "",
       sized ? L.characterSize(meta.input_chars) + " characters in, " + L.characterSize(meta.output_chars) + " out" : "", hint].filter(Boolean);
     const fb = h("div", { class: "fb" }, facts.length ? h("p", { class: "detail-hint", title: meta.model || "" }, facts.join(" · ")) : null,
       md(L.messageText(m)));
-    if (sendable) fb.append(h("button", { type: "button", class: "link", on: {
-      click: act("SendToCritic", { message_id: m.id, agent: m.sender }),
-    } }, "Send to critic"));
     if (m.turn) {
       const getTurn = () => cached("api/turn?id=" + encodeURIComponent(m.turn) + (run ? "&run=" + encodeURIComponent(run) : ""));
       const sender = L.agentName(named, m.sender);
@@ -649,7 +646,7 @@
     return fb;
   }
 
-  function msgRow(m, sendable, run, named = agents()) {
+  function msgRow(m, run, named = agents()) {
     const level = L.messageLevel(m, named), note = L.isNotice(m), awaiting = L.awaitsAnswer(m);
     const cls = ["msg", "level-" + level, m.recipient === "user" ? "touser" : "", awaiting ? "awaiting" : "", note ? "notice-row" : m.orch_note ? "housekeeping" : ""];
     const meta = m.written_by || {}, exception = L.messageException(m), hint = L.statusHint(m);
@@ -665,7 +662,7 @@
         size && meta.input_chars > 30000 ? h("span", { class: "sz large", title: meta.input_chars.toLocaleString() +
           " input characters: more than 30,000" }, L.characterSize(meta.input_chars) + " in") : null));
     function expand() {
-      if (!d._body) { d._body = messageBody(m, sendable, run, named); d.append(d._body); }
+      if (!d._body) { d._body = messageBody(m, run, named); d.append(d._body); }
     }
     if (openMsgs.has(m.id)) { d.open = true; expand(); }
     d.addEventListener("toggle", () => {
@@ -703,10 +700,9 @@
     $("remaining").textContent = remaining + " older";
     $("message-count").textContent = ready ? (remaining ? shown + " of " + total : shown + (shown === 1 ? " message" : " messages")) : "Loading…";
     if (!ready) return;
-    const eligible = new Set(L.sendableToCritic(messages(), agents()));
     // the newest on top; older pages load below
-    patchRows($("messages"), rows.slice().reverse(), m => msgRow(m, eligible.has(m.id)), m =>
-      JSON.stringify([m, eligible.has(m.id), nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
+    patchRows($("messages"), rows.slice().reverse(), m => msgRow(m), m =>
+      JSON.stringify([m, nm(m.sender), nm(m.recipient), L.messageLevel(m, agents())]));
   }
 
   async function requestTimeline(filter, limit, before) {
@@ -810,10 +806,10 @@
     if ($("talk").hidden) return;
     const a = S.agents[who] || {}, disc = S.discussions[who];
     const mgrId = Object.values(S.agents).find(x => x.role === "manager");
-    const all = L.talkLog(messages(), who, mgrId && mgrId.id), elig = L.sendableToCritic(messages(), agents());
+    const all = L.talkLog(messages(), who, mgrId && mgrId.id);
     const talkKey = "talk-history:" + who;
     const { rows: log, remaining } = L.latest(all, listLimit(talkKey));
-    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), remaining, who, !!disc, disc && disc.phase, elig]);
+    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), remaining, who, !!disc, disc && disc.phase]);
     const box = $("talklog"), near = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
     const changed = paint(box, sig, () => log.length ? [listMore(talkKey, remaining, () => {
       const height = box.scrollHeight, top = box.scrollTop;
@@ -823,7 +819,7 @@
       const me = m.sender === "user";
       return h("div", { class: "cm" + (me ? " me" : "") + (L.isNotice(m) ? " note" : "") },
         h("div", { class: "w" }, (me ? "You" : nm(m.sender)) + " - " + L.stamp(m.created, nowSrv()) + (me ? " - " + L.messageStatus(m) : "")),
-        h("div", { class: "b" }, md(L.messageText(m)), elig.indexOf(m.id) >= 0 ? h("button", { type: "button", class: "sm", on: { click: act("SendToCritic", { message_id: m.id, agent: m.sender }) } }, "Send to critic") : null));
+        h("div", { class: "b" }, md(L.messageText(m))));
     })] : h("p", { class: "empty" }, "Nothing yet. Write below."));
     const fresh = force || box._who !== who;   // just opened, or another agent: start at the newest
     box._who = who;
@@ -1036,7 +1032,7 @@
     $("message-count").textContent = rows.length + " of " + items.length;
     paint($("messages"), "old" + r.id + ":" + rows.length, () => items.length ? [
       listMore("old-messages", remaining, () => renderOld(j, r)),
-      rows.map(it => j.messages ? msgRow(it, false, r.id, j.agents) :
+      rows.map(it => j.messages ? msgRow(it, r.id, j.agents) :
         h("details", { class: "msg" }, h("summary", {}, h("span", { class: "tm" }, String(it.ts || "").slice(11, 16)),
           h("span", { class: "route" }, L.plainName(it.from || "") + (it.to ? " → " + L.plainName(it.to) : "")),
           h("span", { class: "pv" }, L.preview(it.text || it.preview || it.title || ""))),
