@@ -1047,6 +1047,8 @@ class RunInfo:
     workspace: str = ""
     run_dir: str = ""
     decisions_path: str = ""  # the decisions register
+    audit_notes_path: str = ""  # audit-decisions.md beside audit.findings_path(...), the file the auditor reads
+    audit_running: bool = False  # an audit runs now
     started: float = 0.0
     version: str = ""  # Orch's version
 
@@ -2035,6 +2037,12 @@ class Runtime(Protocol):
     def submit(self, command: UserCommand) -> Dict[str, Any]:
         """Run the command and return its CommandReply as `reply_json`."""
 
+    def message(self, id: str) -> Optional["Message"]:
+        """The full message (with `rendered`), from state.json or the ledger; None if unknown."""
+
+    def messages(self, before: int = 0, limit: int = 50, q: str = "", agent: str = "") -> Tuple[List["Message"], bool]:
+        """Messages older than seq `before` (0: newest), at most `limit`, in seq order, and whether more exist."""
+
 
 # ----------------------------------------------------------------------------------------------- stored form
 
@@ -2187,11 +2195,12 @@ def _load(tp: Any, v: Any) -> Any:
 # GET  /api/messages?before=<seq>&limit=&q=&agent=   {"messages": [Message without rendered], "more": bool}
 # GET  /api/message?id=                        {"message": Message with rendered}
 # GET  /api/turn?id=                           today's turn file (old runs too)
-# GET  /api/live?agent=&from=<n>               {"items": [{"at", "k": "text"|"tool", "s"}], "next": n}: the lines of
+# GET  /api/live?agent=&from=<n>               {"items": [{"n", "at", "k": "text"|"tool", "s"}], "next": n}: the lines of
 #                                              <run_dir>/live/<agent>.jsonl, which the engine writes
-# GET  /api/events                             server-sent: `state` {"rev"}, `live` {"agent", "at", "k", "s"}
+# GET  /api/events                             server-sent: `state` {"rev"}, `live` {"agent", "n", "at", "k", "s"};
+#                                              n: the line's index, so after a reconnect the page asks /api/live from n+1
 # GET  /api/golden | /api/audit_notes          {"text", "digest", "path"}
-# GET  /api/audit                              {"report", "running"}
+# GET  /api/audit                              {"report", "running"}: report = the reply part of the newest audit, redacted
 # GET  /api/runs                               {"runs": [{"id", "project", "status", "started", "old": bool}]}
 # GET  /api/run?id=                            an old run, as today's board state (UI-6)
 # Shown texts (gate.words, message.text, reply.text) carry a TextRef; J adds `shown`, the rendered words, next to it.
