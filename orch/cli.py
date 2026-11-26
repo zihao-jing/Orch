@@ -88,23 +88,18 @@ def init_project(root: Path, force: bool) -> int:
         print(f"{d / 'agents'} exists (use --force to overwrite)")
         return 1
     files = {
-        ".gitignore": "runs/\nagents/*/state.md\nagents/*/checklist-m*.md\n",
+        ".gitignore": "runs/\n",
         "settings.yaml": SETTINGS_YAML,
         "agents/manager/agent.yaml": """\
 role: manager
 description: Owns the milestones and the rubric; reports to me.
 model: opus
 backup: codex-astra
-timeout: 2400
-retries: 1
-# check_every: 60           # minutes between status lines for me from the progress checks (no turn; 0 = off)
-# the run as a whole
 goal_file: goal.md          # only the manager reads the goal
-max_rounds: 400             # worker/critic rounds in all milestones together (safety cap); keep it well above
-                            # milestone_rounds, or the run stops in the middle of a milestone
+max_rounds: 400             # worker replies across the run (safety cap)
 approve_plan: true          # wait for my OK on the milestone plan
 approve_milestones: true    # and after each milestone the manager accepts
-# min_score: 4              # an ACCEPT below this overall score counts as REVISE
+# min_score: 4.5            # the pass score: an ACCEPT below it goes back to the critic (default 4.5)
 """,
         "agents/manager/goal.md": "Describe what you want done, and any decisions already made.\n",
         "agents/critic/agent.yaml": """\
@@ -113,14 +108,6 @@ description: Turns milestones into instructions and reviews every change.
 model: gpt-6.2-sol
 backup: claude-haiku
 backup2: qwen4-max-preview
-timeout: 2400
-retries: 1
-checklist: true             # a PASS only counts when every checklist item (and every step of the plan) is [x]
-milestone_rounds: 50        # rounds without a step of the critic's plan finishing before the manager and I look
-checkin_every: 2            # every 2 rounds, a status line for the manager (from the plan: no model turn; 0 = off)
-# job_wait: 21600           # 0 = don't look for jobs the worker left running; caps a wait the critic asks for only when checks are off
-# check_session: side       # without a monitor, the critic runs the checks: side (a fresh session) or own
-# job_ignore: ["status_loop"]  # commands never listed as running jobs (regexes), e.g. a long-lived helper
 """,
         "agents/worker/agent.yaml": """\
 role: worker
@@ -128,12 +115,7 @@ description: Does the work in the repository.
 model: claude-haiku
 backup: deepseek-v4-pro
 backup2: glm-5.3
-safety_timeout: 0           # no turn deadline; progress checks watch long-running work
-check_every: 20             # minutes between quick checks of a running turn or background job (0 = off)
-retries: 1
-fresh_session: compact      # each milestone: the session is summarised in place (a new one if that fails); milestone = always new
-# compact_between_steps: true  # Claude Code: /compact between steps of the critic's plan (never mid-task)
-# snapshot: [docs]          # folders whose every version is kept in the run log
+fresh_session: compact      # each milestone: summarise in place (milestone = new session; never = keep)
 """,
         "agents/auditor/agent.yaml": AUDITOR_YAML,
         "agents/monitor/agent.yaml": MONITOR_YAML,
@@ -199,8 +181,7 @@ role: auditor
 description: Reads how the agents talk to each other (never the task) and keeps a short list of findings in audit.md.
 model: deepseek-v4-pro-auditor
 backup: deepseek-v4-pro-zenmux
-timeout: 900
-audit_every: 10             # rounds between audits, plus one when the run ends (0 = no automatic audits, not even the final one; only `orch audit`)
+audit_every: 10             # rounds between audits, plus one when the run ends (0 = only `orch audit`)
 audit_points: 5             # at most this many points per audit
 """
 
@@ -209,8 +190,6 @@ role: monitor
 description: Watches the worker's long turns and jobs; reports evidence (never verdicts) to the critic.
 model: qwen3.8-flash
 backup: deepseek-v4.1-flash
-timeout: 600
-check_session: own          # own: one continuing session for its checks; side: a fresh session per check
 """
 
 def cmd_audit(a: argparse.Namespace) -> int:
