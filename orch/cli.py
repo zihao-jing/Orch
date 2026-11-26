@@ -409,6 +409,8 @@ def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) ->
     engine_cls = _get_engine_cls()
     clock = SystemClock()
     adapters = _make_adapters(clock)
+    engines: List[Any] = []
+    servers: List[Any] = []
 
     try:
         for m in selected:
@@ -437,18 +439,36 @@ def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) ->
                 snap = rt_migrate.build_snapshot(m, run_dir, clock, settings=settings, migrated_files=migrated_files)
 
             eng = engine_cls(run_dir, clock, adapters, settings)
-            try:
-                params = list(inspect.signature(eng.start).parameters.values())
-                if params and snap is not None:
-                    eng.start(snap)
-                else:
-                    eng.start()
-                eng.run(stop)
-            except KeyboardInterrupt:
-                stop.set()
-            finally:
-                eng.close()
+            eng.start(snap)  # None: load the saved run
+            engines.append(eng)
+            if getattr(a, "serve", False):
+                from .runtime import board as rt_board
+                from .runtime import texts as rt_texts
+                words = (lambda ref, eng=eng: rt_texts.words(ref, eng.store.snapshot()))
+                srv, url = rt_board.serve(rt_board.Board(eng, run_dir, words=words, runs_root=base.parent),
+                                          host=getattr(a, "host", "127.0.0.1"), port=getattr(a, "port", 8765))
+                servers.append(srv)
+                print(f"{m.name}: board at {url}", flush=True)
+        # every monitor runs at the same time, as in the old modes
+        threads = [threading.Thread(target=eng.run, args=(stop,), name=f"orch-engine-{i}", daemon=True)
+                   for i, eng in enumerate(engines)]
+        for t in threads:
+            t.start()
+        try:
+            while any(t.is_alive() for t in threads):
+                for t in threads:
+                    t.join(0.5)
+        except KeyboardInterrupt:
+            stop.set()
     finally:
+        stop.set()
+        for srv in servers:
+            srv.shutdown()
+        for eng in engines:
+            try:
+                eng.close()  # agents and jobs keep running (REC-9)
+            except Exception as exc:
+                print(f"orch: could not close a run cleanly: {exc}", file=sys.stderr)
         try:
             signal.signal(signal.SIGINT, prev_int)
         except (ValueError, OSError):
