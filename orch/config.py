@@ -38,7 +38,7 @@ RUN_PROMPT_VARS = ("golden_board", "checklist_files")
 RETRY_WAITS = [60.0, 120.0, 240.0]
 # B8: the project's model list: `.orch/settings.yaml` (a project folder) or `models:` at the top of a config file
 SETTINGS_FILES = ("settings.yaml", "settings.yml", "settings.json")
-SETTINGS_KEYS = ("models", "retry_waits", "fallback_cooldown")
+SETTINGS_KEYS = ("models", "retry_waits", "fallback_cooldown", "runtime")
 MODEL_KEYS = ("backend", "backend_options", "env", "retries")  # a model is shown by its id
 
 # B5: a turn that progress checks watch (a worker's, in managed mode) may run long; only this high limit stops it
@@ -425,6 +425,7 @@ class MonitorConfig:
     output_dir: str
     enabled: bool = True
     source: str = ""  # the config file or .orch folder this monitor came from: re-read before each agent turn
+    runtime: str = ""
 
     def agent(self, name: str) -> AgentConfig:
         for a in self.agents:
@@ -457,6 +458,8 @@ class Config:
     path: str
     output_dir: str
     monitors: List[MonitorConfig]
+    runtime: str = ""
+    settings: Dict[str, Any] = field(default_factory=dict)
 
     def monitor(self, name: str) -> MonitorConfig:
         for m in self.monitors:
@@ -625,7 +628,7 @@ DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "w
                   "monitor": "monitor.md"}
 # workflow settings an agent.yaml may carry (usually: the manager's goal and approvals, the critic's checklist
 # and rounds, the worker's snapshot). Two agents setting the same one differently is an error.
-MONITOR_KEYS = ("goal", "goal_file", "max_rounds", "output_dir", "workspace")
+MONITOR_KEYS = ("goal", "goal_file", "max_rounds", "output_dir", "workspace", "runtime")
 CTRL_KEYS = ("mode", "instructions", "instructions_file", "parallel", "require", "pass_pattern", "fail_pattern",
              "stop_on_error", "max_report_chars", "provider_retry_wait", "templates", "human_pattern", "permission_pattern", "snapshot",
              "checklist", "checklist_nudge", "answer_note", "milestone_rounds", "approve_plan",
@@ -647,6 +650,48 @@ def find_project(path: str) -> Optional[Path]:
 def is_config(path: str) -> bool:
     p = Path(path).expanduser()
     return p.is_file() or find_project(str(p)) is not None
+
+
+class _WorkerExistsError(ConfigError, FileExistsError, ValueError):
+    pass
+
+
+def add_worker(project: Any, like: str, worker: str) -> None:
+    """Copy agents/<like>/agent.yaml to agents/<worker>/agent.yaml (name changed, nothing else),
+    creating the folder; refuse if the worker exists."""
+    from .runtime import models as rt_models
+
+    p = Path(project).expanduser().resolve()
+    orch_dir = find_project(str(p)) or (p / ".orch" if (p / ".orch").is_dir() else p)
+    agents_dir = orch_dir / "agents"
+    wname = str(worker or "").strip()
+    if not wname or not NAME_RE.match(wname):
+        raise ConfigError(f"invalid worker name {worker!r}")
+    dst_dir = agents_dir / wname
+    dst = dst_dir / "agent.yaml"
+    if dst_dir.exists() or dst.exists():
+        raise _WorkerExistsError(f"worker {wname!r} already exists: {dst_dir}")
+    lname = str(like or "").strip()
+    if lname:
+        src = agents_dir / lname / "agent.yaml"
+    else:
+        src = next(
+            (
+                d / "agent.yaml"
+                for d in sorted(agents_dir.iterdir())
+                if (d / "agent.yaml").is_file()
+                and ROLE_ALIASES.get(str(_read_raw(d / "agent.yaml").get("role", "worker")), "worker") == "worker"
+            ),
+            agents_dir / "worker" / "agent.yaml",
+        )
+    if not src.is_file():
+        raise ConfigError(f"worker {like!r} not found: {src}")
+    text = src.read_text(encoding="utf-8")
+    if rt_models._find(text, ["name"]) is not None:
+        text = rt_models._set(text, "name", wname)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    rt_models._write(dst, text)
+
 
 
 def _agent_folder(d: Path) -> Dict[str, Any]:
@@ -686,6 +731,11 @@ def _writing_file(value: Any, base: Path, proj: Optional[Path]) -> str:
 
 def _project_raw(orch_dir: Path) -> Dict[str, Any]:
     """Turn a .orch folder (one workflow made of agent folders) into the structure of a config file."""
+    ps = project_settings(orch_dir)
+    is_new_rt = str(ps.get("runtime", "") or "").strip() == "new"
+    if is_new_rt:
+        from .runtime import migrate as rt_migrate
+        rt_migrate.backup_prompts(orch_dir)
     mon: Dict[str, Any] = {}
     owner: Dict[str, str] = {}
     ctrl: Dict[str, Any] = {}
@@ -702,7 +752,18 @@ def _project_raw(orch_dir: Path) -> Dict[str, Any]:
                 raise ConfigError(f"{k!r} is set differently in agents/{owner[k]} and agents/{d.name}")
             owner[k] = d.name
             (mon if k in MONITOR_KEYS else ctrl)[k] = v
+        if is_new_rt or str(mon.get("runtime", "") or "").strip() == "new":
+            role = ROLE_ALIASES.get(str(raw.get("role", "worker")), str(raw.get("role", "worker")))
+            if role in ("manager", "verifier", "monitor"):
+                raw.pop("system_prompt", None)
+                rt_name = "critic" if role == "verifier" else role
+                raw["system_prompt_file"] = str(Path(__file__).with_name("runtime") / "prompts" / f"{rt_name}.md")
+            elif role == "worker" and not raw.get("task") and (d / "system_prompt.md").is_file():
+                raw["task"] = (d / "system_prompt.md").read_text(encoding="utf-8").strip()
         agents.append(raw)
+    if str(mon.get("runtime", "") or "").strip() == "new" and not is_new_rt:
+        from .runtime import migrate as rt_migrate
+        rt_migrate.backup_prompts(orch_dir)
     agents.sort(key=lambda a: order.get(ROLE_ALIASES.get(str(a.get("role")), str(a.get("role"))), 3))
     roles = {ROLE_ALIASES.get(str(a.get("role")), str(a.get("role"))) for a in agents}
     ctrl.setdefault("mode", "managed" if "manager" in roles else "pipeline")
@@ -711,7 +772,9 @@ def _project_raw(orch_dir: Path) -> Dict[str, Any]:
     mon.setdefault("workspace", str(root))
     mon.update(controller=ctrl, agents=agents)
     out = {"output_dir": mon.pop("output_dir", "runs"), "monitors": [mon]}
-    out.update(project_settings(orch_dir))
+    if "runtime" in mon and "runtime" not in ps:
+        out["runtime"] = mon["runtime"]
+    out.update(ps)
     return out
 
 
@@ -863,8 +926,23 @@ def load_config(path: str) -> Config:
             if controller.mode == "managed" and a.role in ("manager", "verifier", "worker"):
                 own = proj / "style-rules.md" if proj else None
                 a.style_path = str(own if own and own.is_file() else PROMPTS_DIR / "style-rules.md")
+        m_runtime = str(mraw.get("runtime", "") or raw.get("runtime", "") or "").strip()
+        if m_runtime == "new":
+            from .runtime import migrate as rt_migrate
+            for a in agents:
+                if a.role in ("manager", "verifier", "monitor"):
+                    defaults_sp = rt_migrate._orch_prompts_for(a.role)
+                    if a.system_prompt_path:
+                        sp_p = Path(a.system_prompt_path)
+                        if sp_p.is_file() and PROMPTS_DIR not in sp_p.parents and rt_migrate.RUNTIME_PROMPTS_DIR not in sp_p.parents:
+                            txt = sp_p.read_text(encoding="utf-8").strip()
+                            if txt and txt not in defaults_sp:
+                                os.replace(sp_p, Path(str(sp_p) + ".bak"))
+                    a.system_prompt = ""
+                    rt_name = "critic" if a.role == "verifier" else a.role
+                    a.system_prompt_path = str(rt_migrate.RUNTIME_PROMPTS_DIR / f"{rt_name}.md")
         m_known = {"name", "workspace", "working_dir", "goal", "max_rounds", "controller", "agents",
-                   "defaults", "output_dir", "enabled"}
+                   "defaults", "output_dir", "enabled", "runtime"}
         unknown = set(mraw) - m_known
         if unknown:
             raise ConfigError(f"{where}: unknown keys: {', '.join(sorted(unknown))}")
@@ -879,9 +957,12 @@ def load_config(path: str) -> Config:
             output_dir=_expand(mraw["output_dir"], base) if mraw.get("output_dir") else output_dir,
             enabled=bool(mraw.get("enabled", True)),
             source=str(cfg_path),
+            runtime=m_runtime,
         ))
 
-    cfg = Config(path=str(cfg_path), output_dir=output_dir, monitors=monitors)
+    top_runtime = str(raw.get("runtime", "") or (monitors[0].runtime if monitors else "") or "").strip()
+    settings_dict = {k: raw[k] for k in SETTINGS_KEYS if k in raw}
+    cfg = Config(path=str(cfg_path), output_dir=output_dir, monitors=monitors, runtime=top_runtime, settings=settings_dict)
     validate(cfg)
     return cfg
 
