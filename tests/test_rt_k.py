@@ -1,0 +1,762 @@
+"""Package K: the dashboard page (orch/runtime/page). No browser: static checks of the files, small logic tests and a
+smoke run of the whole script against a small fake DOM, both through `node` (skipped when it is not installed).
+
+Requirement ids: UI-1 (status board), UI-2 (messages, steps panel), UI-3 (controls), UI-4 (notes), UI-5 (no review file),
+UI-6 (old runs read)."""
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from rt_helpers import *  # noqa: F401,F403  (puts the repository on the path)
+from orch.runtime import contracts as C
+
+PAGE = Path(__file__).resolve().parents[1] / "orch" / "runtime" / "page"
+FILES = ["index.html", "style.css", "logic.js", "app.js"]
+NODE = shutil.which("node")
+
+
+def read(name):
+    return (PAGE / name).read_text(encoding="utf-8")
+
+
+def all_text():
+    return "\n".join(read(f) for f in FILES)
+
+
+def user_commands():
+    out, todo = [], list(C.UserCommand.__subclasses__())
+    while todo:
+        c = todo.pop()
+        out.append(c.__name__)
+        todo += c.__subclasses__()
+    return sorted(out)
+
+
+class TestPageFiles(unittest.TestCase):
+    def test_UI_3_page_files_exist(self):
+        for f in FILES:
+            self.assertTrue((PAGE / f).is_file(), f)
+
+    def test_page_uses_only_api_paths_of_the_contract(self):
+        src = Path(C.__file__).read_text(encoding="utf-8")
+        listed = set(re.findall(r"^# (?:GET|POST)\s+/api/(\w+)", src, re.M))
+        listed |= set(re.findall(r"/api/(\w+)", src[src.index("# GET  /api/state"):src.index("def public_state")]))
+        self.assertTrue({"state", "command", "events", "messages", "live", "run", "runs"} <= listed, listed)
+        used = set(re.findall(r"""["'`]/?api/(\w+)""", read("app.js") + read("logic.js") + read("index.html")))
+        self.assertTrue(used, "the page uses no API")
+        self.assertEqual(used - listed, set())
+
+    CLI_ONLY = {"TerminalOpen", "TerminalClose"}  # they come from `orch terminal`; the page shows its command
+
+    def test_UI_3_every_user_command_has_a_control(self):
+        js = read("app.js") + read("logic.js")
+        for name in user_commands():
+            if name in self.CLI_ONLY:
+                continue
+            self.assertRegex(js, r"""["']%s["']""" % name, f"no control sends {name}")
+
+    def test_UI_3_terminal_command_is_shown_to_copy(self):
+        self.assertIn("orch terminal", read("app.js"))
+
+    def test_no_text_is_inserted_as_html(self):
+        bad = r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser|srcdoc|\beval\(|new Function|javascript:|setAttribute\(\s*[\"']on"
+        for f in FILES:
+            self.assertIsNone(re.search(bad, read(f)), f)
+
+    def test_works_offline_no_outside_resources(self):
+        text = all_text()
+        self.assertIsNone(re.search(r"https?://|@import|//cdn", text))
+        html = read("index.html")
+        for ref in re.findall(r"""(?:src|href)="([^"]+)""", html):
+            self.assertTrue(ref.startswith("#") or ref.startswith("data:") or (PAGE / ref).is_file(), ref)
+
+    def test_UI_5_no_review_file(self):
+        self.assertNotRegex(all_text().lower(), r"review file|review_file|api/review")
+
+    def test_light_and_dark_phone_and_keyboard(self):
+        css = read("style.css")
+        self.assertIn("prefers-color-scheme:dark", css.replace(" ", ""))
+        self.assertIn('[data-theme="dark"]', css)
+        self.assertIn("max-width:600px", css.replace(" ", ""))
+        self.assertIn("focus-visible", css)
+        self.assertIn('name="viewport"', read("index.html"))
+
+    def test_UI_4_notes_are_saved_with_the_digest_they_were_edited_from(self):
+        js = read("app.js")
+        self.assertIn("AuditNotes", js)
+        self.assertIn("base:", js)
+
+
+# ----------------------------------------------------------------------------------------------- node tests
+
+LOGIC_JS = r"""
+const L = require(process.argv[2]);
+const assert = require('assert');
+const T = {
+  names() {
+    assert.strictEqual(L.plainName('worker-2'), 'Worker 2');
+    assert.strictEqual(L.agentName({'worker-2': {display: 'Ada'}}, 'worker-2'), 'Ada');
+    assert.strictEqual(L.plainName('user'), 'You');
+  },
+  status() {
+    const m = {status: 'waiting', holds: ['terminal'], drop: null};
+    assert.ok(L.messageStatus(m).includes('terminal'));
+    assert.ok(L.messageStatus({status: 'failed', drop: 'rejected'}).startsWith('Not sent'));
+    assert.strictEqual(L.messageStatus({status: 'answered', holds: []}), 'Answered');
+    assert.strictEqual(L.STATUS.waiting_job, 'Waiting for job');
+  },
+  text() {
+    assert.strictEqual(L.messageText({body: 'hi', text: null}), 'hi');
+    assert.strictEqual(L.messageText({body: 'hi', text: {key: 'k', shown: 'Orch says: hi'}}), 'Orch says: hi');
+    assert.strictEqual(L.messageText({body: 'hi', text: {key: 'k', shown: 'Orch says'}}), 'Orch says\n\nhi');
+  },
+  markdown() {
+    const b = L.markdown('Hello **you** and `x`\n\n- a\n- b\n\n```\n<b>raw</b>\n```');
+    assert.strictEqual(b[0].t, 'p'); assert.strictEqual(b[1].t, 'ul'); assert.strictEqual(b[2].t, 'code');
+    assert.strictEqual(b[2].s, '<b>raw</b>');   // kept as plain text; the page puts it in as text
+  },
+  gateAnswer() {
+    const g = {id: 'g1'};
+    assert.deepStrictEqual(L.gateAnswer(g, {option: 0}), {type: 'GateAnswer', gate_id: 'g1', option: 0});
+    assert.deepStrictEqual(L.gateAnswer(g, {approve: false, text: 'no'}), {type: 'GateAnswer', gate_id: 'g1', text: 'no', approve: false});
+    assert.deepStrictEqual(L.gateAnswer(g, {}), {type: 'GateAnswer', gate_id: 'g1'});
+  },
+  gates() {
+    const gs = {a: {id: 'a', kind: 'pause', opened: 1, closed: 0}, b: {id: 'b', kind: 'question', opened: 2, closed: 0},
+                c: {id: 'c', kind: 'plan', opened: 0, closed: 5, answer: {text: 'x'}, sent_in: '', withdrawn: false}};
+    assert.deepStrictEqual(L.openGates(gs).map(g => g.id), ['b', 'a']);
+    assert.deepStrictEqual(L.answeredWaiting(gs).map(g => g.id), ['c']);
+  },
+  choice() {
+    const b = L.applyChoice({type: 'WorkerClose', id: 'one', agent: 'worker-1'}, {label: 'x', set: {jobs: 'stop'}}, 'two');
+    assert.deepStrictEqual(b, {type: 'WorkerClose', id: 'two', agent: 'worker-1', jobs: 'stop'});
+  },
+  backoff() {
+    assert.strictEqual(L.backoff(0), 1000); assert.strictEqual(L.backoff(2), 4000); assert.strictEqual(L.backoff(20), 10000);
+  },
+  talk() {
+    const ms = [{id: '1', sender: 'user', recipient: 'manager'}, {id: '2', sender: 'critic', recipient: 'user'},
+                {id: '3', sender: 'orch', recipient: 'user'}, {id: '4', sender: 'worker-1', recipient: 'user'}];
+    assert.deepStrictEqual(L.talkLog(ms, 'manager', 'manager').map(m => m.id), ['1', '3']);
+    assert.deepStrictEqual(L.sendableToCritic(ms), ['4']);
+  },
+  workerActions() {
+    assert.deepStrictEqual(L.workerActions({lifecycle: 'open'}), ['WorkerClose', 'WorkerDelete']);
+    assert.deepStrictEqual(L.workerActions({lifecycle: 'closed'}), ['WorkerReopen', 'WorkerDelete']);
+    assert.deepStrictEqual(L.workerActions({lifecycle: 'deleted'}), []);
+  },
+  efforts() {
+    assert.deepStrictEqual(L.efforts([{id: 'a', efforts: ['low', 'high']}], 'a'), ['low', 'high']);
+    assert.deepStrictEqual(L.efforts([{id: 'a', efforts: []}], 'a'), []);
+  },
+  progress() {
+    assert.deepStrictEqual(L.progress({steps: [{items: [[true, 'a'], [false, 'b']]}]}), [1, 2]);
+  },
+  time() {
+    assert.strictEqual(L.ago(0, 130), '–'); assert.strictEqual(L.ago(null, 130), '–');
+    assert.strictEqual(L.ago(100, 130), 'just now'); assert.strictEqual(L.ago(100, 100 + 600), '10 min ago');
+    assert.strictEqual(L.duration(125), '2 min');
+  },
+};
+T[process.argv[3]]();
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class TestLogic(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        (cls.tmp / "logic_test.js").write_text(LOGIC_JS, encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def run_js(self, name):
+        r = subprocess.run([NODE, str(self.tmp / "logic_test.js"), str(PAGE / "logic.js"), name], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_UI_1_names_are_plain(self):
+        self.run_js("names")
+
+    def test_UI_2_message_status_words(self):
+        self.run_js("status")
+
+    def test_UI_2_message_text(self):
+        self.run_js("text")
+
+    def test_markdown_keeps_markup_as_text(self):
+        self.run_js("markdown")
+
+    def test_UI_3_gate_answer_bodies(self):
+        self.run_js("gateAnswer")
+
+    def test_UI_3_gates_order_and_waiting_answers(self):
+        self.run_js("gates")
+
+    def test_UI_3_choice_resends_with_new_id(self):
+        self.run_js("choice")
+
+    def test_lost_connection_waits_longer_each_time(self):
+        self.run_js("backoff")
+
+    def test_UI_3_talk_log_and_send_to_critic(self):
+        self.run_js("talk")
+
+    def test_UI_3_worker_controls(self):
+        self.run_js("workerActions")
+
+    def test_UI_3_effort_levels_hidden_when_none(self):
+        self.run_js("efforts")
+
+    def test_UI_2_progress_count(self):
+        self.run_js("progress")
+
+    def test_UI_1_times(self):
+        self.run_js("time")
+
+
+# ------------------------------------------------------------------------------------------------ smoke run
+
+DOM_JS = r"""
+const fs = require('fs'), vm = require('vm'), assert = require('assert'), path = require('path');
+const dir = process.argv[2], scenario = process.argv[4];
+const fixture = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const created = new Set();
+class Txt { constructor(t) { this.nodeType = 3; this.text = String(t); } get textContent() { return this.text; } }
+class El {
+  constructor(tag) {
+    created.add(String(tag).toUpperCase());
+    this.tagName = String(tag).toUpperCase(); this.nodeType = 1; this.children = []; this.attrs = {}; this.dataset = {};
+    this.listeners = {}; this.parent = null; this.hidden = false; this.value = ''; this.checked = false; this.open = false;
+    this.className = ''; this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0; this.returnValue = ''; this.disabled = false;
+  }
+  append(...k) { k.forEach(x => { if (typeof x === 'string') x = new Txt(x); x.parent = this; this.children.push(x); }); }
+  replaceChildren(...k) { this.children = []; this.append(...k); }
+  setAttribute(k, v) { this.attrs[k] = v; if (k === 'disabled') this.disabled = true; }
+  removeAttribute(k) { delete this.attrs[k]; }
+  get textContent() { return this.children.map(c => c.textContent).join(''); }
+  set textContent(v) { this.children = []; this.append(String(v)); }
+  get classList() { const s = this; return {
+    toggle(c, on) { const l = s.className.split(' ').filter(Boolean).filter(x => x !== c); if (on) l.push(c); s.className = l.join(' '); },
+    add(c) { this.toggle(c, true); }, remove(c) { this.toggle(c, false); } }; }
+  addEventListener(e, f) { (this.listeners[e] = this.listeners[e] || []).push(f); }
+  removeEventListener(e, f) { this.listeners[e] = (this.listeners[e] || []).filter(x => x !== f); }
+  fire(e, ev) { (this.listeners[e] || []).slice().forEach(f => f(Object.assign({currentTarget: this, target: this, key: '', shiftKey: false, preventDefault() {}}, ev || {}))); }
+  contains(n) { for (let x = n; x; x = x.parent) if (x === this) return true; return false; }
+  all() { const out = []; const go = n => { if (n.nodeType === 1) { out.push(n); n.children.forEach(go); } }; go(this); return out; }
+  querySelectorAll(sel) {
+    const alts = sel.split(',').map(s => s.trim());
+    return this.all().slice(1).filter(e => alts.some(a => {
+      const m = a.match(/^\[data-(\w+)(?:="([^"]*)")?\]$/);
+      if (m) return m[1] in e.dataset && (m[2] === undefined || String(e.dataset[m[1]]) === m[2]);
+      return e.tagName === a.toUpperCase();
+    }));
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); }
+  focus() { doc.activeElement = this; }
+  showModal() { this.open = true; }
+  close(v) { this.open = false; this.returnValue = v === undefined ? '' : v; this.fire('close'); }
+  setSelectionRange() {}
+}
+const registry = {};
+const html = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
+for (const m of html.matchAll(/<(\w+)([^>]*?)\bid="([^"]+)"([^>]*)>/g)) {
+  const e = new El(m[1]); if (/\bhidden\b/.test(m[2] + m[4])) e.hidden = true; registry[m[3]] = e;
+}
+created.clear();
+const doc = {
+  activeElement: null, title: '', documentElement: new El('html'),
+  getElementById: id => registry[id] || null,
+  createElement: t => new El(t), createTextNode: t => new Txt(t),
+  querySelector: s => { for (const r of Object.values(registry)) { const f = r.querySelector(s); if (f) return f; } return null; },
+  querySelectorAll: s => Object.values(registry).flatMap(r => r.querySelectorAll(s)),
+  addEventListener(e, f) { (this.l = this.l || {}); (this.l[e] = this.l[e] || []).push(f); },
+};
+const posts = [], gets = [];
+let state = JSON.parse(JSON.stringify(fixture.state));
+let commandReply = () => ({ok: true, shown: '', text: null, choices: [], data: {}});
+let liveReply = () => ({items: [{n: 1, at: 1, k: 'text', s: 'thinking'}], next: 2});
+let failState = false;
+const json = (o, ok = true, status = 200) => Promise.resolve({ok, status, json: () => Promise.resolve(o)});
+const sources = [];
+class ES { constructor(u) { this.url = u; this.l = {}; sources.push(this); } addEventListener(e, f) { this.l[e] = f; } close() { this.closed = true; } }
+async function fetchStub(url, opt) {
+  if (opt && opt.method === 'POST') { const b = JSON.parse(opt.body); posts.push(b); return json(commandReply(b)); }
+  gets.push(url);
+  if (url.startsWith('api/state')) { if (failState) throw new Error('down'); return json(state); }
+  if (url.startsWith('api/golden')) return json({text: 'Always be kind.', digest: 'd1', path: '/x'});
+  if (url.startsWith('api/audit_notes')) return json({text: 'my notes', digest: 'n1', path: '/y'});
+  if (url.startsWith('api/audit')) return json({report: 'All fine.', running: false});
+  if (url.startsWith('api/runs')) return json({runs: [{id: 'r0', project: 'Old one', status: 'done', started: 1, old: true}]});
+  if (url.startsWith('api/run?')) return json({tl_items: [{ts: '2026-01-01T10:00:00', from: 'manager', to: 'critic', text: 'old words'}], chat: [], agents: [{name: 'manager', role: 'manager', called: 'Manager'}, {name: 'worker-1', role: 'worker'}], tl_groups: []});
+  if (url.startsWith('api/live')) return json(liveReply(url));
+  if (url.startsWith('api/message?')) return json({message: {rendered: 'SENT TEXT'}});
+  if (url.startsWith('api/turn')) return json({output: 'WHOLE REPLY'});
+  if (url.startsWith('api/messages')) return json({messages: [], more: false});
+  return json({}, false, 404);
+}
+const store = {};
+const win = {
+  OrchLogic: require(path.join(dir, 'logic.js')),
+  localStorage: {getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }},
+  sessionStorage: {getItem: () => null, setItem: () => {}},
+  matchMedia: () => ({matches: false}), addEventListener() {},
+};
+const sandbox = {window: win, document: doc, fetch: fetchStub, EventSource: ES, navigator: {clipboard: {writeText: () => Promise.resolve()}},
+  setTimeout: (f, ms) => setTimeout(f, Math.min(ms || 0, 5)), clearTimeout, setInterval: () => 0, URLSearchParams, console, Date, JSON, Math,
+  encodeURIComponent, Promise};
+sandbox.window.window = win;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(path.join(dir, 'app.js'), 'utf8'), sandbox);
+const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(r => setImmediate(r)); };
+const $ = id => registry[id];
+const everything = () => Object.values(registry).flatMap(r => r.all());
+const buttons = root => (root ? root.all() : everything()).filter(e => e.tagName === 'BUTTON');
+const byText = (root, t) => buttons(root).find(b => b.textContent === t);
+const click = async b => { assert.ok(b, 'button missing'); b.fire('click'); await settle(); };
+const lastPost = () => posts[posts.length - 1];
+const type = (el, v) => { el.value = v; el.fire('input'); };
+const pageText = () => Object.values(registry).map(r => r.textContent).join('\n');
+const refresh = async () => { sources[0].l.state({data: '{}'}); await settle(); };
+const ctx = {assert, $, byText, click, lastPost, posts, gets, type, settle, pageText, refresh, buttons, everything, sources, doc,
+  created, fixture, win, store,
+  setState: s => { state = s; }, getState: () => state, setReply: f => { commandReply = f; }, setLiveReply: f => { liveReply = f; }, setFail: v => { failState = v; }};
+(async () => {
+  if (sources[0] && sources[0].onopen) sources[0].onopen();
+  await settle();
+  await SC[scenario](ctx);
+  process.exit(0);
+})().catch(e => { console.error(e.stack || e); process.exit(1); });
+"""
+
+SCENARIOS_JS = r"""
+global.SC = {
+  async board({assert, $, pageText, created}) {
+    const t = $('team').textContent;
+    assert.ok(t.includes('Worker 1') && t.includes('Writing'), t);       // UI-1: status of each agent
+    assert.ok(t.includes('Waiting for job') || t.includes('Closed'), t);
+    assert.ok(t.includes('fix the parser'), 'assignment');
+    assert.ok(t.includes('1.0 actual'), 'the model the CLI reports');
+    assert.ok($('title').textContent === 'demo');
+    assert.ok(!created.has('IMG') && !created.has('SCRIPT'), 'no element made from text');
+  },
+  async messages({assert, $, pageText, created}) {
+    const m = $('messages').textContent;                                 // UI-2
+    assert.ok(m.includes('<img src=x onerror=alert(1)>'), 'shown as text');
+    assert.ok(m.includes('Waiting'), 'status shown');
+    assert.ok($('progress').textContent.includes('Build it'));           // steps panel
+    assert.ok(!created.has('IMG'));
+  },
+  async nothingInternal({assert, pageText, fixture}) {
+    const t = pageText();
+    for (const id of fixture.internal) assert.ok(!t.includes(id), 'internal id shown: ' + id);
+    assert.ok(!/\b(MSG|GATE|SIL|REC|MOD|JOB)-\d/.test(t));
+    assert.ok(!t.includes('model_id') && !t.includes('session'));
+  },
+  async gateOption({assert, $, byText, click, lastPost}) {
+    assert.ok(!$('needs').hidden);
+    await click(byText($('needs'), 'Yes'));
+    assert.deepStrictEqual(lastPost().type, 'GateAnswer');
+    assert.strictEqual(lastPost().option, 0); assert.strictEqual(lastPost().gate_id, 'gq');
+    assert.ok(lastPost().id);
+  },
+  async gateText({assert, $, byText, click, lastPost, everything, type}) {
+    const ta = $('needs').all().find(e => e.tagName === 'TEXTAREA');
+    type(ta, 'my own answer');
+    await click(byText($('needs'), 'Send answer'));
+    assert.strictEqual(lastPost().text, 'my own answer');
+  },
+  async approveGates({assert, $, byText, click, lastPost, posts}) {
+    await click(byText($('needs'), 'Approve'));
+    assert.strictEqual(lastPost().approve, true);
+    await click(byText($('needs'), 'Ask for changes'));      // nothing written: not sent
+    assert.strictEqual(posts.length, 1);
+    assert.ok($('needs').textContent.includes('Proposed'));  // old and new side by side
+  },
+  async pauseClose({assert, $, byText, click, lastPost}) {
+    await click(byText($('needs'), 'Continue'));
+    assert.strictEqual(lastPost().type, 'GateAnswer'); assert.strictEqual(lastPost().gate_id, 'gp');
+    assert.strictEqual(lastPost().option, undefined);
+  },
+  async typedTextSurvivesUpdate({assert, $, type, refresh, getState, setState, doc}) {
+    const ta = () => $('needs').all().find(e => e.tagName === 'TEXTAREA');
+    type(ta(), 'half written');
+    ta().focus();
+    const s = getState(); s.rev = (s.rev || 0) + 1; s.rounds = 99; s.gates.gq.text = 'A changed question';
+    setState(s); await refresh();
+    assert.strictEqual(ta().value, 'half written');
+    assert.ok($('needs').textContent.includes('A changed question'));
+    assert.strictEqual(doc.activeElement, ta(), 'focus kept');
+  },
+  async lostConnection({assert, $, sources, settle, setFail}) {
+    assert.ok($('lost').hidden);
+    setFail(true); sources[0].onerror(); await settle();
+    assert.ok(!$('lost').hidden, 'shown');
+    setFail(false); await new Promise(r => setTimeout(r, 30)); await settle();
+    const es = sources[sources.length - 1]; assert.ok(sources.length > 1, 'reconnects by itself');
+    es.onopen(); await settle();
+    assert.ok($('lost').hidden, 'recovered');
+  },
+  async lostWhenStateFails({assert, $, setFail, refresh}) {
+    setFail(true); await refresh(); assert.ok(!$('lost').hidden);
+  },
+  async header({assert, $, byText, click, lastPost, posts}) {
+    await click($('nightbtn')); assert.deepStrictEqual([lastPost().type, lastPost().on], ['SetNight', true]);
+    await click($('addworker')); assert.strictEqual(lastPost().type, 'WorkerAdd');
+    await click($('stopbtn')); assert.ok($('dlg').open);
+    await click(byText($('dlg-a'), 'Stop agents')); assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StopAgents', []]);
+    await click($('morebtn')); await click(byText($('dlg-a'), 'Update and restart'));
+    await click(byText($('dlg-a'), 'Update')); assert.strictEqual(lastPost().type, 'UpdateOrch');
+  },
+  async closeOrch({assert, $, byText, click, lastPost}) {
+    await click($('morebtn')); await click(byText($('dlg-a'), 'Close Orch and stop agents'));
+    await click(byText($('dlg-a'), 'Stop everything'));
+    assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StopOrch', true]);
+  },
+  async startAgents({assert, $, click, lastPost, getState, setState, refresh}) {
+    const s = getState(); s.agents['worker-1'].stopped_by_user = true; setState(s); await refresh();
+    assert.strictEqual($('stopbtn').textContent, 'Start agents');
+    await click($('stopbtn')); assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StartAgents', []]);
+  },
+  async workerControls({assert, $, byText, click, lastPost}) {
+    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    await click(byText(card, 'Close')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['WorkerClose', 'worker-1']);
+    const card2 = $('team').all().filter(e => e.className.startsWith('agent')).find(c => c.textContent.includes('Worker 2'));
+    await click(byText(card2, 'Reopen')); assert.strictEqual(lastPost().type, 'WorkerReopen');
+    await click(byText(card2, 'Delete')); await click(byText($('dlg-a'), 'Delete')); assert.strictEqual(lastPost().type, 'WorkerDelete');
+  },
+  async jobChoice({assert, $, byText, click, lastPost, posts, setReply}) {
+    let n = 0;
+    setReply(b => n++ === 0 ? {ok: false, shown: 'A job is running.', text: null, data: {}, choices: [{label: 'Let it finish', set: {jobs: 'finish'}}, {label: 'Stop it', set: {jobs: 'stop'}}]}
+                            : {ok: true, shown: '', choices: [], data: {}});
+    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    await click(byText(card, 'Close'));
+    assert.ok($('dlg').open && $('dlg-b').textContent.includes('A job is running.'));
+    await click(byText($('dlg-a'), 'Stop it'));
+    assert.strictEqual(posts.length, 2); assert.strictEqual(lastPost().jobs, 'stop');
+    assert.notStrictEqual(posts[0].id, posts[1].id);
+  },
+  async talk({assert, $, click, lastPost, type, byText, buttons}) {
+    await click($('talkbtn')); assert.ok(!$('talk').hidden);
+    assert.ok($('talklog').textContent.includes('Hello manager'));
+    type($('talkin'), 'please continue'); await click($('talksend'));
+    assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().text], ['Chat', 'manager', 'please continue']);
+    assert.strictEqual($('talkin').value, '');
+    await click(byText($('talkacts'), 'Discuss')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['DiscussionStart', 'manager']);
+    assert.ok($('talkinfo').textContent.includes('orch terminal demo manager'));
+  },
+  async enterSends({assert, $, click, lastPost, type, settle}) {
+    await click($('talkbtn')); type($('talkin'), 'by key');
+    $('talkin').fire('keydown', {key: 'Enter'}); await settle();
+    assert.strictEqual(lastPost().text, 'by key');
+  },
+  async discussion({assert, $, click, lastPost, byText, type, settle, buttons}) {
+    await click($('talkbtn')); $('talkwho').value = 'critic'; $('talkwho').fire('change'); await settle();
+    assert.ok($('talkinfo').textContent.includes('discussion is open'));
+    await click(byText($('talkacts'), 'Apply discussion'));
+    type($('dlg-b').all().find(e => e.tagName === 'TEXTAREA'), 'go ahead');
+    await click(byText($('dlg-a'), 'Apply'));
+    assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().text], ['DiscussionApply', 'critic', 'go ahead']);
+    await click(byText($('talkacts'), 'End without applying')); await click(byText($('dlg-a'), 'End it'));
+    assert.deepStrictEqual([lastPost().type, lastPost().agent], ['DiscussionEnd', 'critic']);
+  },
+  async sendToCritic({assert, $, click, lastPost, byText}) {
+    await click($('talkbtn')); $('talkwho').value = 'worker-1'; $('talkwho').fire('change'); await settle_();
+    await click(byText($('talklog'), 'Send to critic'));
+    assert.strictEqual(lastPost().type, 'SendToCritic'); assert.strictEqual(lastPost().message_id, 'mw');
+    function settle_() { return new Promise(r => setTimeout(r, 5)); }
+  },
+  async terminalAndNotices({assert, $, click, byText, lastPost, posts}) {
+    assert.ok($('notices').textContent.includes('A terminal is open on Critic'));
+    await click(byText($('notices'), 'Take back'));
+    assert.deepStrictEqual([lastPost().type, lastPost().agent], ['TerminalTakeBack', 'critic']);
+    assert.ok($('notices').textContent.includes('Worker 1 stopped'));
+    await click(byText($('notices'), 'Remove old files')); assert.strictEqual(lastPost().type, 'ConfirmMigration');
+    await click(byText($('notices'), 'Dismiss'));
+    assert.ok(!$('notices').textContent.includes('Worker 1 stopped'));
+  },
+  async milestones({assert, $, click, byText, lastPost, type}) {
+    await click(byText($('progress'), 'Reopen')); assert.deepStrictEqual([lastPost().type, lastPost().milestone_id], ['ReopenMilestone', 'm0']);
+    await click($('changems')); type($('dlg-b').all().find(e => e.tagName === 'TEXTAREA'), 'add a docs step');
+    await click(byText($('dlg-a'), 'Ask'));
+    assert.deepStrictEqual([lastPost().type, lastPost().text], ['ChangeMilestones', 'add a docs step']);
+  },
+  async models({assert, $, click, byText, lastPost, type}) {
+    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    await click(byText(card, 'Model'));
+    assert.ok($('dlg').open); const body = $('dlg-b');
+    assert.ok(body.textContent.includes('Alpha') && body.textContent.includes('Backups'));
+    const sels = body.all().filter(e => e.tagName === 'SELECT'); assert.strictEqual(sels.length, 2, 'model and effort');
+    sels[0].value = 'beta'; sels[0].fire('change'); await new Promise(r => setTimeout(r, 5));
+    const eff = body.all().filter(e => e.tagName === 'SELECT')[1]; eff.value = 'high'; eff.fire('change');
+    await click(byText(body, 'Switch'));
+    assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().model_id, lastPost().effort], ['ChooseModel', 'worker-1', 'beta', 'high']);
+    await click(byText(body, 'Use'));
+    assert.deepStrictEqual([lastPost().type, lastPost().backup], ['ChooseModel', 'slow']);
+  },
+  async switchPending({assert, $, click, byText, lastPost}) {
+    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    assert.ok(card.textContent.includes('switch pending'));
+    await click(byText(card, 'Model'));
+    assert.ok($('dlg-b').textContent.includes('Switch pending'));
+    await click(byText($('dlg-b'), 'Switch now')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['ForceSwitch', 'worker-1']);
+  },
+  async golden({assert, $, click, byText, lastPost, type, settle}) {
+    const card = $('goldcard'); card.open = true; card.fire('toggle'); await settle();
+    assert.ok($('golden').textContent.includes('Always be kind.'));
+    await click(byText($('golden'), 'Edit'));
+    const ta = $('golden').all().find(e => e.tagName === 'TEXTAREA'); type(ta, 'Always be kind and brief.');
+    await click(byText($('golden'), 'Save'));
+    assert.deepStrictEqual([lastPost().type, lastPost().text, lastPost().base], ['EditGolden', 'Always be kind and brief.', 'd1']);
+  },
+  async audit({assert, $, click, byText, lastPost, type, settle}) {
+    const card = $('auditcard'); card.open = true; card.fire('toggle'); await settle();
+    assert.ok($('audit').textContent.includes('All fine.'));
+    await click(byText($('audit'), 'Run audit')); assert.strictEqual(lastPost().type, 'AuditRun');
+    await click(byText($('audit'), 'Edit notes'));
+    type($('audit').all().find(e => e.tagName === 'TEXTAREA'), 'new notes');
+    await click(byText($('audit'), 'Save'));
+    assert.deepStrictEqual([lastPost().type, lastPost().text, lastPost().base], ['AuditNotes', 'new notes', 'n1']);
+  },
+  async messageDetail({assert, $, click, byText, gets}) {
+    const row = $('messages').all().find(e => e.tagName === 'DETAILS');
+    await click(byText(row, 'Show the text as sent')); assert.ok(row.textContent.includes('SENT TEXT'));
+    await click(byText(row, 'Show the whole reply')); assert.ok(row.textContent.includes('WHOLE REPLY'));
+  },
+  async oldRuns({assert, $, click, byText, settle}) {
+    await click($('runsbtn'));
+    await click(byText($('dlg-b'), 'Open')); await settle();
+    assert.ok($('oldnote').textContent.includes('earlier run')); assert.ok($('messages').textContent.includes('old words'));
+    assert.ok($('needs').hidden);
+    await click(byText($('oldnote'), 'Back to the current run'));
+    assert.ok($('team').textContent.includes('Worker 1'));
+  },
+  async liveActivity({assert, $, sources, settle}) {
+    sources[0].l.live({data: JSON.stringify({agent: 'worker-1', n: 3, at: 5, k: 'text', s: 'now reading files'})}); await settle();
+    assert.ok($('team').textContent.includes('now reading files'));
+  },
+  async liveReconnectAndReset({assert, $, sources, gets, settle, setLiveReply}) {
+    sources[0].l.live({data: JSON.stringify({agent: 'worker-1', n: 3, at: 5, k: 'text', s: 'line three'})}); await settle();
+    assert.ok($('team').textContent.includes('line three'));
+    setLiveReply(url => ({items: [{n: 4, at: 6, k: 'text', s: 'line four'}], next: 5}));
+    sources[0].onerror(); await new Promise(r => setTimeout(r, 20)); await settle();
+    const es1 = sources[sources.length - 1];
+    es1.onopen(); await settle();
+    assert.ok(gets.some(u => u === 'api/live?agent=worker-1&from=4'), 'fetched from last n + 1: ' + gets.join(', '));
+    assert.ok($('team').textContent.includes('line four') && $('team').textContent.includes('line three'));
+    setLiveReply(url => ({reset: true, items: [{n: 1, at: 7, k: 'text', s: 'after reset'}], next: 2}));
+    es1.onerror(); await new Promise(r => setTimeout(r, 20)); await settle();
+    const es2 = sources[sources.length - 1];
+    es2.onopen(); await settle();
+    assert.ok(gets.some(u => u === 'api/live?agent=worker-1&from=5'), 'fetched from 5 before reset');
+    assert.ok($('team').textContent.includes('after reset'));
+    assert.ok(!$('team').textContent.includes('line three') && !$('team').textContent.includes('line four'), 'cleared on reset');
+  },
+  async commandRetriesWithSameId({assert, $, click, posts, setReply}) {
+    let n = 0;
+    setReply(() => { if (n++ === 0) throw new Error('network'); return {ok: true, shown: 'Done.', choices: [], data: {}}; });
+    await click($('addworker')); await new Promise(r => setTimeout(r, 30));
+    assert.ok(posts.length >= 2 && posts[0].id === posts[1].id, 'same id again');
+  },
+};
+"""
+
+
+def state_fixture():
+    t = 1_800_000_000.0
+    snap = snapshot(
+        agent("worker-1", status="writing", assignment=Assignment("m5", "fix the parser", t - 600), actual_model="1.0 actual",
+              last_output=t - 90),
+        agent("worker-2", lifecycle="closed", status="closed"),
+        milestone("m0", "done", title="Earlier work", score=4.0),
+        milestone("m1", "current", title="Build it", text="Make the thing."),
+        message("mu", "manager", USER, "Hello manager", trigger="user_chat"),
+        message("mr", USER, "manager", "Hi there. <img src=x onerror=alert(1)>", needs_answer=False, status="waiting",
+                holds=["question"]),
+        message("mw", USER, "worker-1", "I finished the parser.", needs_answer=False, trigger="worker", status="delivered"),
+        message("mn", USER, ORCH, "Worker 1 stopped.", needs_answer=False, status="delivered",
+                text=TextRef(TextKey.NOTE_AGENT_FAILED, {"agent": "worker-1", "why": "x"})),
+        message("mm", USER, ORCH, "Old files can go.", needs_answer=False, status="delivered",
+                text=TextRef(TextKey.NOTE_MIGRATED, {"files": []})),
+        gate("gq", "question", text="Shall we ship?", options=["Yes", "No"], agent="manager", opened=t - 50),
+        gate("gp", "pause", words=TextRef(TextKey.GATE_SILENCE, {"attempts": 3}), opened=t - 40),
+        gate("gc", "milestone_change", words=TextRef(TextKey.GATE_MILESTONE_CHANGE, {}), opened=t - 30,
+             old=[milestone("m1", title="Old title")], new=[milestone("m1", title="New title")]),
+        job("worker-1/j7", agent="worker-1", label="npm test", started=t - 300),
+        Discussion("critic", started=t - 10),
+        Terminal("critic", opened=t - 20),
+        now=t, run=RunInfo(id="r1", project="demo", started=t - 900),
+        catalog=[ModelInfo("alpha", "claude", model="a", label="Alpha", efforts=["low", "high"], default_effort="low"),
+                 ModelInfo("beta", "claude", model="b", label="Beta", efforts=["low", "high"], default_effort="low")],
+    )
+    # the notice messages are from Orch; the contract has `sender` ORCH
+    for mid in ("mn", "mm"):
+        snap.messages[mid].sender, snap.messages[mid].recipient, snap.messages[mid].created = ORCH, USER, t - 60
+    for mid in ("mu", "mr", "mw"):
+        snap.messages[mid].created = t - 100
+    snap.messages["mu"].sender, snap.messages["mu"].recipient = USER, "manager"
+    snap.messages["mr"].sender, snap.messages["mr"].recipient = "manager", USER
+    snap.messages["mw"].sender, snap.messages["mw"].recipient = "worker-1", USER
+    for aid, ag in snap.agents.items():
+        if aid != "worker-1":
+            ag.last_output = 0.0
+    w = snap.agents["worker-1"]
+    w.choices = [Choice("claude", model="a", model_id="alpha", effort="low"), Choice("claude", model="s", name="slow", model_id="slow")]
+    w.choice = w.choices[0]
+    w.proc = ProcRef(pid=1)
+    snap.agents["manager"].choice = Choice("claude", model="a", model_id="alpha")
+    snap.milestones[0].status = MilestoneStatus.DONE
+    snap.checklist = Checklist(path="x", steps=[ChecklistStep("Parser", False, [(True, "read"), (False, "write")])])
+    d = public_state(snap)
+    d["rev"] = 1
+    for g in d["gates"].values():
+        if g["words"]:
+            g["words"]["shown"] = "Orch words for " + g["id"][:0] + "this gate."
+    for m in d["messages"].values():
+        if m["text"]:
+            m["text"]["shown"] = m["body"]
+    return d, snap
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class TestSmoke(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        # one file: the scenarios are declared before the runner starts
+        src = SCENARIOS_JS.replace("global.SC =", "var SC =") + "\n" + DOM_JS
+        (cls.tmp / "dom.js").write_text(src, encoding="utf-8")
+        d, snap = state_fixture()
+        cls.state = d
+        cls.fixture = {"state": d, "internal": ["gq", "gp", "gc", "worker-1/j7", "mu", "mr", "mw", "r1"]}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def run_scenario(self, name, mutate=None):
+        fx = json.loads(json.dumps(self.fixture))
+        if mutate:
+            mutate(fx["state"])
+        (self.tmp / "fx.json").write_text(json.dumps(fx), encoding="utf-8")
+        r = subprocess.run([NODE, str(self.tmp / "dom.js"), str(PAGE), str(self.tmp / "fx.json"), name],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr[-2500:])
+
+    def test_state_has_the_shape_the_page_reads(self):
+        d = self.state
+        for k in ("agents", "messages", "gates", "milestones", "checklist", "catalog", "jobs", "terminals", "discussions", "now"):
+            self.assertIn(k, d)
+        self.assertIn("waiting", d["agents"]["worker-1"])
+        self.assertNotIn("rendered", next(iter(d["messages"].values())))
+
+    def test_UI_1_status_board(self):
+        self.run_scenario("board")
+
+    def test_UI_2_messages_in_time_order_shown_as_text(self):
+        self.run_scenario("messages")
+
+    def test_UI_3_nothing_internal_is_shown(self):
+        self.run_scenario("nothingInternal")
+
+    def test_UI_3_question_option(self):
+        self.run_scenario("gateOption")
+
+    def test_UI_3_question_free_text(self):
+        self.run_scenario("gateText")
+
+    def test_UI_3_approval_gates(self):
+        self.run_scenario("approveGates")
+
+    def test_UI_3_pause_and_operational_gates_close(self):
+        self.run_scenario("pauseClose")
+
+    def test_nothing_typed_is_lost_on_update(self):
+        self.run_scenario("typedTextSurvivesUpdate")
+
+    def test_lost_connection_is_shown_and_recovers(self):
+        self.run_scenario("lostConnection")
+
+    def test_lost_connection_when_the_state_cannot_be_read(self):
+        self.run_scenario("lostWhenStateFails")
+
+    def test_UI_3_header_controls(self):
+        self.run_scenario("header")
+
+    def test_UI_3_close_orch_and_stop_agents(self):
+        self.run_scenario("closeOrch")
+
+    def test_UI_3_start_agents_after_stop(self):
+        def m(d):
+            pass
+        self.run_scenario("startAgents")
+
+    def test_UI_3_worker_controls_close_reopen_delete(self):
+        self.run_scenario("workerControls")
+
+    def test_UI_3_close_with_a_job_asks_and_sends_again(self):
+        self.run_scenario("jobChoice")
+
+    def test_UI_3_talk_and_discuss(self):
+        self.run_scenario("talk")
+
+    def test_UI_3_enter_sends(self):
+        self.run_scenario("enterSends")
+
+    def test_UI_3_apply_and_end_a_discussion(self):
+        self.run_scenario("discussion")
+
+    def test_UI_3_send_to_critic(self):
+        self.run_scenario("sendToCritic")
+
+    def test_UI_3_terminal_notice_take_back_and_notices(self):
+        self.run_scenario("terminalAndNotices")
+
+    def test_UI_2_milestone_buttons(self):
+        self.run_scenario("milestones")
+
+    def test_UI_3_model_window(self):
+        self.run_scenario("models")
+
+    def test_UI_3_pending_switch(self):
+        def m(d):
+            from orch.runtime.contracts import to_dict
+            d["agents"]["worker-1"]["switch"] = {"reason": "user", "forced": False, "step": "pending", "step_at": 0, "created": 0,
+                                                  "new_session": False, "handover_by": "", "error": "",
+                                                  "target": {"label": "Beta", "backend": "claude", "model": "b", "provider": "",
+                                                             "effort": "", "model_id": "beta", "name": ""}}
+        self.run_scenario("switchPending", m)
+
+    def test_UI_4_golden_board_edit(self):
+        self.run_scenario("golden")
+
+    def test_UI_4_audit_notes_and_run(self):
+        self.run_scenario("audit")
+
+    def test_UI_5_UI_2_message_details(self):
+        self.run_scenario("messageDetail")
+
+    def test_UI_6_old_runs_are_read_only(self):
+        self.run_scenario("oldRuns")
+
+    def test_UI_1_live_activity_line(self):
+        self.run_scenario("liveActivity")
+
+    def test_UI_1_live_reconnect_and_reset(self):
+        self.run_scenario("liveReconnectAndReset")
+
+    def test_a_command_is_sent_again_with_the_same_id(self):
+        self.run_scenario("commandRetriesWithSameId")
+
+
+if __name__ == "__main__":
+    unittest.main()

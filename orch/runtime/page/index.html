@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Orch board</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#needs">Skip to what needs you</a>
+<div class="wrap">
+ <header>
+  <h1 id="title">Orch board</h1>
+  <span id="runstate"></span>
+  <span class="grow"></span>
+  <button class="sm" id="talkbtn" type="button" aria-haspopup="dialog">Talk<span id="talkbadge"></span></button>
+  <button class="sm" id="nightbtn" type="button" aria-pressed="false" title="Night mode: the manager answers questions by itself and its choices are recorded">Night mode</button>
+  <button class="sm" id="stopbtn" type="button">Stop agents</button>
+  <button class="sm" id="runsbtn" type="button">Earlier runs</button>
+  <button class="sm" id="morebtn" type="button" aria-haspopup="dialog">More</button>
+  <button class="sm" id="themebtn" type="button" title="Light or dark">Light/dark</button>
+ </header>
+ <div id="lost" class="banner lost" role="alert" hidden>Connection lost. Trying again&hellip;</div>
+ <div id="oldnote" class="banner info" hidden></div>
+ <div id="notices" role="status"></div>
+ <main>
+  <section id="needs" class="card needs" aria-label="Needs you" hidden></section>
+  <section class="card" aria-labelledby="team-h"><h2 id="team-h">Team</h2><div id="team" class="team"></div>
+   <div class="acts" style="margin-top:12px"><button type="button" id="addworker">Add worker</button></div></section>
+  <section class="card" aria-labelledby="prog-h"><div class="acts" style="margin-bottom:10px"><h2 id="prog-h" style="margin:0">Progress</h2><span class="grow"></span><button type="button" class="sm" id="changems">Change milestones</button></div>
+   <div id="progress"></div></section>
+  <section class="card" aria-labelledby="msgs-h"><h2 id="msgs-h">Messages</h2>
+   <div class="mfilter"><input type="search" id="msearch" placeholder="Search messages" aria-label="Search messages">
+    <select id="mwho" class="sm" aria-label="Show messages of"></select></div>
+   <div class="acts"><button type="button" class="sm" id="older" hidden>Older messages</button></div><div id="messages"></div></section>
+  <details class="card" id="goldcard"><summary><h2>Golden board</h2></summary><div id="golden"></div></details>
+  <details class="card" id="auditcard"><summary><h2>Audit</h2></summary><div id="audit"></div></details>
+ </main>
+</div>
+
+<div id="talk" hidden>
+ <div class="win" role="dialog" aria-modal="true" aria-labelledby="talk-h">
+  <div class="talk-top"><h2 id="talk-h">Talk to</h2><select id="talkwho" class="sm" aria-label="Who to talk to"></select>
+   <span class="grow"></span><span id="talkacts" class="acts"></span><button type="button" class="sm" id="talkclose" aria-label="Close">Close</button></div>
+  <div id="talkinfo"></div>
+  <div id="talklog" tabindex="0" aria-live="polite"></div>
+  <div class="row"><textarea id="talkin" rows="2" placeholder="Write here. Enter sends, Shift+Enter adds a line." aria-label="Your message"></textarea></div>
+  <div class="row" style="justify-content:flex-end"><button type="button" class="pri" id="talksend">Send</button></div>
+ </div>
+</div>
+
+<dialog id="dlg"><h3 id="dlg-h"></h3><div id="dlg-b"></div><div class="acts" id="dlg-a"></div></dialog>
+<dialog id="dlg2"><h3 id="dlg-h2"></h3><div id="dlg-b2"></div><div class="acts" id="dlg-a2"></div></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="logic.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
