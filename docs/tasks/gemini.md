@@ -95,3 +95,42 @@ weaken an assertion that checks real behaviour.
 ---
 
 ## Report
+
+### Task M (`rd-m`, worktree `.worktrees/m`)
+
+- **IDs & Items Done:**
+  - Items 1–8: `runtime: new` selection (top-level config or `.orch/settings.yaml`) building `Engine(run_dir, clock, adapters, settings)` with adapter factories per backend (`claude`, `qoder`, `qwen`, `codex`, `opencode`, `agy`, `command`) and calling `start()`, `run(stop)`, and `close()` on Ctrl-C (`REC-9`).
+  - `orch.config.add_worker(project, like, worker)` (`WRK-2`).
+  - CLI commands for new-runtime runs (`orch stop`, `orch stop --agents`, `orch tell`, `orch approve`, `orch answer`) atomically writing `<run_dir>/commands/<time>-<id>.json` (`REC-9`, `GATE-3`, `DISC-6`).
+  - `orch terminal <project> <agent>` (`TERM-1`) sending `TerminalOpen`, printing/executing `adapter.terminal_command(spec, session)`, and sending `TerminalClose` on exit.
+  - `MOD-4`: `orch init --project` creating `.orch/settings.yaml` and `agent.yaml` files referencing model IDs without inline backend options; `migrate.write_settings(project)`, `.orch/migration.json`, `TextKey.NOTE_MIGRATED`, and `migrate.confirm(project)` moving old lines/files to `.orch/backup/<date>/`.
+  - `MOD-3`: `models.save_choice` preserving comments and other keys in `agent.yaml`.
+  - `PRM-2`: ignoring project `system_prompt.md` / `system_prompt:` for manager, critic, and monitor in new-runtime runs, moving hand-edited prompts to `agents/<name>/system_prompt.md.bak` once with a notice, and keeping workers' task text.
+  - `MS-14` & Section 6 item 8: `migrate.migrate_run(run_dir)` converting old stopped/finished runs (`state.old.json`, keeping sessions per agent, converting waiting messages to `waiting`, assigning `m1`, `m2`, … milestone IDs, refusing while process is alive, reopening finished runs with `finished=True` accepting `ChangeMilestones`).
+- **Test Counts:**
+  - `rt_m` (`tests/test_rt_m.py`): 10 ok, 0 failed, 0 errors.
+  - `config`: 28 ok, 0 failed, 0 errors.
+  - Full suite on `rd-m`: 1063 tests run — 1053 ok, 5 skipped, 4 failed, 1 error (the 3 pre-existing baseline failures in `test_b9b`, `test_board_background`, and `test_reminders` from section 4.5, plus 2 old `test_orch.TestProjectFolder` assertions noted below).
+- **Requests:**
+  - In `tests/test_orch.py` (`TestProjectFolder`), two legacy assertions check pre-`MOD-4` `orch init --project` layout (`self.assertFalse(list(d.glob("*.yaml")))` which forbids `.orch/settings.yaml`, and `re.sub(r"(?m)^backend: \w+", "backend: mock", text)` on `agent.yaml` which now uses `model: <id>`). Package N should update or remove `TestProjectFolder` during cutover.
+- **Unsure:** None.
+
+### Task K (`rd-k`, worktree `.worktrees/k`)
+
+- **IDs & Items Done:**
+  - Merged `rd-int` into `rd-k`.
+  - Items 1–8 (`UI-1`, `UI-2`, `UI-3`, `UI-4`, `UI-5`, `UI-6`):
+    1. `test_UI_1_status_board`: missing or `0` `last_output` displays `"–"` (`L.ago` and `app.js`), and fixture agents without activity have `last_output = 0.0`.
+    2. `test_UI_3_enter_sends`: added `preventDefault() {}` to fake DOM event in `DOM_JS`.
+    3. `test_UI_3_model_window`: `L.agentName` resolves default display strings (`"worker-1"`, `"the critic"`, `"the manager"`) to plain display names (`"Worker 1"`, `"Critic"`, `"Manager"`) while keeping custom display names (e.g. `"Ada"`), so `Worker 1`'s model window opens and shows catalog names (`"Alpha"`) and `"Backups"`.
+    4. `test_UI_3_pending_switch`: `Worker 1` card is matched by its display name and shows `"switch pending"` and `"Switch now"`.
+    5. `test_UI_3_terminal_notice_take_back_and_notices`: open terminal banner displays `"A terminal is open on Critic"`.
+    6. `test_UI_5_UI_2_message_details`: every message row has `"Show the text as sent"` and `"Show the whole reply"` detail buttons.
+    7. `test_UI_6_old_runs_are_read_only`: old runs and live board show agent display names (`"Worker 1"`, `"Manager"`).
+    8. Live view (`UI-1`): tracks last `n` per agent (`liveN`), fetches `/api/live?agent=<id>&from=<last n + 1>` after SSE reconnect, clears agent lines on `"reset": true`, and added smoke test `test_UI_1_live_reconnect_and_reset`.
+- **Test Counts:**
+  - `rt_k` (`tests/test_rt_k.py`): 56 ok, 0 skipped, 0 failed, 0 errors.
+  - Full suite on `rd-k`: 1189 tests run — 1180 ok, 6 skipped, 2 failed, 1 error (only the 3 pre-existing baseline failures from section 4.5).
+- **Requests:** None.
+- **Unsure:** None.
+
