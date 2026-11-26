@@ -41,6 +41,13 @@ class TestParse(unittest.TestCase):
         self.assertEqual([b.problem for b in r.broken], [Problem.BAD_VALUE] * 2)
         self.assertIsNone(r.decision)
 
+    def test_LAB_1_critic_done_label_marks_a_finished_milestone(self):
+        r = labels.parse("All the work is in place.\n<done/>", Role.CRITIC)
+        self.assertTrue(r.done)
+        self.assertEqual((r.broken, r.untagged), ([], "All the work is in place."))
+        self.assertFalse(labels.parse("Still working.", Role.CRITIC).done)
+        self.assertEqual([b.problem for b in labels.parse("<done/>", Role.MANAGER).broken], [Problem.REMOVED])
+
     def test_LAB_1_critic_has_only_message_and_silent(self):
         text = ('<question>A?</question><pause>x</pause><wait-job/><verdict>PASS</verdict><workers n="2">x</workers>'
                 '<to worker="w-1">x</to><message to="worker-1">ok</message>')

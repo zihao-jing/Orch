@@ -13,7 +13,7 @@ from importlib import import_module
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence
 
 import yaml
 
@@ -267,7 +267,25 @@ class Engine:
         if isinstance(ev, C.UserCommand) and ev.handler == "engine":
             prior.extend(self._engine_command(ev, snap))
         self._perform(self.store.apply(ev, prior))
+        self._write_rubrics(snap.run.run_dir, prior)
         return True
+
+    def _write_rubrics(self, run_dir: str, actions: Sequence[C.Action]) -> None:
+        """MS-12: each milestone's rubric is kept in its own file, which the critic reads; written when it differs from
+        the file on disk. The content is the title and one line per criterion."""
+        for a in actions:
+            if not isinstance(a, C.SetMilestones):
+                continue
+            for m in a.milestones:
+                if not m.rubric:
+                    continue
+                path = Path(milestones.rubric_path(run_dir, a.milestones, m))
+                text = f"# Rubric: {m.title}\n\n" + "".join(f"- {c}\n" for c in m.rubric)
+                try:
+                    if not path.exists() or path.read_text(encoding="utf-8") != text:
+                        self._write(path, text)
+                except OSError as exc:
+                    LOG.warning("Cannot write the rubric %s: %s", path, exc)
 
     def _command_dir(self) -> Path:
         return self.run_dir / "commands"

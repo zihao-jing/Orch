@@ -326,7 +326,7 @@ def build_snapshot(
         retry_waits=list(settings.get("retry_waits") or config.RETRY_WAITS),
         return_after=float(settings.get("fallback_cooldown", 18000.0) or 18000.0),
         golden_limit=mon.controller.golden_limit or 8000,
-        pass_score=mon.controller.min_score,
+        pass_score=mon.controller.min_score if mon.controller.min_score is not None else 4.5,
         approve_plan=mon.controller.approve_plan,
         approve_milestones=mon.controller.approve_milestones,
     )
@@ -661,7 +661,7 @@ def migrate_run(
     rt_settings = Settings(
         round_limit=int(old.get("max_rounds") or cfg.get("max_rounds") or 5000),
         golden_limit=int(ctrl.get("golden_limit") or 8000),
-        pass_score=float(ctrl["min_score"]) if ctrl.get("min_score") is not None else None,
+        pass_score=float(ctrl["min_score"]) if ctrl.get("min_score") is not None else 4.5,
         approve_plan=bool(ctrl.get("approve_plan", True)),
         approve_milestones=bool(ctrl.get("approve_milestones", True)),
     )

@@ -22,7 +22,7 @@ VALUES = {
     "jobs": ["train.py"], "available": ["worker-1"], "label": "<message>", "problem": "unclosed", "why": "billing",
     "assignment": "Check the labels", "question": "Done?", "to": "worker-9", "turns_dir": "/run/rounds", "since": T0,
     "latest": "r003-t01-manager", "goal": "Build it.", "milestone": "m1",
-    "title": "Data", "text": "The data is clean.", "checklist_path": "/run/c.md", "last_title": "Setup", "attempt": 1,
+    "title": "Data", "text": "The data is clean.", "checklist_path": "/run/c.md", "rubric_path": "/run/rubric-1.md", "last_title": "Setup", "attempt": 1,
     "attempts": 3, "rubric": ["Correct"], "checklist": ["- [x] Labels checked"], "decide_again": "",
     "answers": [{"kind": "question", "question": "A or B?", "answer": "A"}], "unsent": [], "path": "/run/golden.md",
     "job": "train.py", "minutes": 40, "status": "writing", "live_file": "/run/live.md", "items": ["- [ ] Labels checked"],
@@ -156,16 +156,21 @@ class TestTexts(unittest.TestCase):
 
     def test_PRM_9_review_texts_full_once_per_session_then_short(self):
         snap = snapshot()
-        for who, key in (("critic", TextKey.WORKER_FINAL), ("manager", TextKey.CHECKLIST_COMPLETE)):
-            m = message("x1", who, "worker-1", "", key=key, values=values(key))
-            first = texts.render(snap, m)
-            self.assertEqual(first.given["review"], "1")
-            give(snap, who, review="1")
-            again = texts.render(snap, m)
-            self.assertNotIn("review", again.given)  # only the full text counts as shown
-            self.assertLess(len(again.text), len(first.text))
-            self.assertIn("Labels checked" if who == "manager" else "ready for review", again.text)
-        self.assertIn("Correct", again.text)  # the manager's review keeps checklist and rubric
+        m = message("x1", "critic", "worker-1", "", key=TextKey.WORKER_FINAL, values=values(TextKey.WORKER_FINAL))
+        first = texts.render(snap, m)
+        self.assertEqual(first.given["review"], "1")
+        give(snap, "critic", review="1")
+        again = texts.render(snap, m)
+        self.assertNotIn("review", again.given)  # only the full text counts as shown
+        self.assertLess(len(again.text), len(first.text))
+        self.assertIn("ready for review", again.text)
+
+    def test_MS_4_the_review_text_names_the_rubric_file_and_the_jobs(self):
+        out = texts.words(C.TextRef(TextKey.CHECKLIST_COMPLETE, {**values(TextKey.CHECKLIST_COMPLETE),
+                                                                 "jobs": ["worker-1: train.py"]}), snapshot())
+        self.assertIn("says the milestone is done. Review it now against the milestone and your rubric "
+                      "(`/run/rubric-1.md`)", out)
+        self.assertTrue(out.endswith("Done when: The data is clean.\n\nStill running: `worker-1: train.py`."), out)
 
     def test_REC_10_monitor_sees_the_checklist_once_then_only_changes(self):
         snap = snapshot(agent("monitor"))

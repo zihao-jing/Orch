@@ -36,7 +36,7 @@ class TestMessages(RuntimeCase):
     def test_S05_LAB_4_MS_4_silent_reply_routes_work_and_offers_review(self):
         self.cli(CRITIC).script(
             "Private explanation." + tell(W1, "Verify output.") + QUIET,
-            "Verification complete." + QUIET,
+            "Verification complete.\n<done/>" + QUIET,
         )
         self.cli(W1).script("Output verified.")
         self.start()
@@ -49,7 +49,16 @@ class TestMessages(RuntimeCase):
         self.assert_received_once(CRITIC, body="Output verified.", key=C.TextKey.WORKER_FINAL)
         self.assert_received_once(MANAGER, key=C.TextKey.CHECKLIST_COMPLETE)
         self.assertEqual(self.incoming(MANAGER, key=C.TextKey.CRITIC_REPORT), [])
-        self.assertEqual(self.state.milestone.notified, self.state.checklist.digest)
+        self.assertTrue(self.state.milestone.done_turn)  # the critic's <done/> started the review
+        self.assertEqual(self.state.milestone.notified, self.state.milestone.done_turn)
+
+    def test_MS_12_the_rubric_is_kept_in_a_file_the_critic_reads(self):
+        self.cli(CRITIC).script("Ready.\n<done/>" + QUIET)
+        self.start()
+        self.write_checklist(True)
+        self.assign()
+        rubric = self.path / "run" / "rubric-1.md"
+        self.assertEqual(rubric.read_text(encoding="utf-8"), "# Rubric: Milestone m1\n\n- Output works\n")
 
     def test_S06_GATE_1_GATE_2_GATE_4_GATE_7_answers_batched(self):
         self.cli(MANAGER).script(
