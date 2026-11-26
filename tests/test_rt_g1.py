@@ -378,7 +378,7 @@ class TestChange(unittest.TestCase):
 
     def test_MS_11_applying_a_discussion_that_changes_milestones_opens_the_same_gate(self):
         d = Discussion("manager", phase="applying", apply_message="ap", milestone_change=True)
-        s = base(milestone("m1", checklist_path=CK), milestone("m2", "pending"), d, message("ap", "manager", USER, key=K.DISCUSSION_APPLY, values={"request": ""}))
+        s = base(milestone("m1", checklist_path=CK), milestone("m2", "pending"), d, message("ap", "manager", USER, key=K.DISCUSSION_APPLY, values={"request": "", "milestone_change": True}))
         s, ev = turn_ended(s, "manager", reply=Reply(text=LISTING, untagged=LISTING), started_by=["ap"])
         self.assertEqual(find(decide(module(), s, ev), OpenGate)[0].gate.kind, "milestone_change")
 
@@ -594,6 +594,15 @@ class TestLists(unittest.TestCase):
         q = gate("qg", "question", closed=T0 - 5, answer=Answer(text="Yes"), source_turn="r001-t01-manager")
         ga = message("ga", "manager", key=K.GATE_ANSWERS, values={"answers": [], "unsent": [], "decide_again": ""}, gates=["qg"])
         s = base(milestone("m2", "pending"), asked, q, ga)
+        s, ev = turn_ended(s, "manager", reply=Reply(untagged=LISTING), started_by=["ga"])
+        self.assertEqual(find(pipeline(s, ev), OpenGate)[0].gate.kind, "milestone_change")
+
+    def test_MS_11_a_change_list_after_a_question_in_an_applied_discussion_is_read(self):
+        ap = message("ap", "manager", USER, key=K.DISCUSSION_APPLY, values={"request": "", "milestone_change": True},
+                     reply_turn="r001-t01-manager")
+        q = gate("qg", "question", closed=T0 - 5, answer=Answer(text="Yes"), source_turn="r001-t01-manager")
+        ga = message("ga", "manager", key=K.GATE_ANSWERS, values={"answers": [], "unsent": [], "decide_again": ""}, gates=["qg"])
+        s = base(milestone("m2", "pending"), ap, q, ga)
         s, ev = turn_ended(s, "manager", reply=Reply(untagged=LISTING), started_by=["ga"])
         self.assertEqual(find(pipeline(s, ev), OpenGate)[0].gate.kind, "milestone_change")
 

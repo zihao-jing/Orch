@@ -244,8 +244,10 @@ class _Run:
         """Does the reply answer a milestone change request (MS-10)? "ask": the turn took the request itself or the
         apply message of a discussion that wants a change; "carried": it follows a gate answer; None: no."""
         snap, d = self.snap, self.snap.discussions.get(self.manager)
-        if any(m.key in (K.MILESTONE_CHANGE_REQUEST,) for m in msgs) or (
-                d and d.milestone_change and any(m.id == d.apply_message for m in msgs)):
+        def wants(m: C.Message) -> bool:  # a request, or the apply message of a discussion that wanted a change
+            return m.key == K.MILESTONE_CHANGE_REQUEST or (m.key == K.DISCUSSION_APPLY and bool(m.text.values.get("milestone_change")))
+
+        if any(wants(m) for m in msgs) or (d and d.milestone_change and any(m.id == d.apply_message for m in msgs)):
             return "ask"
         if any(m.key == K.MILESTONE_CHANGE_UNREADABLE for m in msgs):
             return "carried"
@@ -253,7 +255,7 @@ class _Run:
             if g.kind == C.GateKind.MILESTONE_CHANGE:
                 return "carried"
             if g.kind == C.GateKind.QUESTION and any(
-                    x.key == K.MILESTONE_CHANGE_REQUEST and x.reply_turn == g.source_turn
+                    wants(x) and x.reply_turn == g.source_turn
                     for x in snap.messages.values()):
                 return "carried"  # the manager asked first, the answer came back
         return None

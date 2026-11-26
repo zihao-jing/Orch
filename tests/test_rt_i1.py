@@ -93,7 +93,7 @@ class TestApply(unittest.TestCase):
         s = snapshot(Discussion("critic"), draft)
         actions = decide(module(), s, event(DiscussionApply, s, "critic", text="Go ahead."))
         send = assert_has(self, actions, Send, recipient="critic", key=K.DISCUSSION_APPLY)
-        self.assertEqual(send.message.text.values, {"request": "Go ahead."})
+        self.assertEqual(send.message.text.values, {"request": "Go ahead.", "milestone_change": False})
         self.assertTrue(send.message.when_idle)  # waits until its current reply has ended
         d = assert_has(self, actions, SetDiscussion, agent="critic").discussion
         self.assertEqual((d.phase, d.apply_message), ("applying", send.message.id))
@@ -109,7 +109,7 @@ class TestApply(unittest.TestCase):
         self.assertEqual(decide(module(), s, event(DiscussionApply, s, "critic"))[0].text.values["why"], "already")
 
     def applying(self, *extra):
-        ap = message("ap", "critic", USER, key=K.DISCUSSION_APPLY, values={"request": ""})
+        ap = message("ap", "critic", USER, key=K.DISCUSSION_APPLY, values={"request": "", "milestone_change": False})
         return snapshot(Discussion("critic", phase="applying", apply_message="ap"), ap, *extra)
 
     def test_scenario_13_DISC_3_the_reply_to_the_apply_message_follows_the_normal_rules(self):

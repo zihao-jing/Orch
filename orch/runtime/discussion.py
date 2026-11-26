@@ -87,7 +87,7 @@ class _Module:
         drops = [C.Drop(m.id, DropReason.DRAFT_ENDED) for m in _drafts(snap, a.id)]  # the new message replaces them
         if isinstance(ev, C.DiscussionEnd):
             return drops + [C.SetDiscussion(a.id, None), C.CommandReply(ev.id)]
-        msg = C.Message(C.new_id(NAME, ev), C.USER, a.id, text=TextRef(K.DISCUSSION_APPLY, {"request": ev.text.strip()}),
+        msg = C.Message(C.new_id(NAME, ev), C.USER, a.id, text=TextRef(K.DISCUSSION_APPLY, {"request": ev.text.strip(), "milestone_change": d.milestone_change}),
                         trigger=C.Trigger.USER_CHAT, when_idle=True)  # never joins a draft turn
         return drops + [C.Send(msg), C.SetDiscussion(a.id, replace(d, phase=P.APPLYING, apply_message=msg.id)),
                         C.CommandReply(ev.id)]
