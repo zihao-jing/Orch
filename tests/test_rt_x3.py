@@ -8,6 +8,7 @@ from rt_helpers import *  # noqa: F403
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -18,7 +19,7 @@ from urllib.parse import urlparse
 
 from orch.runtime.adapters import make
 from orch.runtime.adapters.base import AdapterError
-from orch.runtime.adapters.opencode import OpenCodeAdapter, catalog_from
+from orch.runtime.adapters.opencode import CLOSED, OpenCodeAdapter, _fail, _start_time, catalog_from
 
 
 class Fake:
@@ -27,10 +28,14 @@ class Fake:
     def __init__(self):
         self.sessions = {}  # sid -> {"model": {}, "records": [], "inbox": [], "permissions": []}
         self.jobs = []  # entries of the job list (whole database, ghosts included)
-        self.shells = set()  # ids GET /api/shell answers 200 for
+        self.shells = {}  # shell id -> Shell.Info (GET /api/shell/{id} answers 200 for these)
         self.calls = []
         self.t = 1_000_000
         self.active = set()
+        self.permissions = []  # pending Permission.Request entries
+        self.forms = []  # pending Form.Info entries
+        self.replies = []  # (sessionID, requestID, body) of each permission reply
+        self.info_ok = True  # GET /api/info answers 200
 
     def rec(self, sid, kind, **kw):
         self.t += 10
@@ -61,7 +66,11 @@ def handler_for(fake, pw):
             parts = u.path.strip("/").split("/")
             fake.calls.append((method, u.path, body))
             if u.path == "/api/info":
-                return self._send(200, {"version": "2.3.2"})
+                return self._send(200 if fake.info_ok else 500, {"version": "2.3.2"})
+            if u.path == "/api/permission/request":
+                return self._send(200, {"location": {}, "data": fake.permissions})
+            if u.path == "/api/form":
+                return self._send(200, {"location": {}, "data": fake.forms})
             if u.path == "/api/model":
                 return self._send(200, {"data": [
                     {"modelID": "m1", "providerID": "p", "name": "M1", "enabled": True,
@@ -77,8 +86,10 @@ def handler_for(fake, pw):
             if u.path == "/api/experimental/job":
                 return self._send(200, {"data": fake.jobs})
             if parts[:2] == ["api", "shell"]:
-                hit = parts[2] in fake.shells
-                return self._send(200 if hit else 404, {"pid": 1, "status": "running"} if hit else {"_tag": "ShellNotFoundError"})
+                info = fake.shells.get(parts[2])
+                if info is None:
+                    return self._send(404, {"_tag": "ShellNotFoundError"})
+                return self._send(200, {"location": {}, "data": info})
             if parts[:3] == ["api", "session", parts[2] if len(parts) > 2 else ""] and len(parts) > 2:
                 s = fake.sessions.get(parts[2])
                 if s is None:
@@ -98,6 +109,13 @@ def handler_for(fake, pw):
                     return self._send(200, {"data": s["inbox"]})
                 if rest == ["compact"]:
                     return self._send(200, {"data": {}})
+                if rest[0] == "permission" and len(rest) == 3:  # item 1: the reply to a pending request
+                    fake.replies.append((parts[2], rest[1], body))
+                    fake.permissions = [p for p in fake.permissions if p["id"] != rest[1]]
+                    return self._send(204)
+                if rest[0] == "form" and len(rest) == 2 and method == "DELETE":  # item 1: a form is cancelled
+                    fake.forms = [f for f in fake.forms if f["id"] != rest[1]]
+                    return self._send(204)
                 if rest[0] == "message" and len(rest) == 2:
                     hit = [r for r in s["records"] if r["id"] == rest[1]]
                     return self._send(200 if hit else 404, hit[0] if hit else {"_tag": "MessageNotFoundError"})
@@ -125,6 +143,7 @@ class FakeAdapter(OpenCodeAdapter):
         self.fake, self.httpd, self.sleeper = fake, None, None
 
     def _spawn(self, argv, env, cwd, log):
+        self.env = env
         port = int(argv[argv.index("--port") + 1])
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler_for(self.fake, env["OPENCODE_SERVER_PASSWORD"]))
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -138,6 +157,15 @@ class FakeAdapter(OpenCodeAdapter):
         if self.sleeper and self.sleeper.poll() is None:
             self.sleeper.kill()
             self.sleeper.wait()
+
+
+def shell(sid, status="running", exit=None, pid=4242):
+    """A Shell.Info as GET /api/shell/{id} answers it (spec: data is the record)."""
+    info = {"id": sid, "status": status, "command": "sleep 9", "cwd": "/", "shell": "zsh", "file": "/tmp/f",
+            "pid": pid, "metadata": {}, "time": {"started": 1000, "completed": 2000}}
+    if exit is not None:
+        info["exit"] = exit
+    return info
 
 
 class Base(unittest.TestCase):
@@ -318,11 +346,13 @@ class TestTurns(Base):
             end = self.of(self.drain(a), TurnEnded)[0]
             self.assertEqual((end.status, end.error), (TurnStatus.ERROR, want), err)
 
-    def test_interrupted_is_stopped(self):
+    def test_item12_interrupted_outcome_is_a_transient_error(self):
+        """Item 12: nobody here interrupts, so an interrupted outcome is ERROR TRANSIENT (Orch's stop is STOPPED)."""
         a, _ = self.started()
         self.user("x0123456789ab")
         self.idle(outcome="interrupted")
-        self.assertEqual(self.of(self.drain(a), TurnEnded)[0].status, TurnStatus.STOPPED)
+        end = self.of(self.drain(a), TurnEnded)[0]
+        self.assertEqual((end.status, end.error), (TurnStatus.ERROR, ErrorClass.TRANSIENT))
 
     def test_compaction_is_session_changed_and_no_turn(self):
         a, _ = self.started()
@@ -341,20 +371,26 @@ class TestJobs(Base):
                              metadata={"source": "shell", "shellID": shell, "state": "completed", "exit": exit_code})
 
     def test_JOB_2_job_listed_before_turn_end_is_started_and_filtered_by_session_and_ghost(self):
+        """Item 5: the start is the record's background tool; item 7: the list filters by session and ghosts."""
         a, _ = self.started()
         self.drain(a)
-        self.fake.shells = {"sh_a"}
+        self.fake.shells = {"sh_a": shell("sh_a"), "sh_o": shell("sh_o")}
         self.fake.jobs = [
-            {"id": "sh_a", "sessionID": "ses_1", "status": "running", "command": "sleep 9", "time": {"started": 5000}},
-            {"id": "sh_ghost", "sessionID": "ses_1", "status": "running", "command": "x", "time": {"started": 1}},
-            {"id": "sh_o", "sessionID": "ses_other", "status": "running", "command": "y", "time": {"started": 1}}]
-        self.fake.shells |= {"sh_o"}
+            {"id": "sh_a", "shellID": "sh_a", "kind": "shell", "sessionID": "ses_1", "status": "running",
+             "command": "sleep 9", "time": {"started": 5000}},
+            {"id": "sh_ghost", "shellID": "sh_ghost", "kind": "shell", "sessionID": "ses_1", "status": "running",
+             "command": "x", "time": {"started": 1}},
+            {"id": "sh_o", "shellID": "sh_o", "kind": "shell", "sessionID": "ses_other", "status": "running",
+             "command": "y", "time": {"started": 1}}]
         self.user("x0123456789ab")
-        self.reply("started")
+        self.reply("", content=[{"type": "tool", "id": "t1", "name": "shell", "state": {
+            "status": "running", "input": {"command": "sleep 9", "background": True},
+            "metadata": {"shellID": "sh_a"}}}])
         self.idle()
         ev = self.drain(a)
         self.assertEqual([e.job.id for e in self.of(ev, JobStarted)], ["worker-1/sh_a"])
-        self.assertEqual([type(e).__name__ for e in ev][-2:], ["JobStarted", "TurnEnded"])
+        names = [type(e).__name__ for e in ev]
+        self.assertLess(names.index("JobStarted"), names.index("TurnEnded"))
         self.assertEqual([j.id for j in a.jobs()], ["worker-1/sh_a"])
 
     def test_JOB_4_server_wake_is_a_turn_after_job_ended(self):
@@ -406,19 +442,23 @@ class TestRestart(Base):
         self.assertFalse(keys & {e.key for e in ev})
 
     def test_REC_7_a_turn_open_at_the_restart_ends_once(self):
+        """Item 3: the saved position stands before the open turn's first record, so the turn is read again from its
+        start (the store drops the repeated start by its uid) and it ends once."""
         a, proc = self.started()
         self.user("x0123456789ab")
         ev = self.drain(a)
-        pos = [e.pos for e in ev if e.pos][-1]
-        self.assertEqual(pos.split(":")[1], "1")
+        start = self.of(ev, TurnStarted)[0]
+        self.assertEqual(start.pos, "")  # before the turn: the start of the session
         a.detach()
         self.reply("done")
         self.idle()
         b = self.adapter()
-        proc.read_pos = pos
+        proc.read_pos = ""
         self.assertTrue(b.reconnect(proc))
         ev = self.drain(b)
-        self.assertEqual([type(e).__name__ for e in ev if not isinstance(e, (Text, ModelReported))], ["TurnEnded"])
+        names = [type(e).__name__ for e in ev if not isinstance(e, (Text, ModelReported))]
+        self.assertEqual(names, ["TurnStarted", "TurnEnded"])
+        self.assertEqual(self.of(ev, TurnStarted)[0].uid, start.uid)
 
     def test_REC_8_start_joins_the_server_an_earlier_start_left(self):
         a, proc = self.started()
@@ -504,6 +544,225 @@ class TestCatalog(unittest.TestCase):
         out = catalog_from(data)
         self.assertEqual([(m.id, m.efforts) for m in out], [("p/m1", ["low", "high"])])
         self.assertNotIn("SECRET", repr(out))
+
+
+class TestItems(Base):
+    """One test per item of the X3 fix list; the item number is in each name and docstring."""
+
+    def test_item1_session_has_deny_rules_and_dir_allows_only_and_server_gets_the_config(self):
+        """Item 1: no "*" allow in the session; disallowed tools deny; add_dirs allow external_directory only."""
+        self.spec.choice = Choice(backend="opencode", provider="p", model="m1",
+                                  options={"disallowed_tools": "edit, webfetch", "add_dirs": "/tmp/extra"})
+        a, _ = self.started()
+        perms = self.fake.sessions["ses_1"]["permissions"]
+        self.assertIn({"action": "edit", "resource": "*", "effect": "deny"}, perms)
+        self.assertIn({"action": "external_directory", "resource": "/tmp/extra/*", "effect": "allow"}, perms)
+        self.assertNotIn({"action": "*", "resource": "*", "effect": "allow"}, perms)
+        self.assertTrue(all(r["effect"] == "deny" or r["action"] == "external_directory" for r in perms))
+        cfg = json.loads(a.env["OPENCODE_CONFIG_CONTENT"])
+        self.assertIn({"action": "edit", "resource": "*", "effect": "deny"}, cfg["permissions"])
+
+    def test_item1_pending_requests_are_answered_once_when_auto_else_rejected_and_forms_cancelled(self):
+        """Item 1: each poll answers the requests of the session with once (auto) or reject; forms are cancelled."""
+        a, _ = self.started()
+        self.fake.permissions = [{"id": "per_1", "sessionID": "ses_1", "action": "edit", "resources": ["x"]}]
+        self.fake.forms = [{"id": "frm_1", "sessionID": "ses_1", "title": "q"}]
+        self.user("x0123456789ab")
+        self.drain(a)
+        self.assertEqual(self.fake.replies, [("ses_1", "per_1", {"decision": "once"})])
+        self.assertTrue(any(c[0] == "DELETE" and c[1].endswith("/form/frm_1") for c in self.fake.calls))
+        a.auto = False
+        self.fake.permissions = [{"id": "per_2", "sessionID": "ses_1", "action": "edit", "resources": ["x"]}]
+        self.drain(a)
+        self.assertEqual(self.fake.replies[-1][:2], ("ses_1", "per_2"))
+        self.assertEqual(self.fake.replies[-1][2]["decision"], "reject")
+        self.assertIn("message", self.fake.replies[-1][2])
+
+    def test_item2_stop_saves_a_closed_position_and_a_later_end_is_not_a_second_end(self):
+        """Item 2: stop() of an open turn saves CLOSED; after a restart the closed turn's records give no second end."""
+        a, _ = self.started()
+        self.user("x0123456789ab")
+        self.drain(a)
+        a.stop()
+        ev = self.drain(a)
+        self.assertEqual(self.of(ev, TurnEnded)[0].pos, CLOSED)
+        self.assertEqual(ev[-1].pos, CLOSED)
+        a.start(self.spec, SessionRef("ses_1"))
+        self.drain(a)
+        self.idle(outcome="interrupted")  # the record of the turn Orch stopped
+        self.user("x0123456789ac")
+        self.reply("second")
+        self.idle()
+        ev = self.drain(a)
+        self.assertEqual([e.text for e in self.of(ev, TurnEnded)], ["second"])
+
+    def test_item2_failed_reconnect_reads_what_was_missed_before_the_end_is_reported(self):
+        """Item 2: the server does not answer the check, so the reconnect fails; the record written meanwhile is
+        read first, and the turn ends as its real end, not as an error."""
+        a, proc = self.started()
+        self.user("x0123456789ab")
+        self.drain(a)
+        a.detach()
+        self.idle()
+        self.fake.info_ok = False
+        b = self.adapter()
+        proc.read_pos = ""
+        self.assertFalse(b.reconnect(proc))
+        ev = self.drain(b)
+        ends = self.of(ev, TurnEnded)
+        self.assertEqual([(e.status, e.error) for e in ends], [(TurnStatus.OK, None)])
+        self.assertEqual([type(e).__name__ for e in ev][-1], "ProcessExited")
+        self.assertFalse(ev[-1].reported)
+
+    def test_item3_position_stands_before_the_open_turn(self):
+        """Item 3: the open turn's saved position is the key of the record before its first one (the idle of the
+        turn before), and the turn stays open with that position."""
+        a, _ = self.started()
+        self.user("x0123456789ab")
+        self.reply("one")
+        self.idle()
+        self.drain(a)
+        self.user("x0123456789ac")
+        ev = self.drain(a)
+        before = self.fake.sessions["ses_1"]["records"][2]  # the idle record of the turn before
+        self.assertEqual(self.of(ev, TurnStarted)[0].pos, f"{before['time']['created']}:{before['id']}")
+        self.assertTrue(a._open)
+
+    def test_item4_text_of_every_step_joins_the_turn_reply(self):
+        """Item 4: a later step does not replace an earlier reply; the turn's text is all the steps' text."""
+        a, _ = self.started()
+        self.user("x0123456789ab")
+        self.reply("first step")
+        self.reply("final step")
+        self.idle()
+        self.assertEqual(self.of(self.drain(a), TurnEnded)[0].text, "first step\n\nfinal step")
+
+    def test_item5_job_start_comes_from_the_record_with_its_shell_id_in_record_order(self):
+        """Item 5: JobStarted uid is jobstart:<shellID>; a foreground tool starts no job."""
+        a, _ = self.started()
+        self.user("x0123456789ab")
+        self.reply("", content=[
+            {"type": "tool", "id": "t1", "name": "shell", "state": {"status": "running", "input": {
+                "command": "sleep 5", "background": True}, "metadata": {"shellID": "sh_r"}}},
+            {"type": "tool", "id": "t2", "name": "shell", "state": {"status": "running", "input": {
+                "command": "ls"}, "metadata": {"shellID": "sh_no"}}}])
+        js = self.of(self.drain(a), JobStarted)
+        self.assertEqual([(j.job.id, j.uid) for j in js], [("worker-1/sh_r", "jobstart:sh_r")])
+
+    def test_item6_known_job_missing_from_the_list_ends_on_exit_and_a_404_gives_nothing(self):
+        """Item 6: exited with an exit code gives an ended job; a 404 leaves the known job alone."""
+        a, _ = self.started()
+        self.user("x0123456789ab")
+        self.reply("", content=[
+            {"type": "tool", "id": "t1", "name": "shell", "state": {"status": "running", "input": {
+                "command": "a", "background": True}, "metadata": {"shellID": "sh_k"}}},
+            {"type": "tool", "id": "t2", "name": "shell", "state": {"status": "running", "input": {
+                "command": "b", "background": True}, "metadata": {"shellID": "sh_g"}}}])
+        self.drain(a)
+        self.fake.jobs = []
+        self.fake.shells = {"sh_k": shell("sh_k", status="exited", exit=3)}
+        jobs = a.jobs()
+        self.assertEqual([(j.id, j.state, j.exit_code) for j in jobs], [("worker-1/sh_k", JobState.ENDED, 3)])
+        self.assertIn("worker-1/sh_g", a._known)
+
+    def test_item7_subagent_job_runs_while_its_child_session_is_active_and_ends_by_job_id(self):
+        """Item 7: a subagent is checked by its child session, never by GET /api/shell; its end is metadata.jobID."""
+        a, _ = self.started()
+        self.drain(a)
+        self.fake.jobs = [
+            {"id": "task_1", "kind": "subagent", "sessionID": "ses_1", "childSessionID": "ses_c", "status": "running",
+             "agent": "x", "description": "d", "time": {"started": 5000}},
+            {"id": "task_2", "kind": "subagent", "sessionID": "ses_1", "childSessionID": "ses_d", "status": "running",
+             "agent": "x", "description": "d", "time": {"started": 5000}}]
+        self.fake.active = {"ses_c"}
+        self.assertEqual([j.id for j in a.jobs()], ["worker-1/task_1"])
+        self.assertFalse(any(c[1].startswith("/api/shell/task") for c in self.fake.calls))
+        self.fake.rec("ses_1", "synthetic", text="done", metadata={"source": "task", "jobID": "task_1", "exit": 0})
+        ended = self.of(self.drain(a), JobEnded)
+        self.assertEqual([(e.uid, e.job_id) for e in ended], [("jobend:task_1", "worker-1/task_1")])
+
+    def test_item8_a_pid_is_signalled_only_when_its_start_time_matches(self):
+        """Item 8: a wrong start time is no signal; the right one ends the process."""
+        p = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        a = self.adapter()
+        a._signal(p.pid, signal.SIGKILL, pstart=12345.0)
+        self.assertIsNone(p.poll())
+        a._signal(p.pid, signal.SIGKILL, pstart=_start_time(p.pid))
+        self.assertEqual(p.wait(timeout=5), -signal.SIGKILL)
+
+    def test_item9_job_pid_is_data_pid_of_a_running_shell_with_its_start_time(self):
+        """Item 9: the pid is data.data.pid (running, pid > 1) and it comes with its start time."""
+        a, _ = self.started()
+        self.fake.shells = {"sh_p": shell("sh_p", pid=os.getpid())}
+        self.fake.jobs = [{"id": "sh_p", "shellID": "sh_p", "kind": "shell", "sessionID": "ses_1",
+                           "status": "running", "command": "x", "time": {"started": 1}}]
+        pids = a._job_pids()
+        self.assertEqual([p for p, _ in pids], [os.getpid()])
+        self.assertGreater(pids[0][1], 0)
+
+    def test_item10_pid_port_and_password_are_written_before_the_server_is_awaited(self):
+        """Item 10: server.json has pid and port, and the password file exists, before _wait_up."""
+        a = self.adapter()
+        seen = {}
+        wait = a._wait_up
+
+        def probe(popen, port, pw, cwd):
+            seen["info"] = a._read_info()
+            seen["pw"] = (a.dir / "password").read_text()
+            wait(popen, port, pw, cwd)
+        a._wait_up = probe
+        a.start(self.spec, None)
+        self.assertEqual((seen["info"]["pid"], seen["info"]["port"]), (a.pid, a.port))
+        self.assertEqual(seen["pw"], a.pw)
+
+    def test_item11_a_reset_to_the_default_variant_is_sent(self):
+        """Item 11: the default is the fallback on both sides, so a session on a variant is reset to the default."""
+        a, _ = self.started()
+        self.fake.sessions["ses_1"]["model"]["variant"] = "low"
+        self.spec.choice = Choice(backend="opencode", provider="p", model="m1", effort="default")
+        b = self.adapter()
+        b.start(self.spec, SessionRef("ses_1"))
+        self.assertEqual(self.fake.sessions["ses_1"]["model"]["variant"], "default")
+        sent = [c for c in self.fake.calls if c[1] == "/api/session/ses_1/model"]
+        self.assertEqual(len(sent), 1)
+        c = self.adapter()
+        c.start(self.spec, SessionRef("ses_1"))
+        self.assertEqual(len([x for x in self.fake.calls if x[1] == "/api/session/ses_1/model"]), 1)
+
+    def test_item12_errors_by_type_retry_after_and_inactivity_as_transient(self):
+        """Item 12: rate-limit, transport and inactivity are TRANSIENT, quota is BILLING, retryAfterMs is retry_after."""
+        a, _ = self.started()
+        self.drain(a)
+        cases = [({"type": "provider.rate-limit", "message": "slow", "retryAfterMs": 4000}, ErrorClass.TRANSIENT, 4.0),
+                 ({"type": "transport", "message": "reset"}, ErrorClass.TRANSIENT, 0.0),
+                 ({"type": "inactivity", "message": "no output"}, ErrorClass.TRANSIENT, 0.0),
+                 ({"type": "quota", "message": "limit reached"}, ErrorClass.BILLING, 0.0)]
+        for i, (err, want, wait) in enumerate(cases):
+            self.user(f"x0123456789c{i}")
+            self.idle(outcome="failed", error=err)
+            end = self.of(self.drain(a), TurnEnded)[0]
+            self.assertEqual((end.status, end.error, end.retry_after), (TurnStatus.ERROR, want, wait), err)
+
+    def test_item13_an_assistant_record_without_a_turn_opens_one_and_a_404_needs_its_tag(self):
+        """Item 13: an assistant record with no open turn opens one; a 404 without the session tag is not a lost session."""
+        a, _ = self.started()
+        self.drain(a)
+        self.reply("hi")
+        self.idle()
+        ev = self.drain(a)
+        self.assertEqual([type(e).__name__ for e in ev][:1], ["TurnStarted"])
+        self.assertEqual(self.of(ev, TurnEnded)[0].text, "hi")
+        self.assertEqual(_fail(404, {"message": "Session not found"}, "x").error, ErrorClass.OTHER)
+        self.assertEqual(_fail(404, {"_tag": "SessionNotFoundError"}, "x").error, ErrorClass.SESSION_LOST)
+
+    def test_item13_server_log_is_0600_in_a_0700_folder_and_both_password_names_are_set(self):
+        """Item 13: the log is private, its folder too; OPENCODE_PASSWORD is set with OPENCODE_SERVER_PASSWORD."""
+        a, _ = self.started()
+        folder = Path(self.tmp) / "cli" / "worker-1"
+        self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((folder / "server.log").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(a.env["OPENCODE_PASSWORD"], a.env["OPENCODE_SERVER_PASSWORD"])
 
 
 if __name__ == "__main__":

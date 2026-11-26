@@ -3,15 +3,22 @@
 One server per agent, on its own port with its own password, in `<run_dir>/cli/<agent>/` (server.json, password, log).
 Orch may leave and join it again: the server keeps running turns and jobs by itself.
 
-There is no event replay, so nothing here depends on a live event stream. Every event is derived from the session's
-message records (user, synthetic, assistant, idle, compaction), read in time order from a saved position, and its `uid`
-comes from the record id. A restart, a reconnect and a live poll therefore give the same events, and the store drops
-repeats. A message is received when the POST returns (the receipt) and taken when its user record appears (delivered).
-`pos` is "<created ms>:<1 if a turn was open after it>:<id>" of the last record read.
+There is no event replay, so nothing depends on a live event stream. Every event is derived from the session's message
+records (user, synthetic, assistant, idle, compaction), read in time order from a saved position, and its `uid` comes
+from the record id. A restart, a reconnect and a live poll therefore give the same events and the store drops repeats.
+The saved position (`pos`, "<created ms>:<id>") always stands at the last record after which no turn was open, so an
+open turn is read again from its first record and no turn is lost or ended twice.
 
-Ids: a message id "x<12 hex>" is sent as "msg_x<12 hex>" (the client chooses the id; a repeat is not a second message).
-Jobs: the job list covers the whole database and still shows jobs a dead server left, so jobs are filtered by session
-and each is checked with GET /api/shell/{id}.
+A message is received when the POST returns (the receipt) and taken when its user record appears. Its id "x<12 hex>" is
+sent as "msg_x<12 hex>" (the client chooses the id; a repeat is not a second message).
+
+Permissions: a session gets only deny rules (a later "allow *" would override the user's own config, the server takes
+the last matching rule). Requests that still ask are answered each poll like `opencode run` does: "once" when the
+agent is `auto` (default) or `permission_mode: bypassPermissions`, else rejected; question forms are cancelled.
+
+Jobs: the job list covers the whole database and still shows jobs a dead server left, so it is filtered by session and
+each shell job is checked with GET /api/shell/{id}. A process is only signalled after its start time was compared with
+the one saved when it was started.
 """
 from __future__ import annotations
 
@@ -34,22 +41,27 @@ from urllib.parse import quote
 from ..contracts import (AgentEvent, AgentSpec, Caps, Choice, ErrorClass, Job, JobEnded, JobNoticed, JobStarted,
                          JobState, ModelInfo, ModelReported, ProcRef, ProcessExited, Received, Said, SessionChange,
                          SessionChanged, SessionRef, Text, ToolEnd, ToolStart, TurnEnded, TurnStarted, TurnStatus,
-                         USER, redact)
+                         USER)
 from .base import AdapterError, BaseAdapter, classify_error, job_id
 
 OURS = re.compile(r"^x[0-9a-f]{12}$")
-ALLOW = [{"action": "*", "resource": "*", "effect": "allow"}]
-# JOB-1: only simple forms are caught (probe 9); later rules win, so these come after the allow
+# JOB-1: only simple forms are caught (probe 9); a deny rule never widens what the user's own config allows
 DENY = [{"action": "shell", "resource": r, "effect": "deny"} for r in ("*nohup*", "*setsid*", "*&")]
 SESSION_GONE = re.compile(r"session not found|SessionNotFound", re.I)
+ENDED_SHELL = ("exited", "timeout", "killed")
+TRANSIENT_TYPES = ("rate", "limit", "transport", "timeout", "internal", "overload", "network", "unavailable",
+                   "inactiv", "supersed")
+BILLING_TYPES = ("quota", "billing", "credit", "payment")
+# item 2: the position of a turn that Orch closed (stop, server exit): nothing before now is read again
+CLOSED = ":0:"
 
 
 def _request(port: int, pw: str, cwd: str, method: str, path: str, body: Any = None,
              timeout: float = 10.0) -> Tuple[int, Any]:
     """One HTTP call to a local server; (status, parsed JSON or None). Raises AdapterError when it cannot be reached."""
     headers = {"Authorization": "Basic " + base64.b64encode(f"opencode:{pw}".encode()).decode()}
-    if cwd and cwd.isascii():
-        headers["x-opencode-directory"] = cwd
+    if cwd:
+        headers["x-opencode-directory"] = quote(cwd, safe="/")
     data = None
     if body is not None:
         data, headers["Content-Type"] = json.dumps(body), "application/json"
@@ -68,10 +80,14 @@ def _request(port: int, pw: str, cwd: str, method: str, path: str, body: Any = N
         return resp.status, raw
 
 
+def _tag(data: Any) -> str:
+    return str(data.get("_tag", "")) if isinstance(data, dict) else ""
+
+
 def _fail(status: int, data: Any, what: str) -> AdapterError:
     text = (data.get("message") if isinstance(data, dict) else str(data or "")) or ""
     if status == 404:
-        kind = ErrorClass.SESSION_LOST if SESSION_GONE.search(json.dumps(data) if data else "") else ErrorClass.OTHER
+        kind = ErrorClass.SESSION_LOST if SESSION_GONE.search(_tag(data)) else ErrorClass.OTHER
     elif status == 429 or status >= 500:
         kind = ErrorClass.TRANSIENT
     else:
@@ -85,6 +101,10 @@ def _created(rec: Dict[str, Any]) -> int:
     return int(c) if isinstance(c, (int, float)) else 0
 
 
+def _key(rec: Dict[str, Any]) -> str:
+    return f"{_created(rec)}:{rec.get('id') or ''}"
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -96,35 +116,75 @@ def _text_of(rec: Dict[str, Any]) -> str:
     return "\n\n".join(x for x in parts if x)
 
 
+def _start_time(pid: int) -> float:
+    """When a process started (epoch seconds), 0.0 if it cannot be told: pid and start time identify a process."""
+    try:
+        out = " ".join(subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                                      timeout=3, env={**os.environ, "LC_ALL": "C"}).stdout.split())
+        return time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def _merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep merge as today's backend does it: permission rules are ordered lists that add up."""
+    out = dict(a)
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge(out[k], v)
+        elif isinstance(v, list) and isinstance(out.get(k), list) and k == "permissions":
+            out[k] = out[k] + v
+        else:
+            out[k] = v
+    return out
+
+
+def _tool_rules(o: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The agent's own options as rules: disallowed_tools deny, add_dirs allow outside access to those folders only."""
+    raw = o.get("disallowed_tools")
+    tools = raw if isinstance(raw, list) else str(raw or "").split(",")
+    rules = [{"action": str(t).strip(), "resource": "*", "effect": "deny"} for t in tools if str(t).strip()]
+    dirs = o.get("add_dirs")
+    for d in (shlex.split(dirs) if isinstance(dirs, str) else [str(x) for x in dirs or []]):
+        rules.append({"action": "external_directory", "resource": os.path.join(os.path.expanduser(d), "*"),
+                      "effect": "allow"})
+    return rules
+
+
 class OpenCodeAdapter(BaseAdapter):
     backend = "opencode"
     caps = Caps(sends_while_writing=True, reconnects=True, job_record=True, wakes_itself=True, receipts=True,
                 shares_terminal=True, compacts=True, stops_jobs=False)
     poll_every = 1.0  # seconds between two reads of the session
+    stop_grace = 5.0  # seconds from SIGTERM to SIGKILL
 
     def __init__(self, clock: Any, exe: str = "opencode"):
         super().__init__(clock)
         self.exe = exe
         self.agent = self.sid = self.cwd = self.pw = ""
         self.port = self.pid = 0
+        self.pstart = 0.0
+        self.auto = True
         self.dir = Path(".")
         self.popen: Any = None
         self.attached = self._gone = False
+        self._stopping: Optional[Tuple[float, List[int]]] = None  # (SIGKILL deadline, job pids)
         self._queue: List[AgentEvent] = []
         self._reset_reading("")
 
     def _reset_reading(self, pos: str) -> None:
-        self._pos = pos
-        bits = pos.split(":")
-        self._open = len(bits) > 1 and bits[1] == "1"
-        self._seen: set = {bits[2]} if len(bits) > 2 and bits[2] else set()  # the record the position stands at
-        self._asst: Dict[str, Dict[str, Any]] = {}
+        self._anchor = pos
+        self._last_key = pos
+        self._seen: set = {pos.split(":", 1)[1]} if ":" in pos else set()  # the record the position stands at
+        self._open = False
+        self._asst: Dict[str, int] = {}
+        self._texts: Dict[str, str] = {}
         self._tools: Dict[str, bool] = {}
-        self._announced: set = set()
+        self._known: Dict[str, Job] = {}
+        self._kind: Dict[str, str] = {}
         self._ended: Dict[str, Job] = {}
         self._compacted: set = set()
         self._model = ""
-        self._turn_text = ""
         self._last_poll = -1e18
         self._exit_reported = self._lost = False
 
@@ -143,22 +203,26 @@ class OpenCodeAdapter(BaseAdapter):
         except FileNotFoundError as e:
             raise AdapterError(f"opencode executable not found: {e}", ErrorClass.MISSING_CLI) from e
 
-    def _launch(self, cwd: str, extra_env: Dict[str, str], log_path: Path) -> Tuple[Any, int, str]:
-        port, pw = _free_port(), secrets.token_urlsafe(24)
-        env = {**os.environ, **extra_env, "OPENCODE_SERVER_PASSWORD": pw}
-        with open(log_path, "ab") as log:
-            popen = self._spawn([self.exe, "serve", "--hostname", "127.0.0.1", "--port", str(port)], env, cwd, log)
+    def _spawn_server(self, cwd: str, extra_env: Dict[str, str], log_path: Path, port: int, pw: str) -> Any:
+        env = {**os.environ, **extra_env, "OPENCODE_SERVER_PASSWORD": pw, "OPENCODE_PASSWORD": pw}
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.chmod(log_path, 0o600)
+        with os.fdopen(fd, "ab") as log:
+            return self._spawn([self.exe, "serve", "--hostname", "127.0.0.1", "--port", str(port)], env, cwd, log)
+
+    def _wait_up(self, popen: Any, port: int, pw: str, cwd: str) -> None:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if popen.poll() is not None:
                 raise AdapterError("opencode serve exited at startup (see its log)", ErrorClass.TRANSIENT)
             try:
                 if _request(port, pw, cwd, "GET", "/api/info", timeout=2)[0] == 200:
-                    return popen, port, pw
+                    return
             except AdapterError:
                 pass
             time.sleep(0.2)
-        self._kill_group(popen.pid)
+        if popen.poll() is None:  # our own child, not reaped: its pid is ours
+            self._signal(popen.pid, signal.SIGKILL, verified=True)
         raise AdapterError("opencode serve did not come up in 30 s", ErrorClass.TRANSIENT)
 
     def _info_path(self) -> Path:
@@ -167,7 +231,9 @@ class OpenCodeAdapter(BaseAdapter):
     def _write_info(self, **change: Any) -> None:
         info = {**self._read_info(), **change}
         tmp = self._info_path().with_suffix(".tmp")
-        tmp.write_text(json.dumps(info))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(info))
         os.replace(tmp, self._info_path())
 
     def _read_info(self) -> Dict[str, Any]:
@@ -176,7 +242,8 @@ class OpenCodeAdapter(BaseAdapter):
         except (OSError, ValueError):
             return {}
 
-    def _pid_alive(self, pid: int) -> bool:
+    def _live(self, pid: int, pstart: float) -> bool:
+        """The process is ours and running: same pid and same start time (never a reused pid)."""
         if not pid:
             return False
         if self.popen is not None and self.popen.pid == pid:
@@ -186,8 +253,17 @@ class OpenCodeAdapter(BaseAdapter):
         except ProcessLookupError:
             return False
         except PermissionError:
-            return True
-        return True
+            pass
+        return pstart > 0 and abs(_start_time(pid) - pstart) <= 2
+
+    def _signal(self, pid: int, sig: int, verified: bool = False, pstart: float = 0.0) -> None:
+        """Signal a server (its whole group if it leads one) only when it is verified to be ours."""
+        if not pid or not (verified or self._live(pid, pstart)):
+            return
+        try:
+            os.killpg(pid, sig) if os.getpgid(pid) == pid else os.kill(pid, sig)
+        except OSError:
+            pass
 
     def _adopt(self) -> bool:
         """Join the server of server.json if it lives and answers to its own password."""
@@ -196,54 +272,78 @@ class OpenCodeAdapter(BaseAdapter):
             pw = (self.dir / "password").read_text().strip()
         except OSError:
             return False
-        if not info.get("pid") or not self._pid_alive(int(info["pid"])):
+        pid, pstart = int(info.get("pid") or 0), float(info.get("pstart") or 0)
+        if not self._live(pid, pstart):
             return False
         try:
             ok = _request(int(info["port"]), pw, info.get("cwd", ""), "GET", "/api/info", timeout=3)[0] == 200
-        except AdapterError:
+        except (AdapterError, KeyError, ValueError):
             ok = False
         if ok:
-            self.pid, self.port, self.pw, self.cwd, self.attached = int(info["pid"]), int(info["port"]), pw, \
-                info.get("cwd", ""), True
+            self.pid, self.pstart, self.port, self.pw = pid, pstart, int(info["port"]), pw
+            self.cwd, self.auto, self.attached = info.get("cwd", ""), bool(info.get("auto", True)), True
         return ok
-
-    def _kill_group(self, pid: int) -> None:
-        """SIGKILL the server's group, only when the server leads its own (never a shared one)."""
-        try:
-            os.killpg(pid, signal.SIGKILL) if os.getpgid(pid) == pid else os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-
-    def _term(self, pid: int) -> None:
-        try:
-            os.killpg(pid, signal.SIGTERM) if os.getpgid(pid) == pid else os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
 
     # ------------------------------------------------------------------------------------------------ start
 
+    def _server_config(self, spec: AgentSpec) -> Tuple[str, Optional[str]]:
+        """(OPENCODE_CONFIG_CONTENT or "", the agent name): today's OpenCodeBackend.config() for this agent."""
+        o = spec.choice.options or {}
+        cfg: Dict[str, Any] = {}
+        agent = str(o["agent"]) if o.get("agent") else None
+        if o.get("system_prompt_mode") == "replace" and spec.system_prompt:
+            agent = agent or "orch-" + re.sub(r"[^A-Za-z0-9_-]", "-", spec.role.value or "agent")
+            cfg["agents"] = {agent: {"mode": "primary", "system": spec.system_prompt}}
+        rules = _tool_rules(o)
+        if rules:
+            cfg["permissions"] = rules
+        if isinstance(o.get("config"), dict):
+            cfg = _merge(cfg, o["config"])
+        if not cfg:
+            return "", agent
+        own = spec.choice.env.get("OPENCODE_CONFIG_CONTENT", os.environ.get("OPENCODE_CONFIG_CONTENT"))
+        try:
+            base = json.loads(own) if own else {}
+        except ValueError:
+            base = {}
+        return json.dumps(_merge(base if isinstance(base, dict) else {}, cfg)), agent
+
     def start(self, spec: AgentSpec, session: Optional[SessionRef]) -> ProcRef:
+        o = spec.choice.options or {}
         self.spec, self.agent, self.cwd, self._gone = spec, spec.agent, spec.cwd, False
+        self.exe = str(o.get("executable", self.exe))
+        self.auto = bool(o.get("auto", True)) or o.get("permission_mode") == "bypassPermissions"
         self.dir = Path(spec.run_dir or tempfile.mkdtemp(prefix="orch-oc-")) / "cli" / spec.agent
         self.dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.dir, 0o700)
+        self._finish_stop()
+        config, agent = self._server_config(spec)
         if not self._adopt():
             info = self._read_info()
-            if info.get("pid") and self._pid_alive(int(info["pid"])):
-                self._term(int(info["pid"]))  # an unanswering server of an earlier start
-            fd = os.open(self.dir / "password.new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            os.close(fd)
-            self.popen, self.port, self.pw = self._launch(spec.cwd, dict(spec.choice.env), self.dir / "server.log")
-            (self.dir / "password.new").write_text(self.pw)
-            os.replace(self.dir / "password.new", self.dir / "password")
-            self.pid, self.attached = self.popen.pid, True
-            self._write_info(pid=self.pid, port=self.port, cwd=spec.cwd, agent=spec.agent, exe=self.exe,
-                             started=self.clock.now())
+            self._signal(int(info.get("pid") or 0), signal.SIGTERM, pstart=float(info.get("pstart") or 0))
+            port, pw = _free_port(), secrets.token_urlsafe(24)
+            env = dict(spec.choice.env)
+            if config:
+                env["OPENCODE_CONFIG_CONTENT"] = config
+            self.popen = self._spawn_server(spec.cwd, env, self.dir / "server.log", port, pw)
+            self.pid, self.port, self.pw, self.attached = self.popen.pid, port, pw, True
+            self.pstart = _start_time(self.pid)
+            fd = os.open(self.dir / "password", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(pw)
+            self._write_info(pid=self.pid, pstart=self.pstart, port=port, cwd=spec.cwd, agent=spec.agent,
+                             exe=self.exe, started=self.clock.now(), auto=self.auto, sid="")
+            try:
+                self._wait_up(self.popen, port, pw, spec.cwd)
+            except AdapterError:
+                self.attached = False
+                raise
         changed = SessionChange.NEW
-        old_sid, old_pos = self.sid, self._pos
+        old_sid, old_pos = self.sid, self._anchor
         sid = session.session_id if session else ""
         if sid:
             status, data = self._call("GET", f"/api/session/{sid}")
-            if status == 404:
+            if status == 404 and SESSION_GONE.search(_tag(data)):
                 self._reset_reading("")
                 self.sid = ""
                 self._queue.append(self._ev(SessionChanged, f"lost:{sid}", stream=sid, session_id=sid,
@@ -254,22 +354,22 @@ class OpenCodeAdapter(BaseAdapter):
             self._set_model(sid, data, spec.choice)
             changed = SessionChange.RESUMED
         else:
-            sid = self._create(spec)
-            self._write_info(system_pending=bool(spec.system_prompt))
+            sid = self._create(spec, agent)
+            self._write_info(system_pending=bool(spec.system_prompt) and not agent)
             (self.dir / "system.txt").write_text(spec.system_prompt or "")
         keep = sid == old_sid and bool(old_pos)
-        self._reset_reading(old_pos if keep else "")
         self.sid = sid
         if not keep:
-            self._pos = self._boundary()
-            self._open = self._pos.split(":")[1] == "1"
+            self._reset_reading(self._boundary())
+        else:
+            self._reset_reading(self._latest() if old_pos == CLOSED else old_pos)
         self._write_info(sid=sid)
         self._queue.append(self._ev(SessionChanged, f"start:{self.pid}", session_id=sid, change=changed))
         return self._proc()
 
     def _proc(self) -> ProcRef:
-        return ProcRef(pid=self.pid, started=self.clock.now(), endpoint=f"http://127.0.0.1:{self.port}",
-                       output_file=str(self.dir / "server.log"), stream=self.sid, read_pos=self._pos)
+        return ProcRef(pid=self.pid, started=self.pstart, endpoint=f"http://127.0.0.1:{self.port}",
+                       output_file=str(self.dir / "server.log"), stream=self.sid, read_pos=self._anchor)
 
     def _model_body(self, choice: Choice) -> Dict[str, Any]:
         m: Dict[str, Any] = {"id": choice.model, "providerID": choice.provider}
@@ -277,73 +377,96 @@ class OpenCodeAdapter(BaseAdapter):
             m["variant"] = choice.effort
         return m
 
-    def _create(self, spec: AgentSpec) -> str:
+    def _create(self, spec: AgentSpec, agent: Optional[str]) -> str:
         body: Dict[str, Any] = {"location": {"directory": spec.cwd}, "title": f"orch {spec.agent}",
-                                "permissions": ALLOW + DENY}
+                                "permissions": DENY + _tool_rules(spec.choice.options or {})}
         if spec.choice.model:
             body["model"] = self._model_body(spec.choice)
+        if agent:
+            body["agent"] = agent
         status, data = self._call("POST", "/api/session", body)
         if status != 200 or not isinstance(data, dict) or not data.get("data", {}).get("id"):
             raise _fail(status, data, "create session")
-        return data["data"]["id"]
+        sid = data["data"]["id"]
+        if (spec.choice.options or {}).get("archived", True):  # kept out of the user's own session list, as today
+            self._call("PATCH", f"/api/session/{sid}", {"archived": True})
+        return sid
 
     def _set_model(self, sid: str, session: Any, choice: Choice) -> None:
         """Switch the session's model if it differs. The call accepts anything: only a turn proves the choice."""
         if not choice.model:
             return
         want, have = self._model_body(choice), ((session or {}).get("data") or {}).get("model") or {}
-        if (have.get("id"), have.get("providerID")) == (want["id"], want["providerID"]) and \
-                ("variant" not in want or have.get("variant") == want["variant"]):
+        if (have.get("id"), have.get("providerID"), have.get("variant") or "default") == \
+                (want["id"], want["providerID"], want.get("variant") or "default"):
             return
         status, data = self._call("POST", f"/api/session/{sid}/model", {"model": want})
         if status not in (200, 204):
             raise _fail(status, data, "switch model")
 
+    def _latest(self) -> str:
+        """The position of the session's newest record: nothing before it is read."""
+        recs = self._records(0, strict=False, pages=1) or []
+        return _key(recs[-1]) if recs else ""
+
     def _boundary(self) -> str:
-        """Where to start reading a session that was already there: after the last finished turn, so a running one is
-        seen from its start and the history is not replayed."""
-        recs = self._records(0, limit_pages=3) or []
+        """Where to read a session that was already there from: its newest record, or while a turn runs the last
+        finished one, so that turn is read from its start and the history is not replayed."""
+        recs = self._records(0, strict=False, pages=3) or []
         active = False
         try:
             status, data = self._call("GET", "/api/session/active")
             active = status == 200 and self.sid in ((data or {}).get("data") or {})
         except AdapterError:
             pass
-        pick = None
         for r in reversed(recs):
-            if (r.get("type") == "idle") if active else True:
-                pick = r
-                break
-        return f"{_created(pick)}:0:{pick.get('id') or ''}" if pick else "0:0:"
+            if r.get("type") == "idle" or not active:
+                return _key(r)
+        return ""
 
     def reconnect(self, proc: ProcRef) -> bool:
         self.dir = Path(proc.output_file).parent
         info = self._read_info()
-        self.agent, self.cwd, self.pid = info.get("agent", ""), info.get("cwd", ""), proc.pid
+        self.agent, self.cwd, self.pid, self.pstart = info.get("agent", ""), info.get("cwd", ""), proc.pid, proc.started
         self._reset_reading(proc.read_pos or "")
         self.sid = proc.stream
         self.popen, self._queue = None, []
-        if int(info.get("pid") or 0) == proc.pid and self._adopt():
+        same = int(info.get("pid") or 0) == proc.pid and (not proc.started or
+                                                          abs(float(info.get("pstart") or 0) - proc.started) <= 2)
+        if same and self._adopt():
+            if self._anchor == CLOSED:
+                self._reset_reading(self._latest())
             return True
         self.attached = False
+        if same:  # it may still answer: what it wrote before the failure is read before the end is reported
+            self.port, self.pw = int(info.get("port") or 0), self._password()
         self._gone = True  # events() reports the exit
         return False
+
+    def _password(self) -> str:
+        try:
+            return (self.dir / "password").read_text().strip()
+        except OSError:
+            return ""
 
     # ------------------------------------------------------------------------------------------------ sending
 
     def send(self, message_id: str, text: str) -> None:
         if not self.sid:
             raise AdapterError("no session is open", ErrorClass.OTHER)
-        info = self._read_info()
-        if info.get("system_pending"):  # no native system prompt: it goes in front of the first message
-            system = (self.dir / "system.txt").read_text() if (self.dir / "system.txt").exists() else ""
+        pending = self._read_info().get("system_pending")
+        if pending:  # no native system prompt: it goes in front of the first message
+            try:
+                system = (self.dir / "system.txt").read_text()
+            except OSError:
+                system = ""
             if system:
                 text = f"<system_instructions>\n{system}\n</system_instructions>\n\n{text}"
         status, data = self._call("POST", f"/api/session/{self.sid}/prompt",
                                   {"id": "msg_" + message_id, "text": text, "delivery": "steer"})
         if status != 200:
             raise _fail(status, data, "send")
-        if info.get("system_pending"):
+        if pending:
             self._write_info(system_pending=False)
         self._queue.append(self._ev(Received, f"recv:{message_id}", message_id=message_id))
 
@@ -370,75 +493,107 @@ class OpenCodeAdapter(BaseAdapter):
 
     def events(self) -> Iterator[AgentEvent]:
         out, self._queue = self._queue, []
-        if self.attached and self.sid:
+        if self._stopping:
+            out += self._stop_events()
+        elif self.attached and self.sid:
             out += self._poll()
         elif self._gone:
             out += self._exit_events()
         return iter(out)
 
+    def _close(self) -> str:
+        """An open turn that Orch closed: the position is CLOSED, so nothing before now is read again."""
+        self._anchor, self._open = CLOSED, False
+        return CLOSED
+
     def _exit_events(self) -> List[AgentEvent]:
         if self._exit_reported:
             return []
-        self._exit_reported = True
         out: List[AgentEvent] = []
+        if self.sid and self.port and self.pw and self._anchor != CLOSED:
+            # what the server wrote before it went (or before a failed reconnect): the real end, if there is one
+            self.attached = True
+            try:
+                out += self._process(self._records(self._since(), pages=100))
+            except AdapterError:
+                pass
+            self.attached = False
+        self._exit_reported = True
+        ended = False
         if self._open:
-            self._open = False
-            out.append(self._ev(TurnEnded, f"end:exit:{self.pid}", self._pos, status=TurnStatus.ERROR,
+            ended = True
+            out.append(self._ev(TurnEnded, f"end:exit:{self.pid}", self._close(), status=TurnStatus.ERROR,
                                 error=ErrorClass.TRANSIENT, detail="opencode server exited", session_id=self.sid))
-        out.append(self._ev(ProcessExited, f"exit:{self.pid}", self._pos, detail="opencode server exited",
-                            reported=bool(out)))
+        out.append(self._ev(ProcessExited, f"exit:{self.pid}", self._anchor, detail="opencode server exited",
+                            reported=ended))
         self.attached = False
         return out
 
+    def _since(self) -> int:
+        return int(self._anchor.split(":")[0] or 0) if self._anchor else 0
+
     def _poll(self) -> List[AgentEvent]:
-        if not self._pid_alive(self.pid):
+        if not self._live(self.pid, self.pstart):
             return self._exit_events()
         now = self.clock.now()
         if now - self._last_poll < self.poll_every:
             return []
         self._last_poll = now
         try:
-            recs = self._records(int(self._pos.split(":")[0] or 0) if self._pos else 0)
+            recs = self._records(self._since())
         except AdapterError:
             return []
-        if recs is None:  # 404: the session is gone (SES-2)
+        if recs is None:  # the server says: no such session (SES-2)
             if self._lost:
                 return []
             self._lost = True
             if self._open:
-                self._open = False
-                return [self._ev(TurnEnded, f"end:lost:{self.sid}", self._pos, status=TurnStatus.ERROR,
+                return [self._ev(TurnEnded, f"end:lost:{self.sid}", self._close(), status=TurnStatus.ERROR,
                                  error=ErrorClass.SESSION_LOST, detail="session not found", session_id=self.sid)]
             return [self._ev(SessionChanged, f"lost:{self.sid}", session_id=self.sid, change=SessionChange.LOST,
                              detail="session not found")]
+        out = self._process(recs)
+        try:
+            self._answer_requests()
+        except AdapterError:
+            pass
+        return out
+
+    def _process(self, recs: Optional[List[Dict[str, Any]]]) -> List[AgentEvent]:
         out: List[AgentEvent] = []
-        for rec in recs:
-            start = self._pos
+        for rec in recs or []:
+            start = self._anchor
             made = self._record(rec)
-            self._pos = f"{_created(rec)}:{int(self._open)}:{rec.get('id') or ''}"
+            self._last_key = _key(rec)
+            if not self._open:
+                self._anchor = self._last_key
             at = _created(rec) / 1000.0
             for i, (cls, uid, kw) in enumerate(made):
-                pos = "" if cls is Text else (start if i < len(made) - 1 else self._pos)
+                pos = "" if cls is Text else (start if i < len(made) - 1 else self._anchor)
                 out.append(self._ev(cls, uid, pos, at=at, **kw))
         return out
 
-    def _records(self, since: int, limit_pages: int = 50) -> Optional[List[Dict[str, Any]]]:
-        """The session's records from `since` (ms) on, oldest first; None: no such session."""
+    def _records(self, since: int, strict: bool = True, pages: int = 100) -> Optional[List[Dict[str, Any]]]:
+        """The session's records from `since` (ms) on, oldest first; None: no such session. Pages back until older than
+        `since`; where that takes more than `pages` pages it raises (strict) instead of giving part of it."""
         recs: List[Dict[str, Any]] = []
-        cursor = ""
-        for _ in range(limit_pages):
+        cursor, limit = "", 20
+        for _ in range(pages):
             # a cursor carries its own direction: the server refuses it together with `order`
-            status, data = self._call("GET", f"/api/session/{self.sid}/message?limit=50" +
+            status, data = self._call("GET", f"/api/session/{self.sid}/message?limit={limit}" +
                                       (f"&cursor={quote(cursor)}" if cursor else "&order=desc"))
-            if status == 404:
+            if status == 404 and SESSION_GONE.search(_tag(data)):
                 return None
             if status != 200:
                 raise _fail(status, data, "read messages")
             page = [r for r in (data or {}).get("data") or [] if isinstance(r, dict)]
             recs += page
-            cursor = ((data or {}).get("cursor") or {}).get("next") or ""
+            cursor, limit = ((data or {}).get("cursor") or {}).get("next") or "", 50
             if not page or not cursor or min(_created(r) for r in page) < since:
                 break
+        else:
+            if strict:
+                raise AdapterError("too many records to read the session in one go", ErrorClass.TRANSIENT)
         recs.reverse()
         recs.sort(key=_created)
         return [r for r in recs if _created(r) >= since]
@@ -453,8 +608,7 @@ class OpenCodeAdapter(BaseAdapter):
         if kind == "user":
             mine = rid[4:] if rid.startswith("msg_") and OURS.match(rid[4:]) else ""
             if not self._open:
-                self._open, self._turn_text = True, ""
-                return [(TurnStarted, f"start:{rid}", {"message_ids": (mine,) if mine else ()})]
+                return self._begin(rid, (mine,) if mine else ())
             return [(Received, f"took:{rid}", {"message_id": mine, "taken": True})] if mine else []
         if kind == "synthetic":
             return self._synthetic(rec, rid)
@@ -467,70 +621,88 @@ class OpenCodeAdapter(BaseAdapter):
             return [(SessionChanged, f"compact:{rid}", {"session_id": self.sid, "change": SessionChange.COMPACTED})]
         return []
 
+    def _begin(self, rid: str, ids: Tuple[str, ...]) -> List[Tuple[type, str, Dict[str, Any]]]:
+        self._open = True
+        self._texts = {}
+        return [(TurnStarted, f"start:{rid}", {"message_ids": ids})]
+
     def _synthetic(self, rec: Dict[str, Any], rid: str) -> List[Tuple[type, str, Dict[str, Any]]]:
         md = rec.get("metadata") or {}
         made: List[Tuple[type, str, Dict[str, Any]]] = []
-        if md.get("source") == "shell" and (md.get("shellID") or md.get("jobID")):
-            cli = str(md.get("shellID") or md.get("jobID"))
+        cli = str(md.get("shellID") or md.get("jobID") or "")
+        if cli:
             jid = job_id(self.agent, cli)
             code = md.get("exit")
             code = int(code) if isinstance(code, (int, float)) else None
-            self._ended[jid] = Job(id=jid, agent=self.agent, label=self._ended[jid].label if jid in self._ended else "",
-                                   state=JobState.ENDED, exit_code=code, ended=_created(rec) / 1000.0)
+            label = (self._known.get(jid) or self._ended.get(jid) or Job(id=jid)).label
+            self._ended[jid] = Job(id=jid, agent=self.agent, label=label, state=JobState.ENDED, exit_code=code,
+                                   ended=_created(rec) / 1000.0)
+            self._known.pop(jid, None)
             made.append((JobEnded, f"jobend:{cli}", {"job_id": jid, "exit_code": code}))
             if self._open:
                 made.append((JobNoticed, f"noticed:{rid}", {"job_id": jid}))
                 return made
         if not self._open:  # the server woke the session by itself (JOB-4)
-            self._open, self._turn_text = True, ""
-            made.append((TurnStarted, f"start:{rid}", {"message_ids": ()}))
+            made += self._begin(rid, ())
         return made
 
     def _assistant(self, rec: Dict[str, Any], rid: str) -> List[Tuple[type, str, Dict[str, Any]]]:
         made: List[Tuple[type, str, Dict[str, Any]]] = []
+        if not self._open:  # its turn began before the position we read from
+            made += self._begin(rid, ())
         m = rec.get("model") if isinstance(rec.get("model"), dict) else {}
         model = "/".join(x for x in (m.get("providerID"), m.get("id")) if x)
         if model and model != self._model:
             self._model = model
             made.append((ModelReported, f"model:{rid}", {"model": model}))
         for i, part in enumerate(p for p in rec.get("content") or [] if isinstance(p, dict) and p.get("type") == "tool"):
-            tid = str(part.get("id") or part.get("callID") or f"{rid}:{i}")
-            status = (part.get("state") or {}).get("status") if isinstance(part.get("state"), dict) else None
-            if status in ("running", "pending") and tid not in self._tools:
-                self._tools[tid] = True
-                made.append((ToolStart, f"toolstart:{tid}", {"tool_id": tid, "label": str(part.get("name") or "tool")}))
-            elif status in ("completed", "error") and self._tools.get(tid):
-                self._tools[tid] = False
-                made.append((ToolEnd, f"toolend:{tid}", {"tool_id": tid}))
+            made += self._tool(part, f"{rid}:{i}", _created(rec) / 1000.0)
         text = _text_of(rec)
-        st = self._asst.setdefault(rid, {"len": 0})
-        if len(text) > st["len"]:
-            made.append((Text, f"text:{rid}:{len(text)}", {"text": text[st["len"]:]}))
-            st["len"] = len(text)
         if text:
-            self._turn_text = text
+            self._texts[rid] = text
+        done = self._asst.get(rid, 0)
+        if len(text) > done:
+            made.append((Text, f"text:{rid}:{len(text)}", {"text": text[done:]}))
+            self._asst[rid] = len(text)
+        return made
+
+    def _tool(self, part: Dict[str, Any], fallback: str, at: float) -> List[Tuple[type, str, Dict[str, Any]]]:
+        made: List[Tuple[type, str, Dict[str, Any]]] = []
+        tid = str(part.get("id") or fallback)
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        status = state.get("status")
+        if status in ("streaming", "running") and tid not in self._tools:
+            self._tools[tid] = True
+            made.append((ToolStart, f"toolstart:{tid}", {"tool_id": tid, "label": str(part.get("name") or "tool")}))
+        inp, md = state.get("input"), state.get("metadata")
+        if isinstance(inp, dict) and inp.get("background") is True and isinstance(md, dict):  # JOB-2: a shell job
+            cli = str(md.get("shellID") or "")
+            jid = job_id(self.agent, cli)
+            if cli and jid not in self._known and jid not in self._ended:
+                label = " ".join(str(inp.get("command") or inp.get("description") or cli).split())[:200]
+                t = part.get("time") if isinstance(part.get("time"), dict) else {}
+                started = (t.get("ran") or t.get("created") or at * 1000) / 1000.0
+                self._kind[jid] = "shell"
+                self._known[jid] = Job(id=jid, agent=self.agent, label=label, started=started, last_progress=started)
+                made.append((JobStarted, f"jobstart:{cli}", {"job": self._known[jid]}))
+        if status in ("completed", "error") and self._tools.get(tid):
+            self._tools[tid] = False
+            made.append((ToolEnd, f"toolend:{tid}", {"tool_id": tid}))
         return made
 
     def _idle(self, rec: Dict[str, Any], rid: str) -> List[Tuple[type, str, Dict[str, Any]]]:
         if not self._open:  # a repeated message id makes an empty idle record; a compaction has none of its own turn
             return []
-        made: List[Tuple[type, str, Dict[str, Any]]] = []
-        try:
-            for j in self._running_jobs():
-                if j.id not in self._announced:
-                    self._announced.add(j.id)
-                    made.append((JobStarted, f"jobstart:{j.id}", {"job": j}))
-        except AdapterError:
-            pass
         self._open = False
         outcome, err = rec.get("outcome"), rec.get("error")
-        kw: Dict[str, Any] = {"text": self._turn_text, "session_id": self.sid}
-        if outcome == "interrupted":
-            kw["status"] = TurnStatus.STOPPED
+        kw: Dict[str, Any] = {"text": "\n\n".join(self._texts.values()), "session_id": self.sid}
+        if outcome == "interrupted":  # nobody here interrupts: a terminal, inactivity or a newer prompt did
+            kw.update(status=TurnStatus.ERROR, error=ErrorClass.TRANSIENT, detail="turn interrupted")
         elif outcome == "failed" or err:
             kw.update(status=TurnStatus.ERROR, error=self._error_class(err), detail=self._error_text(err))
-        made.append((TurnEnded, f"end:{rid}", kw))
-        return made
+            if isinstance(err, dict) and isinstance(err.get("retryAfterMs"), (int, float)):
+                kw["retry_after"] = err["retryAfterMs"] / 1000.0
+        return [(TurnEnded, f"end:{rid}", kw)]
 
     @staticmethod
     def _error_text(err: Any) -> str:
@@ -540,34 +712,85 @@ class OpenCodeAdapter(BaseAdapter):
 
     def _error_class(self, err: Any) -> ErrorClass:
         text = self._error_text(err)
-        kind = str(err.get("type", "")) if isinstance(err, dict) else ""
+        kind = str(err.get("type", "")).lower() if isinstance(err, dict) else ""
         status = err.get("status") if isinstance(err, dict) else None
         if SESSION_GONE.search(text):
             return ErrorClass.SESSION_LOST
+        if any(w in kind for w in BILLING_TYPES) or classify_error(text) == ErrorClass.BILLING:
+            return ErrorClass.BILLING
         if kind.startswith(("provider.auth", "provider.no-route")):
-            return ErrorClass.BILLING if classify_error(text) == ErrorClass.BILLING else ErrorClass.OTHER
-        if isinstance(status, int) and (status == 429 or status >= 500):
+            return ErrorClass.OTHER
+        if any(w in kind for w in TRANSIENT_TYPES) or (isinstance(status, int) and (status == 429 or status >= 500)):
             return ErrorClass.TRANSIENT
         return classify_error(text)
 
+    # ----------------------------------------------------------------------------------- permissions and forms
+
+    def _family(self) -> set:
+        """The session and the child sessions of its subagents."""
+        fam = {self.sid}
+        status, data = self._call("GET", f"/api/experimental/job?sessionID={quote(self.sid)}&descendants=true")
+        for j in (data or {}).get("data") or [] if status == 200 else []:
+            fam |= {j.get("sessionID"), j.get("childSessionID")}
+        return fam
+
+    def _answer_requests(self) -> None:
+        """Answer what still asks, as `opencode run` does: allow once when auto, else reject; cancel question forms."""
+        status, data = self._call("GET", "/api/permission/request")
+        asks = (data or {}).get("data") or [] if status == 200 else []
+        status, data = self._call("GET", "/api/form")
+        forms = (data or {}).get("data") or [] if status == 200 else []
+        if not (asks or forms):
+            return
+        fam = self._family()
+        for r in asks:
+            if r.get("sessionID") in fam:
+                body: Dict[str, Any] = {"decision": "once"} if self.auto else \
+                    {"decision": "reject", "message": "Nobody is here to approve this: it was not allowed"}
+                self._call("POST", f"/api/session/{r['sessionID']}/permission/{r['id']}/reply", body)
+        for f in forms:
+            if f.get("sessionID") in fam:
+                msg = quote("Nobody is here to answer questions: decide on your own")
+                self._call("DELETE", f"/api/session/{f['sessionID']}/form/{f['id']}?message={msg}")
+
     # -------------------------------------------------------------------------------------------------- jobs
 
-    def _running_jobs(self, known: bool = False) -> List[Job]:
-        """The session's running jobs, ghosts left out (GET /api/shell/{id} says 404 for a dead one)."""
+    def _shell(self, cli: str) -> Optional[Dict[str, Any]]:
+        status, data = self._call("GET", f"/api/shell/{cli}")
+        d = (data or {}).get("data") if isinstance(data, dict) else None
+        return d if status == 200 and isinstance(d, dict) else None
+
+    def _running_jobs(self) -> List[Job]:
+        """The session's running jobs. A shell job is checked with GET /api/shell/{id} (a dead server leaves ghosts in
+        the list); a subagent job runs while its child session is active."""
         status, data = self._call("GET", f"/api/experimental/job?sessionID={quote(self.sid)}")
         if status != 200:
             raise _fail(status, data, "job list")
+        active: Optional[set] = None
         jobs: List[Job] = []
         for j in (data or {}).get("data") or []:
             if j.get("sessionID") != self.sid or j.get("status") != "running":
                 continue
-            cli = str(j.get("shellID") or j.get("id"))
-            if self._call("GET", f"/api/shell/{cli}")[0] != 200:
+            kind = j.get("kind")
+            if kind == "shell":
+                cli = str(j.get("shellID") or j.get("id"))
+                sh = self._shell(cli)
+                if not sh or sh.get("status") != "running":
+                    continue
+            elif kind == "subagent":
+                cli = str(j.get("id"))
+                if active is None:
+                    st, act = self._call("GET", "/api/session/active")
+                    active = set((act or {}).get("data") or {}) if st == 200 else set()
+                if j.get("childSessionID") not in active:
+                    continue
+            else:
                 continue
-            started = (j.get("time") or {}).get("started") or 0
-            label = " ".join(str(j.get("command") or j.get("title") or cli).split())[:200]
-            jobs.append(Job(id=job_id(self.agent, cli), agent=self.agent, label=label, started=started / 1000.0,
-                            last_progress=started / 1000.0))
+            jid = job_id(self.agent, cli)
+            started = ((j.get("time") or {}).get("started") or 0) / 1000.0
+            label = " ".join(str(j.get("command") or j.get("agent") or cli).split())[:200]
+            self._kind[jid] = kind
+            jobs.append(Job(id=jid, agent=self.agent, label=label, started=started, last_progress=started))
         return jobs
 
     def jobs(self) -> List[Job]:
@@ -575,7 +798,31 @@ class OpenCodeAdapter(BaseAdapter):
             return []
         running = self._running_jobs()
         ids = {j.id for j in running}
+        for jid, job in list(self._known.items()):  # known, but gone from the list: did it end?
+            if jid in ids or self._kind.get(jid) != "shell":
+                continue
+            sh = self._shell(jid.split("/", 1)[1])  # 404: nothing known, the supervisor decides (lost)
+            if sh and sh.get("status") in ENDED_SHELL and isinstance(sh.get("exit"), (int, float)):
+                t = sh.get("time") if isinstance(sh.get("time"), dict) else {}
+                self._ended[jid] = Job(id=jid, agent=self.agent, label=job.label, state=JobState.ENDED,
+                                       exit_code=int(sh["exit"]), ended=(t.get("completed") or 0) / 1000.0)
+                self._known.pop(jid)
         return running + [j for j in self._ended.values() if j.id not in ids]
+
+    def _job_pids(self) -> List[Tuple[int, float]]:
+        """(pid, start time) of running shell jobs, read just before the server is ended: they may outlive a killed
+        one. A pid whose start time cannot be read is left out: it cannot be verified later."""
+        pids: List[Tuple[int, float]] = []
+        try:
+            for j in self._running_jobs():
+                sh = self._shell(j.id.split("/", 1)[1]) if self._kind.get(j.id) == "shell" else None
+                if sh and sh.get("status") == "running" and int(sh.get("pid") or 0) > 1:
+                    pid = int(sh["pid"])
+                    if _start_time(pid) > 0:
+                        pids.append((pid, _start_time(pid)))
+        except AdapterError:
+            pass
+        return pids
 
     # --------------------------------------------------------------------------------------------- the rest
 
@@ -583,37 +830,49 @@ class OpenCodeAdapter(BaseAdapter):
         self.attached = False
 
     def stop(self) -> None:
-        if not self.pid:
+        if not self.pid or self._stopping:
             return
-        pids: List[int] = []
-        if self.attached and self.sid:
-            try:
-                for j in self._running_jobs():  # their processes may outlive a killed server
-                    st, data = self._call("GET", f"/api/shell/{j.id.split('/', 1)[1]}")
-                    if st == 200 and isinstance(data, dict) and data.get("pid"):
-                        pids.append(int(data["pid"]))
-            except AdapterError:
-                pass
-        self._term(self.pid)
-        for _ in range(50):
-            if not self._pid_alive(self.pid):
+        if self._exit_reported:  # it is gone already: no signal
+            self._info_path().unlink(missing_ok=True)
+            return
+        pids = self._job_pids() if self.attached and self.sid else []
+        self._signal(self.pid, signal.SIGTERM, pstart=self.pstart)
+        if self._open:
+            self._queue.append(self._ev(TurnEnded, f"stop:{self.pid}", self._close(), status=TurnStatus.STOPPED,
+                                        session_id=self.sid))
+        self.attached = False
+        self._stopping = (self.clock.now() + self.stop_grace, pids)
+        for _ in range(5):  # most servers go at once; events() finishes the rest
+            if not self._live(self.pid, self.pstart):
                 break
             time.sleep(0.1)
-        else:
-            self._kill_group(self.pid)
-            for p in pids:
-                self._kill_group(p)
-        if not self._exit_reported:
-            self._exit_reported = True
-            if self._open:
-                self._queue.append(self._ev(TurnEnded, f"stop:{self.pid}", self._pos, status=TurnStatus.STOPPED,
-                                            session_id=self.sid))
-            self._queue.append(self._ev(ProcessExited, f"exit:{self.pid}", self._pos, asked=True))
-        self._open = self.attached = False
+        self._queue += self._stop_events()
+
+    def _stop_events(self) -> List[AgentEvent]:
+        if not self._stopping:
+            return []
+        deadline, pids = self._stopping
+        if self._live(self.pid, self.pstart):
+            if self.clock.now() >= deadline:  # it must be killed: then also what its jobs left
+                self._signal(self.pid, signal.SIGKILL, pstart=self.pstart)
+                for p, started in pids:
+                    self._signal(p, signal.SIGKILL, pstart=started)
+            return []
+        self._stopping = None
+        self._exit_reported = True
         try:
             self._info_path().unlink()
         except OSError:
             pass
+        return [self._ev(ProcessExited, f"exit:{self.pid}", self._anchor, asked=True)]
+
+    def _finish_stop(self) -> None:
+        """A start waits for the end of the server an earlier stop() sent away."""
+        end = time.monotonic() + self.stop_grace + 2
+        while self._stopping and time.monotonic() < end:
+            self._queue += self._stop_events()
+            if self._stopping:
+                time.sleep(0.1)
 
     def compact(self) -> bool:
         if not (self.sid and self.attached) or self._open:
@@ -639,9 +898,8 @@ class OpenCodeAdapter(BaseAdapter):
     def transcript(self, session: SessionRef, since: float) -> List[Said]:
         if not (self.attached and self.sid == session.session_id):
             return []
-        recs = self._records(int(since * 1000)) or []
         said: List[Said] = []
-        for r in recs:
+        for r in self._records(int(since * 1000), strict=False) or []:
             if _created(r) / 1000.0 <= since:
                 continue
             if r.get("type") == "user":
@@ -655,15 +913,17 @@ class OpenCodeAdapter(BaseAdapter):
         tmp = Path(tempfile.mkdtemp(prefix="orch-oc-catalog-"))
         popen = None
         try:
-            popen, port, pw = self._launch(str(tmp), {}, tmp / "server.log")
+            port, pw = _free_port(), secrets.token_urlsafe(24)
+            popen = self._spawn_server(str(tmp), {}, tmp / "server.log", port, pw)
+            self._wait_up(popen, port, pw, str(tmp))
             status, data = _request(port, pw, str(tmp), "GET", "/api/model", timeout=20)
         finally:
-            if popen is not None:
-                self._term(popen.pid)
+            if popen is not None and popen.poll() is None:
+                self._signal(popen.pid, signal.SIGTERM, verified=True)
                 try:
                     popen.wait(timeout=5)
-                except Exception:  # noqa: BLE001
-                    self._kill_group(popen.pid)
+                except subprocess.TimeoutExpired:
+                    self._signal(popen.pid, signal.SIGKILL, verified=True)
             for f in tmp.glob("*"):
                 f.unlink()
             tmp.rmdir()
