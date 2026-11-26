@@ -363,9 +363,9 @@
     }
     const send = (how, ev) => cmdGate(g, how, ev.currentTarget, key);
     if (g.options.length) {
-      box.append(h("div", { class: "opts" }, g.options.map((o, i) => h("button", { type: "button", on: { click: ev => send({ option: i }, ev) } }, o))));
+      box.append(h("div", { class: "opts" }, g.options.map((o, i) => h("button", { type: "button", on: { click: ev => send({ option: i }, ev) } }, inlineCode(o)))));
     }
-    const text = g.kind === "operational" ? null : draft(key, "textarea", { rows: 2, "aria-label": "Your answer", placeholder: g.kind === "question" ? "Or write your own answer" : "Your comment (needed to ask for changes)" });
+    const text = g.kind === "operational" ? null : draft(key, "textarea", { rows: 1, "aria-label": "Your answer", placeholder: g.kind === "question" ? "Or write your own answer" : "Your comment (needed to ask for changes)" });
     if (text) box.append(h("div", { class: "row" }, text));
     const acts = h("div", { class: "row" });
     if (g.kind === "question") acts.append(h("button", { type: "button", class: "pri", on: { click: ev => { if (!(drafts[key] || "").trim()) { toast("Write an answer or pick an option."); return; } send({ text: drafts[key].trim() }, ev); } } }, "Send answer"));
@@ -407,38 +407,62 @@
     panel.addEventListener("click", () => { node.open = false; summary.focus(); });
     return [node, panel];
   }
+  // which agents are unfolded, and whether the whole team panel is folded: kept in this browser
+  const openAgents = new Set((() => { try { return JSON.parse(store.get("orch-team-open") || "[]"); } catch (e) { return []; } })());
+  let teamFolded = store.get("orch-team-folded") === "1";
+  function saveOpenAgents() { store.set("orch-team-open", JSON.stringify(Array.from(openAgents))); }
+  function agentSummaryState(a, t) {
+    // the one word that matters most on the folded line
+    if (a.status === "failed") return "Failed";
+    if (a.switch && a.switch.step && ["done", "failed"].indexOf(a.switch.step) < 0) return "Switching model";
+    if (a.status === "writing") return "Writing";
+    if (a.status === "waiting_job") return "Job running";
+    if (a.status === "closed") return "Closed";
+    return a.last_output ? "Idle " + L.ago(a.last_output, t) : "Idle";
+  }
   function agentCard(a) {
     const t = nowSrv(), name = nm(a.id), role = ROLE[a.role] || "", status = L.STATUS[a.status] || "";
-    const box = h("div", { class: "agent" + (a.status === "closed" ? " closed" : "") });
     const model = a.actual_model || (a.choice && (a.choice.model || a.choice.label)) || "";
-    const [actions, items] = menu("Actions for " + name);
-    const controls = h("div", { class: "agent-actions" });
-    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "sm", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
-    controls.append(h("button", { type: "button", class: "sm", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"), actions);
-    box.append(h("div", { class: "agent-head" },
-      h("div", { class: "agent-identity" }, h("span", { class: "dot status-" + a.status, title: status, "aria-hidden": "true" }),
-        h("h3", {}, name), role.toLowerCase() !== name.toLowerCase() ? h("span", { class: "agent-role" }, role) : null),
-      controls));
-    box.append(h("div", { class: "agent-meta" },
+    const box = h("details", { class: "agent status-row-" + a.status + (a.status === "closed" ? " closed" : "") });
+    box.open = openAgents.has(a.id);
+    box.addEventListener("toggle", () => {
+      if (box.open) openAgents.add(a.id); else openAgents.delete(a.id);
+      saveOpenAgents();
+    });
+    box.append(h("summary", { class: "agent-sum", title: name + ": " + status + (model ? " · " + model : "") },
+      h("span", { class: "dot status-" + a.status, "aria-hidden": "true" }),
+      h("span", { class: "agent-name" }, name),
+      role.toLowerCase() !== name.toLowerCase().replace(/[ -]?\d+$/, "") ? h("span", { class: "agent-role" }, role) : null,
+      h("span", { class: "agent-state" }, agentSummaryState(a, t)),
+      a.waiting ? h("span", { class: "agent-count", title: a.waiting + " message(s) wait for " + name }, String(a.waiting)) : null));
+    const body = h("div", { class: "agent-body" });
+    box.append(body);
+    const [actions, items] = menu("More actions for " + name);
+    body.append(h("div", { class: "agent-meta" },
       model ? h("span", { class: "model-name", title: model }, L.shortModel(model)) : null,
       h("span", { class: "agent-when" }, status,
         a.last_output ? [" · ", h("span", { data: { ago: a.last_output }, title: "Last activity" }, L.ago(a.last_output, t))] : null)));
     const tags = L.agentTags(a, S);
-    if (tags.length) box.append(h("div", { class: "agent-line tags" }, tags.join(" · ")));
-    if (a.assignment && a.assignment.line) box.append(h("div", { class: "agent-line assignment", title: a.assignment.line },
-      h("b", {}, a.open_report || S.finished ? "Last assignment " : "Assignment "), a.assignment.line));
-    if (a.status === "failed" && a.failed_why) box.append(h("div", { class: "agent-line danger-text" }, a.failed_why));
+    if (tags.length) body.append(h("div", { class: "agent-line tags" }, tags.join(" · ")));
+    if (a.assignment && a.assignment.line) body.append(h("div", { class: "agent-line assignment", title: a.assignment.line },
+      h("span", { class: "label" }, a.open_report || S.finished ? "Last assignment" : "Assignment"), a.assignment.line));
+    if (a.status === "failed" && a.failed_why) body.append(h("div", { class: "agent-line danger-text" }, a.failed_why));
     const last = (live[a.id] || []).slice(-1)[0];
-    box.append(h("div", { class: "agent-line live-preview", data: { live: a.id } }, last ? L.preview(last.s, 110) : ""));
+    body.append(h("div", { class: "agent-line live-preview", data: { live: a.id } }, last ? L.preview(last.s, 110) : ""));
     if (a.waiting) {
       const why = a.holds.map(x => ({ terminal: "a terminal is open", "switch": "model is being switched", turn: "it is writing", send_failed: "sending failed", stopped: "stopped by you" }[x])).filter(Boolean);
-      box.append(h("div", { class: "agent-line" }, a.waiting + " waiting", why.length ? " · " + why.join(", ") : ""));
+      body.append(h("div", { class: "agent-line" }, a.waiting + " message(s) waiting", why.length ? " · " + why.join(", ") : ""));
     }
     const jobs = Object.values(S.jobs || {}).filter(j => j.agent === a.id && (j.state === "running" || (!j.woke && !j.stopped_by_user)));
     const jobKey = "jobs:" + a.id, shownJobs = L.latest(jobs, listLimit(jobKey));
-    shownJobs.rows.forEach(j => box.append(h("div", { class: "agent-line" }, h("b", {}, "Job "), L.jobLine(j, t))));
-    add(box, listMore(jobKey, shownJobs.remaining, renderTeam));
-    if (a.role !== "monitor" && a.lifecycle === "open") items.append(terminalLink(a));
+    shownJobs.rows.forEach(j => body.append(h("div", { class: "agent-line job" }, h("span", { class: "label" }, "Job"), L.jobLine(j, t))));
+    add(body, listMore(jobKey, shownJobs.remaining, renderTeam));
+    const controls = h("div", { class: "agent-actions" });
+    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "sm", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
+    controls.append(h("button", { type: "button", class: "sm", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"));
+    if (a.role !== "monitor" && a.lifecycle === "open") controls.append(terminalLink(a));
+    controls.append(h("span", { class: "grow" }), actions);
+    body.append(controls);
     const activity = h("div", { class: "activity-body", data: { livelog: a.id }, hidden: !openAct.has(a.id) });
     items.append(h("button", { type: "button", title: "Show this agent’s recent output and tools",
       on: { click: ev => {
@@ -447,7 +471,7 @@
         if (activity.hidden) openAct.delete(a.id);
         else { openAct.add(a.id); paintActivity(a.id); loadLive(a.id, "open"); }
       } } }, openAct.has(a.id) ? "Hide recent activity" : "Recent activity"));
-    box.append(activity);
+    body.append(activity);
     if (a.role === "worker") L.workerActions(a).forEach(type => items.append(h("button", { type: "button",
       class: type === "WorkerDelete" ? "danger-text" : "",
       title: { WorkerClose: "Close this worker and keep its session", WorkerReopen: "Reopen this worker in its saved session", WorkerDelete: "Permanently remove this worker from the team" }[type],
@@ -458,14 +482,42 @@
       : h("button", { type: "button", title: "Stop this agent and its jobs", on: { click: act("StopAgents", { agents: [a.id] }) } }, "Stop"));
     return box;
   }
+  function railDot(a) {
+    // the folded team panel: one dot per agent, its name and state in the tooltip; a click unfolds that agent
+    const name = nm(a.id), st = agentSummaryState(a, nowSrv());
+    return h("button", { type: "button", class: "rail-agent", title: name + ": " + st, "aria-label": name + ": " + st,
+      on: { click: () => { openAgents.add(a.id); saveOpenAgents(); setTeamFolded(false); } } },
+      h("span", { class: "dot status-" + a.status, "aria-hidden": "true" }), h("span", { class: "rail-initial" }, railLabel(a)));
+  }
+  function railLabel(a) {
+    const n = (a.id.match(/(\d+)$/) || [])[1];
+    if (a.role === "worker") return "W" + (n || "1");
+    return { manager: "Mgr", critic: "Cri", monitor: "Mon" }[a.role] || a.id.slice(0, 3);
+  }
+  function inlineCode(text) {
+    // `code` in a short label (a gate's option) as code, the rest as text
+    return String(text).split(/(`[^`]+`)/).map(x => x.length > 2 && x[0] === "`" && x[x.length - 1] === "`" ? h("code", {}, x.slice(1, -1)) : x);
+  }
+  function setTeamFolded(on) {
+    teamFolded = on;
+    store.set("orch-team-folded", on ? "1" : "0");
+    $("team")._sig = null;
+    renderTeam();
+  }
   async function workerAct(type, a, btn) {
     if (type === "WorkerDelete" && !(await confirmBox("Delete " + nm(a.id) + "?", "It cannot be opened again. Its messages stay in the record.", "Delete", "danger"))) return;
     cmd(type, { agent: a.id }, btn);
   }
   function renderTeam() {
     const list = agentList(), t = Math.floor(nowSrv() / 60);
-    const sig = JSON.stringify([list, S.jobs, S.terminals, S.discussions, S.finished, t, list.map(a => listLimit("jobs:" + a.id))]);
-    if (paint($("team"), sig, () => list.map(agentCard))) openAct.forEach(paintActivity);
+    $("workspace").classList.toggle("team-folded", teamFolded);
+    const fb = $("teamfold");
+    fb.setAttribute("aria-expanded", teamFolded ? "false" : "true");
+    fb.title = teamFolded ? "Show the team" : "Fold the team into a narrow strip";
+    fb.setAttribute("aria-label", fb.title);
+    fb.textContent = teamFolded ? "‹" : "›";
+    const sig = JSON.stringify([teamFolded, list, S.jobs, S.terminals, S.discussions, S.finished, t, list.map(a => listLimit("jobs:" + a.id))]);
+    if (paint($("team"), sig, () => teamFolded ? list.map(railDot) : list.map(agentCard))) openAct.forEach(paintActivity);
     if (!list.length) $("team").textContent = "No agents yet.";
   }
 
@@ -529,8 +581,12 @@
   }
 
   function messageBody(m, sendable, run, named) {
-    const hint = L.statusHint(m);
-    const fb = h("div", { class: "fb" }, hint ? h("p", { class: "detail-hint" }, hint) : null, md(L.messageText(m)));
+    const hint = L.statusHint(m), meta = m.written_by || {};
+    const sized = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
+    const facts = [meta.model ? "Written by " + L.shortModel(meta.model) : "",
+      sized ? L.characterSize(meta.input_chars) + " characters in, " + L.characterSize(meta.output_chars) + " out" : "", hint].filter(Boolean);
+    const fb = h("div", { class: "fb" }, facts.length ? h("p", { class: "detail-hint", title: meta.model || "" }, facts.join(" · ")) : null,
+      md(L.messageText(m)));
     if (sendable) fb.append(h("button", { type: "button", class: "link", on: {
       click: act("SendToCritic", { message_id: m.id, agent: m.sender }),
     } }, "Send to critic"));
@@ -566,14 +622,12 @@
     const d = h("details", { class: cls.filter(Boolean).join(" "), data: { message: m.id } },
       h("summary", { title: [route, hint].filter(Boolean).join(" · ") },
         h("span", { class: "tm" }, L.stamp(m.created, nowSrv())),
+        h("span", { class: "lv", title: (L.LEVELS[level] || [""])[0], "aria-hidden": "true" }),
         h("span", { class: "route" }, route),
         exception ? h("span", { class: "st " + L.messageTone(m), title: hint }, exception) : null,
-        meta.model ? h("span", { class: "row-model", title: "Written by " + meta.model }, L.shortModel(meta.model)) : null,
         h("span", { class: "pv" }, L.preview(L.messageText(m))),
-        size ? h("span", { class: "sz" + (meta.input_chars > 30000 ? " large" : ""),
-          title: meta.input_chars.toLocaleString() + " input characters → " + meta.output_chars.toLocaleString() + " output characters" +
-            (meta.input_chars > 30000 ? " · input exceeds 30,000 characters" : "") },
-        L.characterSize(meta.input_chars) + " → " + L.characterSize(meta.output_chars)) : null));
+        size && meta.input_chars > 30000 ? h("span", { class: "sz large", title: meta.input_chars.toLocaleString() +
+          " input characters: more than 30,000" }, L.characterSize(meta.input_chars) + " in") : null));
     function expand() {
       if (!d._body) { d._body = messageBody(m, sendable, run, named); d.append(d._body); }
     }
@@ -953,6 +1007,7 @@
     $("morebtn").addEventListener("click", more);
     $("runsbtn").addEventListener("click", runs);
     $("addworker").addEventListener("click", ev => cmd("WorkerAdd", {}, ev.currentTarget));
+    $("teamfold").addEventListener("click", () => setTeamFolded(!teamFolded));
     $("changems").addEventListener("click", changeMilestones);
     $("themebtn").addEventListener("click", () => {
       const r = document.documentElement, dark = r.dataset.theme ? r.dataset.theme === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;

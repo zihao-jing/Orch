@@ -475,7 +475,7 @@ global.SC = {
     await click($('stopbtn')); assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StartAgents', []]);
   },
   async workerControls({assert, $, byText, click, lastPost}) {
-    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
     await click(byText(card, 'Close')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['WorkerClose', 'worker-1']);
     const card2 = $('team').all().filter(e => e.className.startsWith('agent')).find(c => c.textContent.includes('Worker 2'));
     await click(byText(card2, 'Reopen')); assert.strictEqual(lastPost().type, 'WorkerReopen');
@@ -485,7 +485,7 @@ global.SC = {
     let n = 0;
     setReply(b => n++ === 0 ? {ok: false, shown: 'A job is running.', text: null, data: {}, choices: [{label: 'Let it finish', set: {jobs: 'finish'}}, {label: 'Stop it', set: {jobs: 'stop'}}]}
                             : {ok: true, shown: '', choices: [], data: {}});
-    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
     await click(byText(card, 'Close'));
     assert.ok($('dlg').open && $('dlg-b').textContent.includes('A job is running.'));
     await click(byText($('dlg-a'), 'Stop it'));
@@ -540,7 +540,7 @@ global.SC = {
     assert.deepStrictEqual([lastPost().type, lastPost().text], ['ChangeMilestones', 'add a docs step']);
   },
   async models({assert, $, click, byText, lastPost, type}) {
-    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
     await click(byText(card, 'Model'));
     assert.ok($('dlg').open); const body = $('dlg-b');
     assert.ok(body.textContent.includes('Alpha') && body.textContent.includes('Backups'));
@@ -553,11 +553,25 @@ global.SC = {
     assert.deepStrictEqual([lastPost().type, lastPost().backup], ['ChooseModel', 'slow']);
   },
   async switchPending({assert, $, click, byText, lastPost}) {
-    const card = $('team').all().filter(e => e.className === 'agent').find(c => c.textContent.includes('Worker 1'));
+    const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
     assert.ok(card.textContent.includes('switch pending'));
     await click(byText(card, 'Model'));
     assert.ok($('dlg-b').textContent.includes('Switch pending'));
     await click(byText($('dlg-b'), 'Switch now')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['ForceSwitch', 'worker-1']);
+  },
+  async teamFold({assert, $, click}) {
+    // each agent is one folded line; the whole team folds into a strip of dots and comes back with one agent open
+    const cards = () => $('team').all().filter(e => e.className.split(' ').includes('agent'));
+    const n = cards().length;
+    assert.ok(n >= 3 && cards().every(c => !c.open));
+    await click($('teamfold'));
+    assert.ok($('workspace').className.includes('team-folded'));
+    const rail = $('team').all().filter(e => e.className === 'rail-agent');
+    assert.strictEqual(rail.length, n);
+    assert.strictEqual(cards().length, 0);
+    await click(rail[2]);
+    assert.ok(!$('workspace').className.includes('team-folded'));
+    assert.strictEqual(cards().filter(c => c.open).length, 1);
   },
   async golden({assert, $, click, byText, lastPost, type, settle}) {
     const card = $('goldcard'); card.open = true; card.fire('toggle'); await settle();
@@ -867,6 +881,9 @@ class TestSmoke(unittest.TestCase):
                                                   "target": {"label": "Beta", "backend": "claude", "model": "b", "provider": "",
                                                              "effort": "", "model_id": "beta", "name": ""}}
         self.run_scenario("switchPending", m)
+
+    def test_UI_1_team_folds(self):
+        self.run_scenario("teamFold")
 
     def test_UI_4_golden_board_edit(self):
         self.run_scenario("golden")

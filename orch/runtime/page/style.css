@@ -59,10 +59,20 @@ p { margin: 0 0 8px; }
 .timeline { grid-area: 2 / 1; }
 .resources { grid-area: 3 / 1; }
 .team-card { grid-area: 1 / 2 / span 3; }
+.workspace.team-folded { grid-template-columns: minmax(0, 1fr) 52px; }
+.team-folded .team-card { padding: 10px 6px; }
+.team-folded .team-card .section-head { justify-content: center; margin-bottom: 6px; }
+.team-folded .team-card .section-head > :not(#teamfold) { display: none; }
+.team-folded .team { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.rail-agent { position: relative; width: 36px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: var(--surface); color: var(--ink2); font-weight: 650; }
+.rail-initial { font-size: 11px; }
+.opts code { font: 12px ui-monospace, Menlo, monospace; }
+.rail-agent .dot { position: absolute; right: 2px; top: 2px; flex: none; box-shadow: 0 0 0 2px var(--panel); }
+.icon.fold { width: 26px; height: 26px; font-size: 16px; background: transparent; border-color: transparent; }
+.icon.fold:hover { background: var(--surface); }
 .card { min-width: 0; background: var(--panel); border-radius: 12px; padding: 16px 19px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 12px; }
-.resources { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
-.resources details[open] { grid-column: 1 / -1; }
+.resources { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .resources summary { cursor: pointer; }
 .resources summary h2 { display: inline; margin-left: 4px; }
 .resources details[open] > div { padding-top: 12px; }
@@ -119,7 +129,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 #toast { position: fixed; z-index: 60; left: 50%; bottom: 15px; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); pointer-events: none; }
 #toast div { max-width: 520px; padding: 9px 14px; margin-top: 6px; background: var(--ink); color: var(--panel); border-radius: 8px; box-shadow: var(--shadow); }
 
-.needs { margin-bottom: 16px; background: var(--accent-wash); }
+.needs { margin-bottom: 16px; background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
 .needs > h2, .gate .k { color: var(--accent); }
 .gate { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
 .gate:first-of-type { border-top: 0; padding-top: 0; }
@@ -135,25 +145,34 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .md pre, pre { background: var(--code); border-radius: 7px; padding: 9px 11px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, Menlo, monospace; max-height: 420px; overflow: auto; margin: 5px 0; }
 .md code { font: 12px ui-monospace, Menlo, monospace; background: var(--code); border-radius: 3px; padding: 0 3px; }
 
-.team-card { position: sticky; top: 16px; padding-bottom: 7px; }
-.team-card .section-head { margin-bottom: 4px; }
-.agent { padding-block: 11px; }
-.agent + .agent { border-top: 1px solid var(--line); }
-.agent-head, .agent-meta { display: flex; align-items: center; justify-content: space-between; gap: 4px 7px; flex-wrap: wrap; }
-.agent-identity, .agent-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.agent-identity { flex-wrap: wrap; }
-.agent-actions { justify-content: flex-end; }
-.agent-actions .icon { width: 25px; height: 25px; font-size: 16px; }
+.team-card { position: sticky; top: 16px; padding-bottom: 8px; }
+.team-card .section-head { margin-bottom: 6px; gap: 8px; }
+.agent { margin: 0 -8px; border-radius: 8px; }
+.agent + .agent { margin-top: 1px; }
+.agent[open] { background: var(--surface); }
+.agent-sum { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 8px; border-radius: 8px; cursor: pointer; list-style: none; }
+.agent-sum::-webkit-details-marker { display: none; }
+.agent-sum:hover { background: var(--surface); }
+.agent-name { font-weight: 650; white-space: nowrap; }
 .agent-role { font-size: 11px; color: var(--mute); }
-.agent-meta { justify-content: flex-start; color: var(--mute); margin-top: 3px; font-size: 12px; }
+.agent-state { margin-left: auto; color: var(--mute); font-size: 12px; white-space: nowrap; }
+.status-row-writing .agent-state { color: var(--accent); }
+.status-row-waiting_job .agent-state { color: var(--warn); }
+.status-row-failed .agent-state { color: var(--danger); }
+.agent-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--warn-bg); color: var(--warn); font-size: 11px; font-weight: 700; display: grid; place-items: center; }
+.agent-body { padding: 0 8px 9px 24px; }
+.agent-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; color: var(--mute); font-size: 12px; }
 .agent-when { white-space: nowrap; }
 .model-name { color: var(--ink2); font-weight: 610; }
-.agent-line { font-size: 12px; color: var(--mute); margin-top: 3px; }
-.agent-line b { font-weight: 650; }
+.agent-line { font-size: 12px; color: var(--ink2); margin-top: 4px; }
+.agent-line .label { color: var(--mute); margin-right: 6px; }
 .agent-line.danger-text { color: var(--danger); }
 .agent-line.tags { color: var(--warn); }
 .assignment, .live-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-preview { color: var(--mute); font-style: italic; }
 .live-preview:empty { display: none; }
+.agent-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.agent-actions .icon { width: 26px; height: 26px; font-size: 16px; background: transparent; }
 .activity-body { margin-top: 6px; }
 .livelog { background: var(--surface); padding: 7px; border-radius: 6px; font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--ink2); max-height: 200px; overflow: auto; white-space: pre-wrap; }
 
@@ -191,20 +210,20 @@ button.level-toggle { color: var(--level); display: inline-flex; align-items: ce
 .level-toggle::before { content: ""; height: 6px; width: 6px; border-radius: 50%; background: currentColor; }
 .level-toggle[aria-pressed="false"]::before { background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
 .page-controls { display: flex; align-items: center; gap: 5px 10px; flex-wrap: wrap; margin-bottom: 5px; }
-.msg { border-top: 1px solid var(--line); }
-.msg > summary { cursor: pointer; min-height: 28px; min-width: 0; display: flex; align-items: center; gap: 7px; white-space: nowrap; padding: 2px 4px 2px 3px; color: var(--ink2); list-style: none; }
+.msg + .msg { border-top: 1px solid var(--line); }
+.msg > summary { cursor: pointer; min-height: 30px; min-width: 0; display: flex; align-items: center; gap: 9px; border-radius: 6px; white-space: nowrap; padding: 2px 4px 2px 3px; color: var(--ink2); list-style: none; }
 .msg > summary::-webkit-details-marker { display: none; }
-.msg > summary::before { content: ""; width: 3px; height: 10px; border-radius: 2px; flex: 0 0 3px; background: var(--level, var(--mute)); }
-.msg.touser > summary::before, .msg.awaiting > summary::before { height: 19px; }
-.msg.touser > summary { background: var(--accent-wash); }
-.msg.awaiting .route { color: var(--level); font-weight: 700; }
-.msg > summary:hover, .msg[open] > summary { background: var(--code); }
-.msg .route { flex: 0 1 149px; min-width: 78px; overflow: hidden; text-overflow: ellipsis; color: var(--ink); font-weight: 615; font-size: 12px; }
+.lv { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--level, var(--mute)); }
+.msg.touser .route { color: var(--accent); }
+.msg.awaiting .route { color: var(--warn); font-weight: 700; }
+.msg > summary:hover, .msg[open] > summary { background: var(--surface); }
+.msg .route { flex: 0 1 140px; min-width: 78px; overflow: hidden; text-overflow: ellipsis; color: var(--ink); font-weight: 615; font-size: 12px; }
 .msg.housekeeping .route { color: var(--mute); font-weight: 500; }
 .msg.notice-row .pv { color: var(--accent); font-weight: 620; }
-.msg:not(.touser):not(.awaiting):not(.notice-row) .pv { color: var(--mute); }
+.msg.housekeeping .pv { color: var(--mute); }
+.msg.touser .pv { color: var(--ink); }
 .tm, .sz { flex: none; color: var(--mute); font-variant-numeric: tabular-nums; font-size: 11px; }
-.tm { width: 73px; }
+.tm { min-width: 40px; }
 .sz { text-align: right; }
 .sz.large { color: var(--warn); font-weight: 680; }
 .st { flex: none; font-size: 11px; font-weight: 650; }
@@ -243,7 +262,9 @@ dialog .acts { justify-content: flex-end; margin-top: 12px; }
 .model-source { display: block; }
 
 @media (max-width: 880px) {
-  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .workspace, .workspace.team-folded { grid-template-columns: minmax(0, 1fr); }
+  .team-folded .team { flex-direction: row; flex-wrap: wrap; }
+  .team-folded .team-card .section-head { justify-content: space-between; }
   .workspace > * { grid-area: auto; }
   .team-card { position: static; }
 }
@@ -253,19 +274,12 @@ dialog .acts { justify-content: flex-end; margin-top: 12px; }
   .header-actions { gap: 5px; }
   .workspace { gap: 12px; }
   .card { padding: 12px; }
-  .agent { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 7px; padding-block: 9px; }
-  .agent-head { display: contents; }
-  .agent-identity, .agent-meta { grid-column: 1; }
-  .agent-meta { margin: 0; }
-  .agent-actions { grid-area: 1 / 2 / span 2; align-self: center; }
-  .agent-line, .activity-body, .agent > button { grid-column: 1 / -1; }
   .mfilter { gap: 5px; }
   .mfilter select { max-width: 43%; }
   textarea, input[type="text"], input[type="search"], select { font-size: 16px; }
   .msg > summary { gap: 5px; padding-inline: 1px; }
   .msg .route { flex-basis: 100px; min-width: 53px; }
   .msg .tm { width: auto; }
-  .msg .row-model { flex-basis: 62px; max-width: 74px; }
   .msg .sz { font-size: 10px; }
   .resources, .side2 { grid-template-columns: minmax(0, 1fr); }
   #talk { padding: 0; }
@@ -273,7 +287,7 @@ dialog .acts { justify-content: flex-end; margin-top: 12px; }
 }
 @media (pointer: coarse) {
   button, .btn, select, input[type="search"], label.chk, .notes-switch, summary.link,
-  .icon, summary.icon, .agent-actions .icon { min-height: 44px; }
+  .icon, summary.icon, .agent-actions .icon, .agent-sum { min-height: 44px; }
   button, .icon, summary.icon { min-width: 44px; }
   .msg > summary, .resources summary { min-height: 44px; }
 }

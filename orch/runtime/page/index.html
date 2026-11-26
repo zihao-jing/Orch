@@ -31,13 +31,14 @@
  <main>
   <section id="needs" class="card needs" aria-label="Needs you" hidden></section>
   <div id="notices" role="status"></div>
-  <div class="workspace">
+  <div class="workspace" id="workspace">
     <section class="card progress-card" aria-labelledby="prog-h">
      <div class="section-head"><h2 id="prog-h">Milestones</h2><button type="button" class="link" id="changems">Change milestones</button></div>
      <div id="progress"></div>
     </section>
     <aside class="card team-card" aria-labelledby="team-h">
-     <div class="section-head"><h2 id="team-h">Team</h2><button class="link" type="button" id="addworker">Add worker</button></div>
+     <div class="section-head"><h2 id="team-h">Team</h2><span class="grow"></span><button class="link" type="button" id="addworker">Add worker</button>
+      <button class="icon fold" type="button" id="teamfold" aria-controls="team" aria-expanded="true">›</button></div>
      <div id="team" class="team"></div>
     </aside>
     <section class="card timeline" aria-labelledby="msgs-h">
