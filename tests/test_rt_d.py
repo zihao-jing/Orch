@@ -204,7 +204,8 @@ class TestReview(unittest.TestCase):
         snap = snapshot(gc)
         acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="gc", approve=True))
         assert_has(self, acts, CloseGate, gate_id="gc")
-        assert_none(self, acts, Send)
+        m = assert_has(self, acts, Send, recipient="manager").message  # the manager is told it was approved
+        self.assertEqual(m.text.values["answers"][0]["approve"], True)
         acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="gc", approve=False, text="Keep m2."))
         m = assert_has(self, acts, Send, recipient="manager").message
         self.assertEqual(m.text.values["answers"][0]["approve"], False)
@@ -215,3 +216,62 @@ class TestReview(unittest.TestCase):
         acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="gpl", approve=True))
         m = assert_has(self, acts, Send, recipient="manager").message
         self.assertEqual(m.gates, ["gpl"])
+
+
+def rename(snap, critic="reviewer", manager="lead"):
+    for old, new in (("critic", critic), ("manager", manager)):
+        a = snap.agents.pop(old)
+        a.id = new
+        snap.agents[new] = a
+    return snap
+
+
+class TestReview2(unittest.TestCase):
+    def test_GATE_4_operational_gate_close_carries_no_answer(self):
+        op = gate("op-billing-worker-1", "operational", cause="billing", text="")
+        snap = snapshot(op)
+        acts = decide(G, snap, event(GateAnswer, snap, "", gate_id=op.id))
+        assert_has(self, acts, CloseGate)
+        assert_none(self, acts, Send)
+        acts = decide(G, snap, event(GateAnswer, snap, "", gate_id=op.id, text="Use the backup."))
+        self.assertEqual(assert_has(self, acts, Send).message.text.values["answers"][0]["answer"], "Use the backup.")
+
+    def test_GATE_6_pause_words_reach_the_manager_a_bare_close_does_not(self):
+        gp = gate("gp", "pause", text="wait")
+        snap = snapshot(gp, paused=True)
+        acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="gp", text="Go on, smaller batches"))
+        m = assert_has(self, acts, Send, recipient="manager").message
+        self.assertEqual(m.text.values["answers"][0]["answer"], "Go on, smaller batches")
+        assert_none(self, decide(G, snap, event(GateAnswer, snap, "", gate_id="gp")), Send)
+
+    def test_GATE_3_option_and_text_are_both_kept(self):
+        snap = snapshot(gate("g1", options=["pg", "sqlite"]))
+        acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="g1", option=1, text="only for tests"))
+        self.assertEqual(assert_has(self, acts, Send).message.text.values["answers"][0]["answer"],
+                         "sqlite: only for tests")
+
+    def test_MS_9_an_approved_milestone_lifts_the_held_decision_without_deciding_again(self):
+        held, gm = milestone("m1", held_decision="ACCEPT"), gate("gm", "milestone", milestone="m1")
+        snap = snapshot(held, gm)
+        acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="gm", approve=True))
+        m = assert_has(self, acts, Send, recipient="manager").message
+        self.assertEqual(m.text.values["decide_again"], "")
+        assert_has(self, acts, HoldDecision, milestone_id="m1", decision=None)
+        acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="gm", approve=False, text="Not yet."))
+        self.assertEqual(assert_has(self, acts, Send).message.text.values["decide_again"], "Milestone m1")
+
+    def test_GATE_3_the_record_says_approved_or_not(self):
+        snap = snapshot(gate("gm", "milestone", text="Milestone 1"))
+        rec = assert_has(self, decide(G, snap, event(GateAnswer, snap, "", gate_id="gm", approve=True)),
+                         RecordDecision)
+        self.assertIn("approved", rec.text)
+        rec = assert_has(self, decide(G, snap, event(GateAnswer, snap, "", gate_id="gm", approve=False, text="x")),
+                         RecordDecision)
+        self.assertIn("not approved", rec.text)
+
+    def test_other_agent_ids_the_answers_go_to_the_manager_whatever_its_id(self):
+        snap = rename(snapshot(gate("g1", options=["a"], agent="lead")))
+        acts = decide(G, snap, event(GateAnswer, snap, "", gate_id="g1", option=0))
+        assert_has(self, acts, Send, recipient="lead")
+        s, ev = turn_ended(snap, "lead", reply=labels.parse("<question>Q?</question>", Role.MANAGER))
+        assert_has(self, decide(G, s, ev), OpenGate, gate__agent="lead")

@@ -53,6 +53,9 @@ def _add(snap: Snapshot, cmd: WorkerAdd) -> List[Action]:
     if like is None or like.role != Role.WORKER:
         return _refuse(cmd, Refusal.UNKNOWN)
     wid = cmd.agent or _next_id(snap)
+    reserved = {USER, ORCH} | {a.id for a in snap.agents.values() if a.role != Role.WORKER}
+    if not re.fullmatch(r"[a-z0-9-]+", wid) or wid in reserved:
+        return _refuse(cmd, Refusal.NOT_POSSIBLE)
     if wid in snap.agents:
         return _refuse(cmd, Refusal.ALREADY)
     choices = [c for c in like.choices] or [like.choice]

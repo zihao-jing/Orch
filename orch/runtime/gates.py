@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from .contracts import (
-    Action, Answer, CloseGate, CommandReply, Decision, Drop, DropReason, Event, Gate, GateAnswer,
+    ANSWER_GATES, Action, Answer, CloseGate, CommandReply, Decision, Drop, DropReason, Event, Gate, GateAnswer,
     GateKind, Hold, HoldDecision, HoldReason, Message, OpenGate, Refusal, RecordDecision, Role, Send, Snapshot, Tell, TextKey,
     TextRef, Trigger, TurnEnded, TurnStatus, USER, new_id, ORCH)
 
@@ -98,14 +98,19 @@ def _answer(snap: Snapshot, cmd: GateAnswer) -> List[Action]:
     return _send_answers(snap, cmd, acts, g.id, answer)
 
 
+def _words(g: Gate, a: Answer) -> str:
+    """The option and the text both: "option: text"."""
+    option = g.options[a.option] if a.option is not None and a.option < len(g.options) else ""
+    return ": ".join(x for x in (option, a.text) if x)
+
+
 def _answer_text(g: Gate, a: Answer) -> str:
-    words = a.text or (g.options[a.option] if a.option is not None else "")
-    return f"{g.text}: {words}".strip(": ") if words else g.text
+    verdict = {True: "approved", False: "not approved", None: ""}[a.approve]
+    return ": ".join(x for x in (g.text, _words(g, a), verdict) if x)
 
 
 def _entry(g: Gate, a: Answer) -> Dict[str, Any]:
-    option = g.options[a.option] if a.option is not None and a.option < len(g.options) else ""
-    return {"kind": g.kind, "question": g.text, "answer": a.text or option, "approve": a.approve}
+    return {"kind": g.kind, "question": g.text, "answer": _words(g, a), "approve": a.approve}
 
 
 # -------------------------------------------------------------------------------------- the one answer message
@@ -124,16 +129,19 @@ def _send_answers(snap: Snapshot, ev: Event, acts: List[Action], closing: Option
     for g in sorted(snap.gates.values(), key=lambda g: (g.opened, g.id)):
         a = answer if g.id == closing else g.answer
         if g.id == closing or (g.closed and not g.withdrawn):
-            if a is not None and not g.sent_in and g.kind != GateKind.PAUSE and _carries(g, a):
+            if a is not None and not g.sent_in and _carries(g, a):
                 entries.append(_entry(g, a))
                 ids.append(g.id)
     held = [m for m in snap.messages.values()
             if m.drop is None and (HoldReason.QUESTION in m.holds or HoldReason.GATES in m.holds)]
     waiting = [m for m in snap.milestones if m.held_decision is not None]
+    approved = {snap.gates[i].milestone for i in ids if snap.gates[i].kind == GateKind.MILESTONE
+                and (answer if i == closing else snap.gates[i].answer).approve}
+    again_ms = [m for m in waiting if m.id not in approved]  # an approved milestone needs no new decision
     if not entries and not waiting:
         return acts
     unsent = [{"to": m.recipient, "body": m.body} for m in held if m.sender != ORCH]
-    again = waiting[0].title if waiting else ""
+    again = again_ms[0].title if again_ms else ""
     msg = Message(new_id(NAME, ev, 10), ORCH, manager.id, "",
                   TextRef(TextKey.GATE_ANSWERS, {"answers": entries, "unsent": unsent, "decide_again": again}),
                   True, Trigger.GATE_ANSWER, gates=ids)
@@ -144,8 +152,8 @@ def _send_answers(snap: Snapshot, ev: Event, acts: List[Action], closing: Option
 
 
 def _carries(g: Gate, a: Answer) -> bool:
-    """An approved change of milestones takes effect with its CloseGate and needs no message to the manager."""
-    return not (g.kind == GateKind.MILESTONE_CHANGE and a.approve)
+    """An answer gate's answer goes to the manager (a pause only when words came with it); so does any text."""
+    return (g.kind in ANSWER_GATES and (g.kind != GateKind.PAUSE or bool(a.text))) or bool(a.text)
 
 
 class _Module:

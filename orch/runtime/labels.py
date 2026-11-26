@@ -18,14 +18,17 @@ LABELS = {Role.MANAGER: MANAGER_LABELS, Role.CRITIC: CRITIC_LABELS}
 KNOWN = set(MANAGER_LABELS) | {"silent", "plan", "checklist", "verdict", "wait-job", "no-wait", "preference",
                                "instruction", "workers", "to", "discussion-resolution"}
 
-_TAG = re.compile(r"<(/?)([a-z][a-z-]*)((?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*)\s*(/?)>", re.I)
+_TAG = re.compile(r"<(/?)([a-z][a-z-]*)\b([^<>]*)>", re.I)
 _ATTR = re.compile(r"([\w-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>/]+))")
-_CODE = re.compile(r"(?:```|~~~).*?(?:```|~~~|\Z)|`[^`\n]*`", re.S)
+_ATTRS_OK = re.compile(r"(?:\s+[\w-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>/]+))*\s*")
+# a fence starts a line and ends at a line with the same fence string; inline code is closed by the same run of backticks
+_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?(?:^[ \t]*\1[`~]*[ \t]*$|\Z)", re.S | re.M)
+_INLINE = re.compile(r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)")
 _QUOTE = re.compile(r"^[ \t]*>.*$", re.M)
 _CITATION = re.compile(r":codex-file-citation(?:\[[^\]]*\])?\{([^}]*)\}")
 _PATH = re.compile(r"path=(.*?)(?=\s+[\w-]+=|$)", re.S)
-_OPTION = re.compile(r"^\s*(?:[-*]|\(?[A-Za-z0-9]{1,2}[).:])\s+(\S.*)$")
-_HEALTH = re.compile(r"\b(healthy|quiet|off[-_ ]?track|stopped)\b", re.I)
+_OPTION = re.compile(r"^\s*(?:[-*]|(?:\(?[A-Za-z]|\d{1,2})[).])\s+(\S.*)$")
+_HEALTH = re.compile(r"(?<!not )(?<!n't )\b(healthy|quiet|off[-_ ]?track|stopped)\b", re.I)
 
 
 def clean(text: str) -> str:
@@ -42,7 +45,7 @@ def _blank(m: "re.Match[str]") -> str:
 
 def _masked(text: str) -> str:
     """Same length, with code and quoted lines blanked out."""
-    return _QUOTE.sub(_blank, _CODE.sub(_blank, text))
+    return _QUOTE.sub(_blank, _INLINE.sub(_blank, _FENCE.sub(_blank, text)))
 
 
 def _attrs(raw: str) -> Dict[str, str]:
@@ -54,43 +57,42 @@ def _one_line(s: str) -> str:
 
 
 def _scan(text: str, names: Tuple[str, ...]):
-    """[(name, attrs, body, start, end, problem)] for every label-looking tag outside code and quotes."""
+    """[(name, attrs, body, start, end, problem, raw)] for every label-looking tag outside code and quotes."""
     m_text = _masked(text)
     tags = [m for m in _TAG.finditer(m_text) if m.group(2).lower() in KNOWN]
     found, i = [], 0
     while i < len(tags):
         t = tags[i]
-        name, attrs = t.group(2).lower(), _attrs(t.group(3))
-        i += 1
+        name, i = t.group(2).lower(), i + 1
+        rest = t.group(3).rstrip()
+        selfclosed = rest.endswith("/")
+        rest = rest[:-1] if selfclosed else rest
         if t.group(1):  # a close with no open
             found.append((name, {}, "", t.start(), t.end(), Problem.UNCLOSED, t.group(0)))
             continue
-        if name not in names:
-            # a removed label still takes its whole block with it, so its inner text is not read
-            close = next((c for c in tags[i:] if c.group(1) and c.group(2).lower() == name), None)
-            end = close.end() if close and not t.group(4) and name != "silent" else t.end()
-            while i < len(tags) and tags[i].start() < end:
-                i += 1
-            found.append((name, attrs, "", t.start(), end, Problem.REMOVED, t.group(0)))
-            continue
-        if t.group(4) or name == "silent":  # <x/>, or <silent> alone
+        attrs, problem = _attrs(rest), None
+        if not _ATTRS_OK.fullmatch(rest):  # unreadable attributes
+            problem = Problem.NO_RECIPIENT
+        if selfclosed or name == "silent":  # <x/>, or <silent> alone
             end = t.end()
             if name == "silent" and i < len(tags) and tags[i].group(1) and tags[i].group(2).lower() == "silent" \
                     and not m_text[end:tags[i].start()].strip():
                 end = tags[i].end()
                 i += 1
-            found.append((name, attrs, "", t.start(), end, None, t.group(0)))
-            continue
-        close = next((c for c in tags[i:] if c.group(1) and c.group(2).lower() == name), None)
-        again = next((c for c in tags[i:] if not c.group(1) and c.group(2).lower() == name), None)
-        if close and not (again and again.start() < close.start()):
-            body, end = text[t.end():close.start()], close.end()
-            while i < len(tags) and tags[i].start() < end:  # tags inside a body are part of it
-                i += 1
-            found.append((name, attrs, body.strip(), t.start(), end, None, t.group(0)))
-        else:  # left open: runs to the next label or the end
-            end = tags[i].start() if i < len(tags) else len(text)
-            found.append((name, attrs, text[t.end():end].strip(), t.start(), end, Problem.UNCLOSED, t.group(0)))
+            body = ""
+        else:
+            close = next((c for c in tags[i:] if c.group(1) and c.group(2).lower() == name), None)
+            again = next((c for c in tags[i:] if not c.group(1) and c.group(2).lower() == name), None)
+            if close and not (again and again.start() < close.start()):
+                body, end = text[t.end():close.start()].strip(), close.end()
+                while i < len(tags) and tags[i].start() < end:  # tags inside a body are part of it
+                    i += 1
+            else:  # left open: runs to the next label or the end
+                end = tags[i].start() if i < len(tags) else len(text)
+                body, problem = text[t.end():end].strip(), problem or Problem.UNCLOSED
+        if name not in names:
+            problem = Problem.REMOVED
+        found.append((name, attrs, body, t.start(), end, problem, t.group(0)))
     return found
 
 
@@ -125,7 +127,7 @@ def parse(text: str, role: Role) -> Reply:
         if problem is None:
             problem = _read(reply, name, attrs, body)
         if problem is not None:
-            reply.broken.append(BrokenLabel(_one_line(raw if name not in names else raw + body), problem, body))
+            reply.broken.append(BrokenLabel(_one_line(raw), problem, body))
     parts, pos = [], 0
     for start, end in sorted(cut):
         parts.append(text[pos:start])

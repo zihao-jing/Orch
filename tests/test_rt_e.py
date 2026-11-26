@@ -93,10 +93,9 @@ class TestUnanswered(unittest.TestCase):
         snap = self.snap()
         snap.agents["critic"].status, snap.agents["critic"].idle_since = AgentStatus.WRITING, 0.0
         self.assertEqual(run_tick(snap), [])
-        for hold in ("holds", "retry", "switch"):
+        for hold in ("holds", "retry"):
             snap = self.snap()
-            setattr(snap.agents["critic"], hold, [HoldReason.TERMINAL] if hold == "holds" else
-                    (RetryState() if hold == "retry" else Switch("critic")))
+            setattr(snap.agents["critic"], hold, [HoldReason.TERMINAL] if hold == "holds" else RetryState())
             self.assertEqual(run_tick(snap), [], hold)
         snap = self.snap()
         snap.messages["m1"].sent_at = 0.0  # never really sent
@@ -357,3 +356,149 @@ class TestNight(unittest.TestCase):
         assert_has(self, g, RecordDecision, by="manager")
         # nothing open: the silence rule works as by day
         assert_has(self, run_tick(replace(snap)), AskManagerToCheck)
+
+
+def rename(snap, critic="reviewer", manager="lead"):
+    for old, new in (("critic", critic), ("manager", manager)):
+        a = snap.agents.pop(old)
+        a.id = new
+        snap.agents[new] = a
+    return snap
+
+
+class TestReview2(unittest.TestCase):
+    def test_MSG_5_a_pending_switch_does_not_stop_the_timer_and_attempts_alone_do_not_fail(self):
+        m = message("m1", "critic", sender="manager", sent_at=T0 - 400, attempts=2)
+        snap = snapshot(agent("critic", idle_since=T0 - 400, switch=Switch("critic")), m)
+        assert_has(self, run_tick(snap), Resend, message_id="m1")
+
+    def test_SIL_4_the_TURN_hold_does_not_stop_the_frozen_rule_other_holds_do(self):
+        w = lambda **kw: snapshot(agent("worker-1", status="writing", last_output=T0 - 2500, **kw))
+        assert_has(self, run_tick(w(holds=[HoldReason.TURN])), RestartSession)
+        for hold in (HoldReason.TERMINAL, HoldReason.SWITCH, HoldReason.STOPPED):
+            self.assertEqual(run_tick(w(holds=[hold])), [], hold)
+
+    def test_SIL_4_a_retry_counts_from_its_wait_and_a_switch_only_stops_it_while_opening(self):
+        w = lambda **kw: snapshot(agent("worker-1", status="writing", last_output=T0 - 2500, **kw))
+        self.assertEqual(run_tick(w(retry=RetryState(until=T0 - 100))), [])
+        assert_has(self, run_tick(w(retry=RetryState(until=T0 - 2450))), RestartSession)
+        for step, stops in ((SwitchStep.TESTING, True), (SwitchStep.OPENING, True), (SwitchStep.PENDING, False)):
+            acts = run_tick(w(switch=Switch("worker-1", step=step)))
+            self.assertEqual(not acts, stops, step)
+
+    def test_SIL_4_a_closed_frozen_gate_opens_again_after_forty_minutes(self):
+        def snap(closed):
+            g = gate("op-frozen-critic", "operational", cause="frozen", agent="critic", closed=closed)
+            return snapshot(agent("critic", status="writing", last_output=T0 - 9000, frozen_restart=T0 - 8000), g)
+        assert_has(self, run_tick(snap(T0 - 2500)), OpenGate, gate__cause=GateCause.FROZEN)
+        self.assertEqual(run_tick(snap(T0 - 100)), [])
+        self.assertEqual(run_tick(snap(0.0)), [])  # still open
+
+    def test_JOB_5_a_critic_that_ran_a_job_is_woken_too(self):
+        snap = snapshot(agent("critic", caps=replace(ALL_CAPS, wakes_itself=False)),
+                        job("critic/j1", state="ended", ended=T0 - 500))
+        assert_has(self, run_tick(snap), WakeWorker, recipient="critic", key=TextKey.JOB_WAKEUP)
+
+    def test_JOB_5_the_user_sees_a_fallback_only_where_the_cli_wakes_itself(self):
+        mk = lambda wakes: snapshot(job("worker-1/j1", state="ended", ended=T0 - 500),
+                                    agent("worker-1", idle_since=T0 - 500, caps=replace(ALL_CAPS, wakes_itself=wakes)))
+        assert_has(self, run_tick(mk(True)), ToUser, key=TextKey.NOTE_WAKEUP_SENT)
+        assert_none(self, run_tick(mk(False)), ToUser)
+
+    def test_SIL_1_a_failed_agent_blocks_nothing_and_restarts_no_work(self):
+        snap = snapshot(agent("worker-1", failed_why="x"), message("m1", "worker-1", sender="critic", status="waiting"),
+                        job("worker-1/j1", state="ended", ended=T0 - 500), silence=Silence(tries=1, asked_at=T0 - 100))
+        acts = run_tick(snap)
+        assert_none(self, acts, ResetSilence)
+        assert_has(self, acts, AskManagerToCheck)
+
+    def test_SIL_5_a_reply_the_user_sends_on_is_a_round_too(self):
+        reply = message("r1", "user", "worker-1", status="delivered", needs_answer=False, turn="t9", body="Mine.")
+        reply.sender, reply.seq = "worker-1", 5
+        snap = snapshot(reply)
+        r = decide(routing_module(), snap, event(SendToCritic, snap, "", message_id="r1"))
+        assert_has(self, decide(S, snap, event(SendToCritic, snap, "", message_id="r1"), prior=r), CountRound)
+
+    def test_other_agent_ids_nothing_assumes_critic_or_manager(self):
+        snap = rename(snapshot(silence=Silence()))
+        assert_has(self, run_tick(snap), AskManagerToCheck, recipient="lead")
+        s, ev = turn_ended(rename(snapshot()), "worker-1", "Done.")
+        r = decide(routing_module(), s, ev)
+        self.assertEqual(len(find(decide(S, s, ev, prior=r), CountRound)), 1)
+        snap = rename(snapshot(job("worker-1/j1", state="running", started=T0 - 4000)))
+        snap.orch_started = T0 - 5000
+        assert_has(self, run_tick(snap), Tell, recipient="reviewer", key=TextKey.JOB_NO_PROGRESS)
+
+    def test_WRK_2_added_ids_must_be_plain_and_not_reserved(self):
+        snap = snapshot()
+        for bad in ("Worker 5", "user", "orch", "critic", "manager", "w/1"):
+            acts = decide(W, snap, event(WorkerAdd, snap, bad))
+            assert_has(self, acts, CommandReply, ok=False)
+            assert_none(self, acts, AddWorker)
+        assert_has(self, decide(W, snap, event(WorkerAdd, snap, "worker-7")), AddWorker)
+
+    def test_JOB_2_an_ended_job_not_yet_with_its_worker_is_an_intermediate_ending_and_keeps_things_active(self):
+        snap = snapshot(job("worker-1/j1", state="ended", ended=T0 - 5))
+        s, _ = turn_ended(snap, "worker-1", "Waiting for it.")
+        self.assertEqual(s.turns["worker-1"].ending, Ending.INTERMEDIATE)
+        self.assertEqual(find(run_tick(snap), AskManagerToCheck), [])
+        snap.jobs["worker-1/j1"].woke = True
+        s, _ = turn_ended(snap, "worker-1", "Done.")
+        self.assertEqual(s.turns["worker-1"].ending, Ending.FINAL)
+        assert_has(self, run_tick(snap), AskManagerToCheck)
+
+    def test_SIL_3_the_manager_answers_a_check_by_messaging_the_critic_and_that_restarts_the_count(self):
+        snap = snapshot(silence=Silence(tries=1, asked_at=T0 - 100))
+        s, ev = turn_ended(snap, "manager", reply=labels.parse('<message to="critic">Continue with tests.</message>',
+                                                               Role.MANAGER))
+        sent = assert_has(self, decide(routing_module(), s, ev), Send, recipient="critic").message
+        s.messages[sent.id] = replace(sent, status=MessageStatus.WAITING)
+        assert_actions(self, run_tick(s), [ResetSilence])
+
+    def test_JOB_8_a_server_that_never_ends_blocks_neither_other_jobs_nor_its_one_report(self):
+        server = job("worker-1/srv", state="running", started=T0 - 9000)
+        other = job("worker-2/j1", state="ended", ended=T0 - 500)
+        snap = snapshot(server, other, agent("worker-2", idle_since=T0 - 500), workers=2)
+        snap.orch_started = T0 - 10000
+        acts = run_tick(snap)
+        assert_has(self, acts, ReportJob, job_id="worker-1/srv")
+        assert_has(self, acts, WakeWorker, recipient="worker-2")
+        snap.jobs["worker-1/srv"].reported = True
+        assert_none(self, run_tick(snap), ReportJob)
+        assert_none(self, run_tick(snap), AskManagerToCheck)  # a running job is activity
+
+
+class TestMonitor2(unittest.TestCase):
+    def snap(self, **kw):
+        w = agent("worker-1", status="writing", last_output=T0 + 1200)
+        return snapshot(agent("monitor", **kw), w, now=T0 + 1300)
+
+    def test_REC_10_an_error_turn_of_the_check_counts_as_a_failure(self):
+        snap = self.snap()
+        snap.watch["worker-1"] = Watch("worker-1", asked="c1", failures=1)
+        snap.messages["c1"] = message("c1", "monitor", key=TextKey.MONITOR_CHECK, status="answered")
+        s, ev = turn_ended(snap, "monitor", error="transient", started_by=["c1"])
+        acts = decide(S, s, ev)
+        assert_has(self, acts, ToUser, key=TextKey.NOTE_MONITOR_FAILED)
+        assert_has(self, acts, Tell, recipient="critic", key=TextKey.NOBODY_WATCHES)
+        self.assertEqual(len(find(acts, SetWatch)), 1)
+
+    def test_REC_10_a_failed_monitor_with_a_check_due_is_a_failure_with_one_setwatch(self):
+        snap = self.snap(failed_why="x")
+        acts = run_tick(snap)
+        assert_has(self, acts, ToUser, key=TextKey.NOTE_MONITOR_FAILED)
+        self.assertEqual(len(find(acts, SetWatch)), 1)
+        assert_none(self, acts, Send, key=TextKey.MONITOR_CHECK)
+
+    def test_REC_10_items_carry_their_marks(self):
+        snap = self.snap()
+        snap.checklist = Checklist("c.md", "d", [ChecklistStep("S", False, [(True, "a"), (False, "b")])])
+        acts = run_tick(snap)
+        c = assert_has(self, acts, Send, key=TextKey.MONITOR_CHECK).message
+        self.assertEqual(c.text.values["items"], ["- [x] a", "- [ ] b"])
+
+    def test_REC_10_a_lost_check_and_a_new_one_make_one_setwatch(self):
+        snap = self.snap()
+        snap.watch["worker-1"] = Watch("worker-1", asked="gone", checked_at=0.0)
+        acts = run_tick(snap)
+        self.assertEqual(len(find(acts, SetWatch)), 1)

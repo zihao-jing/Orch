@@ -242,3 +242,81 @@ class TestChat(unittest.TestCase):
             acts = decide(R, snap, event(Chat, snap, who, text=text))
             r = assert_has(self, acts, CommandReply, ok=False)
             self.assertEqual(r.text.values["why"], why)
+
+
+def rename(snap, critic="reviewer", manager="lead"):
+    for old, new in (("critic", critic), ("manager", manager)):
+        a = snap.agents.pop(old)
+        a.id = new
+        snap.agents[new] = a
+    return snap
+
+
+class TestReview2(unittest.TestCase):
+    def test_LAB_1_a_removed_label_keeps_its_body(self):
+        r = labels.parse("<question>Which dataset, A or B?</question>Go.", Role.CRITIC)
+        self.assertEqual([(b.problem, b.body) for b in r.broken], [(Problem.REMOVED, "Which dataset, A or B?")])
+        self.assertEqual(r.untagged, "Go.")
+        r = labels.parse("<verdict>PASS <message to=\"worker-1\">x</message>", Role.CRITIC)  # opened again: no swallowing
+        self.assertEqual(len(r.messages), 1)
+
+    def test_LAB_5_code_is_masked_exactly(self):
+        r = labels.parse("Use ``<silent/>`` here.", Role.CRITIC)
+        self.assertFalse(r.silent)
+        text = 'Example:\n````\n```\n<message to="worker-1">in</message>\n```\n````\nafter <silent/>'
+        r = labels.parse(text, Role.CRITIC)
+        self.assertEqual((r.messages, r.silent), ([], True))
+        r = labels.parse('wrap it in ``` fences. <message to="worker-1">Do X.</message> <silent/>', Role.CRITIC)
+        self.assertEqual(len(r.messages), 1)
+        self.assertTrue(r.silent)
+
+    def test_LAB_5_a_tag_with_unreadable_attributes_is_broken_not_text(self):
+        r = labels.parse("<message worker-1>Do X.</message>", Role.CRITIC)
+        self.assertEqual([(b.problem, b.body) for b in r.broken], [(Problem.NO_RECIPIENT, "Do X.")])
+        self.assertEqual((r.messages, r.untagged), ([], ""))
+
+    def test_REC_10_not_healthy_is_not_healthy(self):
+        self.assertIsNone(labels.parse("Not healthy at all.", Role.MONITOR).health)
+        self.assertEqual(labels.parse("Not healthy, stopped.", Role.MONITOR).health, Health.STOPPED)
+
+    def test_GATE_1_only_real_option_markers_are_options(self):
+        r = labels.parse("<question>Which?\nA) one\n2. two\n- three\nPS: soon\nNo. never</question>", Role.MANAGER)
+        self.assertEqual(r.questions[0].options, ["one", "two", "three"])
+        self.assertIn("PS: soon", r.questions[0].text)
+
+    def test_other_agent_ids_routing_uses_the_critic_and_manager_by_role(self):
+        snap = rename(snapshot(message("m1", "worker-1", sender="critic")))
+        _, acts = routed(snap, "worker-1", "Done.", started_by=["m1"])
+        assert_has(self, acts, Send, recipient="reviewer", key=TextKey.WORKER_FINAL)
+        _, acts = routed(snap, "reviewer", "Blocked.")
+        assert_has(self, acts, Send, recipient="lead", key=TextKey.CRITIC_REPORT)
+        _, acts = routed(snap, "lead", '<message to="worker-1">Use B.</message>')
+        assert_has(self, acts, Tell, recipient="reviewer", key=TextKey.DIRECT_MESSAGE_NOTICE)
+        _, acts = routed(snap, "reviewer", '<message to="lead">hi</message>')
+        assert_has(self, acts, ReturnToSender, recipient="reviewer")
+        acts = decide(R, snap, event(Chat, snap, "worker-1", text="x"))
+        assert_has(self, acts, Tell, recipient="reviewer")
+
+    def test_DISC_1_a_draft_sends_no_notice_and_rejects_nothing(self):
+        snap = snapshot(Discussion("manager"))
+        _, acts = routed(snap, "manager", '<message to="worker-1">Use B.</message><message to="ghost">x</message>')
+        assert_none(self, acts, Tell)
+        assert_none(self, acts, Reject)
+        assert_has(self, acts, Send, recipient="worker-1")
+        snap = snapshot(Discussion("critic"), workers=0)
+        _, acts = routed(snap, "critic", 'Thinking aloud. <message to="worker-9">x</message>')
+        assert_none(self, acts, Reject)
+        assert_none(self, acts, Send, recipient="manager")
+        assert_has(self, acts, ToUser, body="Thinking aloud.")  # DISC-5
+
+    def test_LAB_3_a_summary_with_no_gate_goes_to_the_user(self):
+        _, acts = routed(snapshot(), "manager", "<summary>Changed X, checked Y.</summary>")
+        assert_has(self, acts, ToUser, body="Changed X, checked Y.")
+        for text in ("<summary>S</summary><question>Q?</question>", "<summary>S</summary><decision>ACCEPT</decision>"):
+            _, acts = routed(snapshot(), "manager", text)
+            assert_none(self, acts, ToUser)
+
+    def test_UI_the_monitor_takes_no_user_chat(self):
+        snap = snapshot(agent("monitor"))
+        acts = decide(R, snap, event(Chat, snap, "monitor", text="hello"))
+        self.assertEqual(assert_has(self, acts, CommandReply, ok=False).text.values["why"], Refusal.WRONG_ROLE)

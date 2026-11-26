@@ -9,7 +9,7 @@ import re
 from typing import Any, List, Optional, Sequence, Tuple
 
 from .contracts import (
-    Action, Agent, BrokenLabel, Chat, CommandReply, Drop, DropReason, Ending, Event, HoldReason, Hold, Lifecycle,
+    Action, Agent, BrokenLabel, Chat, CommandReply, Decision, Drop, DropReason, Ending, Event, HoldReason, Hold, Lifecycle,
     Message, Problem, Refusal, Reject, ReturnToSender, Role, SaveNotes, Send, SendToCritic, Snapshot,
     Tell, TextKey, TextRef, ToUser, Trigger, TurnEnded, TurnStatus, USER, new_id)
 
@@ -96,17 +96,17 @@ def _reply(snap: Snapshot, ev: TurnEnded) -> List[Action]:
 
 def _worker(snap: Snapshot, out: _Out, agent: Agent, turn) -> None:
     """LAB-2, LAB-6, WRK-4, JOB-3, WRK-8: the whole reply, to the critic unless only the user's chat started it."""
-    text = turn.reply.text
+    text, critic = turn.reply.text, snap.critic
     if set(turn.triggers) == {Trigger.USER_CHAT}:
         m = out.message(agent.id, USER, text, trigger=Trigger.WORKER, turn=turn.id)
         out.add(ToUser, m)
-    else:
+    elif critic is not None:
         if turn.ending == Ending.INTERMEDIATE:
             key, values = TextKey.WORKER_INTERMEDIATE, {"worker": agent.id,
                                                        "jobs": [j.label for j in snap.open_jobs(agent.id)]}
         else:
             key, values = TextKey.WORKER_FINAL, {"worker": agent.id}
-        m = out.add(Send, out.message(agent.id, "critic", text, key, values, Trigger.WORKER, turn=turn.id))
+        m = out.add(Send, out.message(agent.id, critic.id, text, key, values, Trigger.WORKER, turn=turn.id))
         if not agent.is_open:  # recorded, never routed (WRK-4, WRK-5)
             out.actions.append(Drop(m.id, DropReason.WORKER_CLOSED))
 
@@ -123,32 +123,35 @@ def _upper(snap: Snapshot, out: _Out, agent: Agent, turn) -> None:
         if problem:
             broken.append(BrokenLabel(f'<message to="{om.to}">', problem, om.body))
         elif to is None:
-            _reject(snap, out, agent, om.to, om.body, trigger, turn.id)
+            if not drafting:  # a draft is not sent, so nothing is rejected
+                _reject(snap, out, agent, om.to, om.body, trigger, turn.id)
         elif to == USER:
             out.add(ToUser, out.message(me, USER, om.body, trigger=trigger, turn=turn.id))
         else:
             sent.append(out.add(Send, out.message(me, to, om.body, trigger=trigger, turn=turn.id)))
-            if snap.agents[to].role == Role.WORKER and agent.role == Role.MANAGER:  # MSG-9
-                sent.append(_notice(out, to, om.body))
+            if snap.agents[to].role == Role.WORKER and agent.role == Role.MANAGER and not drafting:  # MSG-9
+                sent.append(_notice(out, snap, to, om.body))
     if held_by_question:  # GATE-2: nothing of this reply goes to the critic or workers
         out.actions += [Hold(m.id, HoldReason.QUESTION) for m in sent]
-    if agent.role == Role.CRITIC:
-        if reply.untagged:
-            m = out.add(Send, out.message(me, "manager", reply.untagged, TextKey.CRITIC_REPORT, None, trigger,
+    if agent.role == Role.CRITIC and not drafting:
+        if reply.untagged and snap.manager is not None:
+            m = out.add(Send, out.message(me, snap.manager.id, reply.untagged, TextKey.CRITIC_REPORT, None, trigger,
                                           turn=turn.id))
             if reply.silent:  # LAB-4: shown on the dashboard only
                 out.actions.append(Drop(m.id, DropReason.SILENT))
-    else:
+    else:  # the manager's words, or a critic's in a discussion (DISC-5), are for the user
         if reply.untagged:
             out.add(ToUser, out.message(me, USER, reply.untagged, trigger=trigger, turn=turn.id))
-        if reply.state:
+        if reply.summary and not (reply.questions or reply.pauses or reply.decision in (Decision.ACCEPT, Decision.PAUSE)):
+            out.add(ToUser, out.message(me, USER, reply.summary, trigger=trigger, turn=turn.id))  # no gate carries it
+        if reply.state and agent.role == Role.MANAGER:
             out.actions.append(SaveNotes(me, reply.state))
     if not drafting:
         _broken(snap, out, agent, turn, broken)
 
 
-def _notice(out: _Out, worker: str, body: str) -> Message:
-    return out.add(Tell, out.message(ORCH_ID, "critic", body, TextKey.DIRECT_MESSAGE_NOTICE, {"worker": worker},
+def _notice(out: _Out, snap: Snapshot, worker: str, body: str) -> Message:
+    return out.add(Tell, out.message(ORCH_ID, snap.critic.id if snap.critic else "", body, TextKey.DIRECT_MESSAGE_NOTICE, {"worker": worker},
                                      needs_answer=False))
 
 
@@ -165,7 +168,7 @@ def _reject(snap: Snapshot, out: _Out, agent: Agent, to: str, body: str, trigger
     out.n += 1
     out.actions.append(Reject(message=note, rejected=rejected))
     if not available and agent.role == Role.CRITIC and snap.manager:
-        out.add(Send, out.message(ORCH_ID, "manager", "", TextKey.NO_WORKERS))
+        out.add(Send, out.message(ORCH_ID, snap.manager.id, "", TextKey.NO_WORKERS))
 
 
 def _broken(snap: Snapshot, out: _Out, agent: Agent, turn, broken: List[BrokenLabel]) -> None:
@@ -179,7 +182,7 @@ def _broken(snap: Snapshot, out: _Out, agent: Agent, turn, broken: List[BrokenLa
             continue
         values = {"sender": agent.id, "label": b.label, "problem": b.problem}
         if agent.role == Role.CRITIC and snap.manager:
-            out.add(Send, out.message(agent.id, "manager", b.body, TextKey.LABEL_BROKEN_PASSED, values,
+            out.add(Send, out.message(agent.id, snap.manager.id, b.body, TextKey.LABEL_BROKEN_PASSED, values,
                                       Trigger.CRITIC, turn=turn.id))
         elif agent.role == Role.MANAGER:
             out.add(ToUser, out.message(agent.id, USER, b.body, TextKey.LABEL_BROKEN_PASSED, values,
@@ -203,12 +206,12 @@ def _chat(snap: Snapshot, cmd: Chat) -> List[Action]:
         return _refuse(cmd, Refusal.EMPTY)
     if a.lifecycle != Lifecycle.OPEN:
         return _refuse(cmd, Refusal.CLOSED if a.lifecycle == Lifecycle.CLOSED else Refusal.DELETED)
-    if a.role == Role.AUDITOR:
+    if a.role in (Role.AUDITOR, Role.MONITOR):
         return _refuse(cmd, Refusal.WRONG_ROLE)
     out = _Out(cmd)
     out.add(Send, out.message(USER, a.id, cmd.text.strip(), trigger=Trigger.USER_CHAT))
     if a.role == Role.WORKER and snap.critic:
-        _notice(out, a.id, cmd.text.strip())
+        _notice(out, snap, a.id, cmd.text.strip())
     out.actions.append(CommandReply(cmd.id))
     return out.actions
 
@@ -224,7 +227,7 @@ def _to_critic(snap: Snapshot, cmd: SendToCritic) -> List[Action]:
            for x in snap.messages.values()):
         return _refuse(cmd, Refusal.ALREADY)
     out = _Out(cmd)
-    out.add(Send, out.message(m.sender, "critic", m.body, TextKey.WORKER_TO_CRITIC,
+    out.add(Send, out.message(m.sender, snap.critic.id, m.body, TextKey.WORKER_TO_CRITIC,
                               {"worker": m.sender, "question": _asked(snap, m)}, Trigger.WORKER, turn=m.turn))
     out.actions.append(CommandReply(cmd.id))
     return out.actions
