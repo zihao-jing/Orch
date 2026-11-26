@@ -31,6 +31,11 @@ def _drafts(snap: Snapshot, agent: str) -> List[C.Message]:
             if m.sender == agent and HoldReason.DRAFT in m.holds and m.drop is None]
 
 
+def _asked_change(snap: Snapshot, agent: str) -> bool:
+    """A milestone change request to the manager is still unanswered (MS-10, 11)."""
+    return any(m.key == K.MILESTONE_CHANGE_REQUEST and m.recipient == agent and m.open for m in snap.messages.values())
+
+
 class _Module:
     name = NAME
 
@@ -64,7 +69,8 @@ class _Module:
             why = Refusal.ALREADY
         if why:
             return [_refusal(ev, why)]
-        return [C.SetDiscussion(a.id, Discussion(a.id, started=snap.now)), C.CommandReply(ev.id)]
+        return [C.SetDiscussion(a.id, Discussion(a.id, started=snap.now, milestone_change=_asked_change(snap, a.id))),
+                C.CommandReply(ev.id)]
 
     def finish(self, snap: Snapshot, ev) -> List[C.Action]:
         """Apply (DISC-3) or end (DISC-4). A discussion opened by a terminal stays while the terminal is open."""
@@ -92,14 +98,15 @@ class _Module:
         opened = any(isinstance(x, C.OpenTerminal) and x.terminal.agent == ev.agent for x in prior)
         if not (opened and a and a.role in ROLES) or ev.agent in snap.discussions:
             return []
-        return [C.SetDiscussion(a.id, Discussion(a.id, started=snap.now, by_terminal=True))]
+        return [C.SetDiscussion(a.id, Discussion(a.id, started=snap.now, by_terminal=True,
+                                                 milestone_change=_asked_change(snap, a.id)))]
 
     def change(self, snap: Snapshot, ev: C.ChangeMilestones, prior: Sequence[C.Action]) -> List[C.Action]:
-        """MS-11: the user asked for a milestone change inside the discussion: applying it opens the gate."""
+        """MS-11: the user asked for a milestone change while a discussion with the manager is open (also one being
+        applied): applying it opens the gate. Judged from the command itself, as milestones decides after this."""
         m = snap.manager
         d = snap.discussions.get(m.id) if m else None
-        sent = any(isinstance(x, C.Send) and x.message.key == K.MILESTONE_CHANGE_REQUEST for x in prior)
-        if not (d and d.phase == P.OPEN and not d.milestone_change and sent):
+        if not (d and not d.milestone_change and ev.text.strip() and snap.milestones):
             return []
         return [C.SetDiscussion(m.id, replace(d, milestone_change=True))]
 

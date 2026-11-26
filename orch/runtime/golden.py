@@ -20,7 +20,7 @@ MANAGER_ONLY = ("manager", "orch", "real user")  # words that name the layer abo
 def read_board(path: str, text: Optional[str], last: GoldenBoard, names: Sequence[str]) -> GoldenBoard:
     """The board as agents read it (no comments, no title). `digest` and `chars` follow that body, so a change to a
     comment is no change. `words`: manager-only words in it, case-insensitive, whole words (the leak check, which now
-    also covers the file the critic reads). `names`: the names the agents above the critic are known by."""
+    also covers the file the critic reads). `names`: the agents' names, as the engine gives them; each is looked for like the words above."""
     body = B.golden_body(text or "")
     wanted = list(MANAGER_ONLY) + [n for n in names if n and len(n) > 2 and n.lower() != "the"]
     found = sorted({w for w in wanted if re.search(rf"(?i)(?<![\w.-]){re.escape(w)}(?![\w-])", body)})

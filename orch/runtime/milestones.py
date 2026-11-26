@@ -57,7 +57,7 @@ _ID = re.compile(r"^[\[(]?\**(m\d+)\**[\])]?\s*[:—–-]?\s*(\S.*)$", re.I)
 
 
 def parse_list(text: str) -> List[Tuple[str, str, str]]:
-    """The first (longest) numbered list that starts at 1, as [(id or "", title, text)]. Each line may start with an
+    """The first (longest) numbered list that starts at 1, as [(id or "", title, text)], text being what comes after "title -" (never the title again). Each line may start with an
     id (`m3`, `[m3]`, `(m3)`, `**m3**`), as in the list a change request shows (MS-10)."""
     best: List[str] = []
     cur: List[Tuple[int, str]] = []
@@ -87,8 +87,8 @@ def parse_list(text: str) -> List[Tuple[str, str, str]]:
     for line in best:
         mid = _ID.match(line.strip())
         mid_, clean = (mid.group(1).lower(), mid.group(2).strip()) if mid else ("", line.strip())
-        title = re.split(r"\s+[—–-]\s+|:\s+", clean, maxsplit=1)[0]
-        out.append((mid_, re.sub(r"[*_`]", "", title).strip(), clean))
+        parts = re.split(r"\s+[—–-]\s+|:\s+", clean, maxsplit=1)
+        out.append((mid_, re.sub(r"[*_`]", "", parts[0]).strip(), parts[1].strip() if len(parts) > 1 else ""))
     return out
 
 
@@ -163,10 +163,18 @@ class _Run:
     def note(self, key: K, values: dict) -> None:
         self.out.append(C.ToUser(C.Message(self.new_id(), C.ORCH, C.USER, text=TextRef(key, values), needs_answer=False)))
 
-    def checklist_path(self, mid: str) -> str:
-        critic = self.snap.critic
-        base = critic.state_file.rsplit("/", 1)[0] if critic and "/" in critic.state_file else self.snap.run.run_dir
-        return f"{base}/checklist-{mid}.md"
+    def checklist_path(self, m: Milestone) -> str:
+        """In the run's folder, named by the milestone's position: the critic sees no id (MS-12)."""
+        return f"{self.snap.run.run_dir}/checklist-{[x.id for x in self.ms].index(m.id) + 1}.md"
+
+    def last_before(self, m: Milestone) -> str:
+        """Title of the nearest finished milestone before `m`, or ""."""
+        before = self.ms[:[x.id for x in self.ms].index(m.id)]
+        return next((x.title for x in reversed(before) if x.status == S.DONE), "")
+
+    def start_message(self, m: Milestone) -> None:
+        self.tell_manager(K.MILESTONE_START, {"milestone": m.id, "title": m.title, "text": m.text,
+                                              "checklist_path": m.checklist_path, "last_title": self.last_before(m)})
 
     def open_gate(self, kind: C.GateKind, mid: str = "") -> List[C.Gate]:
         return [g for g in self.snap.gates.values() if g.is_open and g.kind == kind and (not mid or g.milestone == mid)]
@@ -182,9 +190,7 @@ class _Run:
             self.reopen(ev)
         elif isinstance(ev, C.TurnEnded) and ev.agent == self.manager:
             self.manager_turn(ev)
-        for a in self.prior:
-            if isinstance(a, C.CloseGate) and not a.withdrawn and a.answer is not None:
-                self.gate_closed(a)
+        self.gate_closed()
         self.upkeep()
         if self.dirty:
             self.out.append(C.SetMilestones(tuple(self.ms)))
@@ -221,42 +227,57 @@ class _Run:
                 self.out.append(C.CloseGate(g.id, withdrawn=True))
             self.put(replace(old, status=S.PENDING, accepted=False))
         self.put(replace(m, status=S.CURRENT, ended=0.0, accepted=False, notified=REOPENED, asked_to_fix="",
-                         refreshed=list(self.snap.agents), held_decision=None))
+                         refreshed=list(self.snap.agents)))
         self.finished = False
+        self.start_message(m)
         self.out.append(C.CommandReply(ev.id))
 
     # ---- what the manager wrote
-    def carried(self, turn: C.Turn) -> set:
-        """Kinds of the gates whose answers the turn's messages carried."""
-        kinds = set()
-        for mid in turn.started_by + turn.joined:
-            m = self.snap.messages.get(mid)
-            for gid in (m.gates if m else []):
-                if gid in self.snap.gates:
-                    kinds.add(self.snap.gates[gid].kind)
-        return kinds
+    def took(self, t: C.Turn) -> List[C.Message]:
+        return [self.snap.messages[i] for i in t.started_by + t.joined if i in self.snap.messages]
+
+    def carried(self, msgs: List[C.Message]) -> List[C.Gate]:
+        """The gates whose answers the turn's messages carried."""
+        return [self.snap.gates[g] for m in msgs for g in m.gates if g in self.snap.gates]
+
+    def in_change(self, t: C.Turn, msgs: List[C.Message]) -> Optional[str]:
+        """Does the reply answer a milestone change request (MS-10)? "ask": the turn took the request itself or the
+        apply message of a discussion that wants a change; "carried": it follows a gate answer; None: no."""
+        snap, d = self.snap, self.snap.discussions.get(self.manager)
+        if any(m.key in (K.MILESTONE_CHANGE_REQUEST,) for m in msgs) or (
+                d and d.milestone_change and any(m.id == d.apply_message for m in msgs)):
+            return "ask"
+        if any(m.key == K.MILESTONE_CHANGE_UNREADABLE for m in msgs):
+            return "carried"
+        for g in self.carried(msgs):
+            if g.kind == C.GateKind.MILESTONE_CHANGE:
+                return "carried"
+            if g.kind == C.GateKind.QUESTION and any(
+                    x.key == K.MILESTONE_CHANGE_REQUEST and x.reply_turn == g.source_turn
+                    for x in snap.messages.values()):
+                return "carried"  # the manager asked first, the answer came back
+        return None
 
     def manager_turn(self, ev: C.TurnEnded) -> None:
         snap, t = self.snap, self.snap.turns.get(self.manager)
         if t is None or t.reply is None or t.status != C.TurnStatus.OK or snap.drafting(self.manager):
             return
-        r, keys, kinds = t.reply, set(t.keys), self.carried(t)
-        in_change = (K.MILESTONE_CHANGE_REQUEST in keys or C.GateKind.MILESTONE_CHANGE in kinds or K.MILESTONE_CHANGE_UNREADABLE in keys
-                     or (snap.discussions.get(self.manager) and snap.discussions[self.manager].milestone_change
-                         and any(i == snap.discussions[self.manager].apply_message for i in t.started_by + t.joined)))
+        r, msgs = t.reply, self.took(t)
         if not self.ms:
-            if keys & {K.PLAN_REQUEST, K.PLAN_LIST_MISSING} or C.GateKind.PLAN in kinds:
-                self.plan_reply(t, r, keys)
-            return
-        if in_change:
-            self.change_reply(t, r, keys)
-        self.decision(t, r)
+            return self.plan_reply(t, r, msgs)
+        way = self.in_change(t, msgs)
+        if way:
+            return self.change_reply(t, r, msgs, way)
+        self.decision(t, r, msgs)
 
-    def plan_reply(self, t: C.Turn, r: C.Reply, keys: set) -> None:
-        """The manager's numbered list becomes the plan: a gate to approve, or at once by night (assumption 2)."""
-        listed = parse_list(r.text)
+    def plan_reply(self, t: C.Turn, r: C.Reply, msgs: List[C.Message]) -> None:
+        """Until there is a plan, any reply with a numbered list (and no question) is read as one: a gate to approve,
+        or at once by night (assumption 2)."""
+        if r.questions:
+            return
+        listed = parse_list(r.untagged)
         if not listed:
-            if keys & {K.PLAN_REQUEST, K.PLAN_LIST_MISSING} and not r.questions:
+            if any(m.key in (K.PLAN_REQUEST, K.PLAN_LIST_MISSING) for m in msgs):
                 self.tell_manager(K.PLAN_LIST_MISSING, {})
             return
         plan = [Milestone(f"m{i + 1}", title, text) for i, (_, title, text) in enumerate(listed)]
@@ -267,50 +288,67 @@ class _Run:
                 self.out.append(C.RecordDecision("plan approved by night mode", self.manager, t.id))
             return self.start_plan(plan)
         self.out.append(C.OpenGate(C.Gate(
-            self.new_id(), C.GateKind.PLAN, text=r.untagged or r.text, words=TextRef(K.GATE_PLAN, {"milestones": [m.text for m in plan]}),
-            opened=self.snap.now, agent=self.manager, source_turn=t.id, summary=r.summary, new=plan)))
+            self.new_id(), C.GateKind.PLAN, text=r.untagged, opened=self.snap.now, agent=self.manager,
+            words=TextRef(K.GATE_PLAN, {"milestones": [f"{m.title} \u2014 {m.text}" if m.text else m.title for m in plan]}),
+            source_turn=t.id, summary=r.summary, new=plan)))
 
     def start_plan(self, plan: List[Milestone]) -> None:
         self.ms, self.dirty = plan, True
         self.start(plan[0])
 
-    def change_reply(self, t: C.Turn, r: C.Reply, keys: set) -> None:
-        """MS-10, 11: the reply to a change request; nothing changes before the gate is approved."""
-        listed = parse_list(r.text)
-        if not listed:
-            if not r.questions and K.MILESTONE_CHANGE_UNREADABLE not in keys:
+    def change_reply(self, t: C.Turn, r: C.Reply, msgs: List[C.Message], way: str) -> None:
+        """MS-10, 11: the reply to a change request; nothing changes before the gate is approved. The rubric of a
+        rewritten current milestone lives in the gate until then."""
+        if r.questions:
+            return  # the answer comes back (carried) and its reply is read
+        listed = parse_list(r.untagged)
+        known = {m.id for m in self.snap.milestones}
+        if not any(i in known for i, _, _ in listed):  # no id of ours: it would duplicate everything
+            if way == "ask" and not any(m.key == K.MILESTONE_CHANGE_UNREADABLE for m in msgs):
                 self.tell_manager(K.MILESTONE_CHANGE_UNREADABLE, {"problem": C.Problem.EMPTY.value})
             return
         new = merge(self.snap.milestones, listed)
         old_cur = self.cur()
-        for m in new:  # the rewritten current milestone: its rubric comes with the proposal (MS-12)
-            if old_cur and m.id == old_cur.id and (m.title, m.text) != (old_cur.title, old_cur.text):
-                new = [replace(m, rubric=list(r.rubric)) if x.id == m.id else x for x in new]
+        new = [replace(m, rubric=list(r.rubric)) if old_cur and m.id == old_cur.id
+               and (m.title, m.text) != (old_cur.title, old_cur.text) else m for m in new]
         for g in self.open_gate(C.GateKind.MILESTONE_CHANGE):
             self.out.append(C.CloseGate(g.id, withdrawn=True))
         self.out.append(C.OpenGate(C.Gate(
-            self.new_id(), C.GateKind.MILESTONE_CHANGE, text=r.untagged or r.text, words=TextRef(K.GATE_MILESTONE_CHANGE, {}),
+            self.new_id(), C.GateKind.MILESTONE_CHANGE, text=r.untagged, words=TextRef(K.GATE_MILESTONE_CHANGE, {}),
             opened=self.snap.now, agent=self.manager, source_turn=t.id, summary=r.summary,
             old=list(self.snap.milestones), new=new)))
 
-    def decision(self, t: C.Turn, r: C.Reply) -> None:
-        """MS-6, 8, 9: rubric and score are kept; ACCEPT opens the approval gate; REVISE changes nothing here (the
-        critic unticks items, so the checklist changes); PAUSE lets the review run again after the pause."""
+    def asked(self, m: Milestone, msgs: List[C.Message], keys: tuple) -> bool:
+        """Did the turn take in a message of these keys about this milestone (or answers that decide it again)?"""
+        for x in msgs:
+            v = x.text.values if x.text else {}
+            if x.key in keys and v.get("milestone") == m.id and (v.get("title"), v.get("text")) == (m.title, m.text):
+                return True  # an old one of a rewritten milestone does not count (MS-13)
+            if x.key == K.GATE_ANSWERS and K.GATE_ANSWERS in keys and v.get("decide_again") == m.title:
+                return True
+        return False
+
+    def decision(self, t: C.Turn, r: C.Reply, msgs: List[C.Message]) -> None:
+        """MS-6, 9: rubric and score are kept; ACCEPT opens the approval gate; REVISE changes nothing here (the
+        critic unticks items, so the checklist changes). Only a turn that answers this milestone's review counts: a
+        late answer never decides a later or rewritten milestone. A PAUSE is held by gates and decided again."""
         m = self.cur()
         if m is None:
             return
-        if r.rubric:
+        if r.rubric and self.asked(m, msgs, (K.MILESTONE_START,)):
             m = replace(m, rubric=list(r.rubric))
             self.put(m)
-        if r.decision is None:
+        if r.decision is None or m.accepted or self.open_gate(C.GateKind.MILESTONE, m.id):
+            return
+        if m.notified in ("", REOPENED) or not self.asked(m, msgs, (K.CHECKLIST_COMPLETE, K.GATE_ANSWERS)):
             return
         if any(isinstance(a, C.HoldDecision) and a.milestone_id == m.id and a.decision is not None for a in self.prior):
             return
+        if r.rubric:
+            m = replace(m, rubric=list(r.rubric))
         m = replace(m, score=r.score if r.score is not None else m.score)
         self.put(m)
-        if r.decision == C.Decision.PAUSE:
-            self.put(replace(m, notified=""))
-        elif r.decision == C.Decision.ACCEPT:
+        if r.decision == C.Decision.ACCEPT:
             self.accept(m, t, r)
 
     def accept(self, m: Milestone, t: C.Turn, r: C.Reply) -> None:
@@ -318,7 +356,7 @@ class _Run:
         if not m.rubric:
             return self.tell_manager(K.REVIEW_RUBRIC_MISSING, {"milestone": m.id})
         if s.pass_score is not None and m.score is not None and m.score < s.pass_score:
-            return  # below the agreed score: not accepted; the manager's own message to the critic goes on
+            return self.tell_manager(K.REVIEW_SCORE_LOW, {"milestone": m.id, "score": m.score, "pass_score": s.pass_score})
         m = replace(m, accepted=True, summary=r.summary or r.untagged)
         self.put(m)
         if s.approve_milestones and not self.snap.night:
@@ -332,23 +370,36 @@ class _Run:
             self.advance(m)
 
     # ---- gates closed (read from `prior`)
-    def gate_closed(self, a: C.CloseGate) -> None:
-        g = self.snap.gates.get(a.gate_id)
-        if g is None or not g.is_open:
-            return
-        ok = bool(a.answer and a.answer.approve)
+    def gate_closed(self) -> None:
+        """An approved change takes effect with its CloseGate; plan and milestone answers with the message that carries
+        them to the manager (gates sends it once all answer gates are closed), so nothing moves while another gate
+        is still open."""
+        snap = self.snap
+        closing = {a.gate_id: a.answer for a in self.prior
+                   if isinstance(a, C.CloseGate) and not a.withdrawn and a.answer is not None}
+        for gid, ans in closing.items():
+            g = snap.gates.get(gid)
+            if g and g.is_open and g.kind == C.GateKind.MILESTONE_CHANGE and ans.approve:
+                self.apply_change(g)
+        for a in self.prior:
+            if isinstance(a, C.Send) and a.message.key == K.GATE_ANSWERS:
+                for gid in a.message.gates:
+                    g = snap.gates.get(gid)
+                    ans = closing.get(gid) or (g.answer if g else None)
+                    if g and ans:
+                        self.answered(g, bool(ans.approve))
+
+    def answered(self, g: C.Gate, ok: bool) -> None:
         if g.kind == C.GateKind.PLAN and ok and not self.ms and g.new:
             self.start_plan([replace(m) for m in g.new])
         elif g.kind == C.GateKind.MILESTONE:
-            m = next((x for x in self.ms if x.id == g.milestone), None)
-            if m is None or m.status != S.CURRENT:
+            m = self.cur()
+            if m is None or m.id != g.milestone:
                 return
-            if ok:
+            if ok and m.accepted:
                 self.advance(m)
-            else:
+            elif not ok:
                 self.put(replace(m, accepted=False))
-        elif g.kind == C.GateKind.MILESTONE_CHANGE and ok:
-            self.apply_change(g)
 
     def apply_change(self, g: C.Gate) -> None:
         """MS-11 to 14: apply the approved list on what is there now."""
@@ -360,7 +411,9 @@ class _Run:
             if (m.title, m.text) != (old_cur.title, old_cur.text):
                 proposed = next((x for x in g.new if x.id == m.id), None)
                 open_gates = self.open_gate(C.GateKind.MILESTONE, m.id)
-                reviewing = bool(m.notified or m.accepted or open_gates)
+                untaken = any(x.key == K.CHECKLIST_COMPLETE and x.drop is None and not x.answered_at
+                              and x.text.values.get("milestone") == m.id for x in self.snap.messages.values())
+                reviewing = bool(m.accepted or open_gates or untaken)
                 for og in open_gates:  # MS-13
                     self.out.append(C.CloseGate(og.id, withdrawn=True))
                 if reviewing:
@@ -376,14 +429,12 @@ class _Run:
     def start(self, m: Milestone) -> None:
         """The milestone becomes the current one; the manager gets the usual first message (its reply carries the
         rubric)."""
-        last = next((x for x in reversed(self.ms) if x.status == S.DONE), None)
-        refreshed = [] if last else list(self.snap.agents)  # no compacting at the very first start
-        self.put(replace(m, status=S.CURRENT, started=self.snap.now, ended=0.0, accepted=False, notified="",
-                         asked_to_fix="", refreshed=refreshed, checklist_path=self.checklist_path(m.id)))
+        refreshed = [] if any(x.status == S.DONE for x in self.ms) else list(self.snap.agents)  # none at the very first
+        m = replace(m, status=S.CURRENT, started=self.snap.now, ended=0.0, accepted=False, notified="",
+                    asked_to_fix="", refreshed=refreshed)
+        self.put(replace(m, checklist_path=self.checklist_path(m)))
         self.finished = False
-        self.tell_manager(K.MILESTONE_START, {"milestone": m.id, "title": m.title, "text": m.text,
-                                              "checklist_path": self.checklist_path(m.id),
-                                              "last_title": last.title if last else ""})
+        self.start_message(self.cur())
 
     def advance(self, m: Milestone) -> None:
         self.put(replace(m, status=S.DONE, ended=self.snap.now))
@@ -431,7 +482,8 @@ class _Run:
 
     def review(self, m: Milestone, ck: Checklist) -> None:
         snap = self.snap
-        if not ck.complete or ck.digest == m.notified or m.accepted or snap.paused or self.finished:
+        if not ck.complete or ck.digest == m.notified or m.accepted or snap.paused or self.finished \
+                or self.manager in snap.discussions:
             return
         if self.open_gate(C.GateKind.MILESTONE, m.id) or not self.quiet():
             return
@@ -445,7 +497,7 @@ class _Run:
         """MS-2: not complete; the critic is asked to fix it, once for each problem, after it has had a turn."""
         snap, critic = self.snap, self.snap.critic
         t = snap.turns.get(critic.id) if critic else None
-        if critic is None or ck.error == m.asked_to_fix or t is None or t.ended < m.started or not self.quiet():
+        if critic is None or ck.error == m.asked_to_fix or t is None or t.started < m.started or not self.quiet():
             return
         self.put(replace(m, asked_to_fix=ck.error))
         msg = C.Message(self.new_id(), C.ORCH, critic.id, trigger=C.Trigger.ORCH,
@@ -453,7 +505,9 @@ class _Run:
         self.out.append(C.Send(msg))
 
     def refresh(self) -> None:
-        """Assumption 3: at a milestone start, each agent's session is compacted or renewed once it is settled."""
+        """Assumption 3: at a milestone start, each agent's session is compacted or renewed once it is settled. An agent
+        with no session, or one that began after the milestone, needs none; one that is busy with something else
+        (held, switching, retrying, in a terminal or a discussion) is left for later."""
         snap, m, done = self.snap, self.cur(), []
         if not any(x.status == S.DONE and 0 < x.ended <= m.started for x in self.ms):
             return  # the first milestone starts on new sessions
@@ -461,8 +515,10 @@ class _Run:
             if a.id in m.refreshed or a.role in (C.Role.MONITOR, C.Role.AUDITOR):
                 continue
             mode = a.fresh_session or ("never" if a.role == C.Role.MANAGER else "compact")
-            if mode == "never" or not a.is_open:
+            if mode == "never" or not a.is_open or a.session is None or a.session.started > m.started:
                 done.append(a.id)
+            elif a.holds or a.switch or a.retry or a.id in snap.terminals or a.id in snap.discussions:
+                continue
             elif snap.settled(a.id):
                 self.out.append(C.RefreshSession(a.id, mode))
                 done.append(a.id)
