@@ -835,6 +835,7 @@ class QoderAdapter(ClaudeAdapter):
     reports_init_model = False
     history = "~/.qoder/projects"
     efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+    default_model = "Qwen4-Max"  # always passed: never Qoder's global default, which a `/model` elsewhere changes
     PERMISSION_MODES = {"default": "default", "plan": "plan", "acceptEdits": "accept_edits",
                         "bypassPermissions": "bypass_permissions", "dontAsk": "dont_ask", "auto": "auto"}
     NO_BACKGROUND = ("Bash(nohup:*)", "Bash(setsid:*)")
@@ -845,8 +846,7 @@ class QoderAdapter(ClaudeAdapter):
         if not terminal:
             cmd += ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages"]
         cmd += ["--resume" if resume else "--session-id", sid]
-        if spec.choice.model:
-            cmd += ["--model", spec.choice.model]
+        cmd += ["--model", spec.choice.model or self.default_model]
         if spec.choice.effort:
             cmd += ["--reasoning-effort", spec.choice.effort]
         if spec.system_prompt:

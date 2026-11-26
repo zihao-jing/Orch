@@ -589,6 +589,18 @@ class TestProcess(unittest.TestCase):
         self.assertIn("Bash(nohup:*)", qoder)
         self.assertNotIn("BASH_MAX", " ".join(X.QoderAdapter(FakeClock())._env(spec)))
 
+    def test_MOD_1_qoder_always_gets_a_model_never_its_global_default(self):
+        """Qoder's global default changes with any `/model` elsewhere: Orch names the model every time."""
+        self.scenario()
+        none = self.spec(options={})
+        none.choice.model = ""
+        cmd = X.QoderAdapter(FakeClock())._args(none, "sid", False, False)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "Qwen4-Max")
+        named = self.spec(options={})
+        named.choice.model = "Fast"
+        cmd = X.QoderAdapter(FakeClock())._args(named, "sid", True, False)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "Fast")
+
     def test_MSG_6_the_message_id_travels_in_the_uuid_and_arrived_knows_it(self):
         """Send, receipt, turn; arrived() by the journal; the pid file and the pipe are in the run folder."""
         mid = new_id("t", Tick(at=1.0))
