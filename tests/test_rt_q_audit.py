@@ -181,6 +181,42 @@ class EngineAudit(RuntimeCase):
         self.assertIn("## Facts Orch checked", bank["auditor"].sent[0][1])
         self.assertNotIn("auditor", self.state.agents)  # not one of the agents: never routed to
 
+    def test_automatic_audits_every_n_rounds_and_when_the_run_finishes(self):
+        bank = self.banks["claude"]
+        bank["auditor"] = MockCLI(self.clock, "auditor", default=Reply("<points>\nNothing new.\n</points>", after=0))
+        self.start()
+        self.engine.settings["audit_every"] = 2
+        self.chat(MANAGER, "Begin.")
+        real = self.engine.store.snapshot
+        fake = {"rounds": 0, "finished": False}
+        self.engine.store.snapshot = lambda: replace(real(), **fake)
+
+        def wait():
+            for _ in range(100):
+                self.advance(1)
+                if not real().run.audit_running:
+                    return
+                time.sleep(0.02)
+
+        def audits():
+            return len(audit.records(self.path / "run"))
+        fake["rounds"] = 1
+        self.advance(2)
+        self.assertEqual(audits(), 0)
+        fake["rounds"] = 2
+        self.advance(2)
+        wait()
+        self.assertEqual(audits(), 1)
+        self.assertEqual(audit.records(self.path / "run")[0]["rounds_at"], 2)
+        self.advance(3)
+        self.assertEqual(audits(), 1)  # nothing new
+        fake.update(rounds=3, finished=True)
+        self.advance(2)
+        wait()
+        self.assertEqual(audits(), 2)  # the final one
+        self.advance(3)
+        self.assertEqual(audits(), 2)
+
     def test_an_audit_cut_off_by_a_restart_is_cleared(self):
         self.start()
         self.engine.store.configure(run=replace(self.state.run, audit_running=True))

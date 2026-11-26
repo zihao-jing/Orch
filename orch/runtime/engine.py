@@ -43,6 +43,7 @@ class Engine:
         self._smoked: SimpleQueue = SimpleQueue()
         self._audited: SimpleQueue = SimpleQueue()  # (record) from the audit thread
         self._audit_stop = threading.Event()
+        self._audit_rounds: Optional[int] = None  # snap.rounds when the last audit started
         self._smoke_stop = threading.Event()
         self._smokes = set()
         self._pending_sends = {}
@@ -170,6 +171,7 @@ class Engine:
             if now - self._last_tick >= self.tick_s:
                 self._last_tick = now
                 self._event(C.Tick(at=now))
+                self._auto_audit()
                 happened = True
             return self._flush_sends() or happened
 
@@ -796,6 +798,7 @@ class Engine:
         messages, _ = self.store.messages(limit=0)
         adapter = self.factories[choice.backend]()
         self.store.configure(run=replace(snap.run, audit_running=True))
+        self._audit_rounds = snap.rounds
         done, stop = self._audited, self._audit_stop
         points = int(self.settings.get("audit_points", audit.POINTS) or audit.POINTS)
 
@@ -810,6 +813,22 @@ class Engine:
         (self.run_dir / "audits").mkdir(parents=True, exist_ok=True)
         threading.Thread(target=work, name="orch-audit", daemon=True).start()
         return ""
+
+    def _auto_audit(self) -> None:
+        """Every `audit_every` rounds, and once more when the run is finished (0: only when asked)."""
+        every = int(self.settings.get("audit_every", 0) or 0)
+        snap = self.store.snapshot()
+        if every <= 0 or snap.run.audit_running:
+            return
+        if self._audit_rounds is None:
+            from . import audit
+            self._audit_rounds = max([0] + [int(r.get("rounds_at") or 0) for r in audit.records(self.run_dir)])
+        new = snap.rounds - self._audit_rounds
+        if new >= every or (snap.finished and new > 0):
+            why = self._audit(snap)
+            if why:
+                LOG.info("automatic audit not started: %s", why)
+                self._audit_rounds = snap.rounds  # not again before the next stretch
 
     def _audit_done(self, record: Optional[Dict[str, Any]]) -> None:
         run = self.store.snapshot().run

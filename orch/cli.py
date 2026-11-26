@@ -347,7 +347,10 @@ def _run_new_runtime(a: argparse.Namespace, cfg: Config, selected: List[Any]) ->
             else:
                 snap = rt_migrate.build_snapshot(m, run_dir, clock, settings=settings, migrated_files=migrated_files)
 
-            eng = engine_cls(run_dir, clock, adapters, settings)
+            ctrl = getattr(m, "controller", None)
+            eng = engine_cls(run_dir, clock, adapters,
+                             dict(settings, audit_every=getattr(ctrl, "audit_every", 10),
+                                  audit_points=getattr(ctrl, "audit_points", 5)))
             eng.start(snap)  # None: load the saved run
             engines.append(eng)
             if getattr(a, "serve", False):

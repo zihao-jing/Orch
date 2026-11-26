@@ -343,7 +343,8 @@ def run_audit(run_dir: Path, snap: Snapshot, messages: Sequence[Message], adapte
     stamp = datetime.fromtimestamp(snap.now).strftime("%Y%m%d-%H%M%S")
     rec_dir = run_dir / "audits"
     rec_dir.mkdir(parents=True, exist_ok=True)
-    record: Dict[str, Any] = {"since": seen["since"], "until": seen["until"], "messages": seen["messages"],
+    record: Dict[str, Any] = {"since": seen["since"], "until": seen["until"], "rounds_at": snap.rounds,
+                              "messages": seen["messages"],
                               "turns": seen["turns"], "facts": seen["facts"], "findings_file": str(path)}
     if not seen["messages"] and not seen["turns"]:
         record.update(status="empty")
@@ -370,6 +371,10 @@ def run_audit(run_dir: Path, snap: Snapshot, messages: Sequence[Message], adapte
 
 
 def _write(rec_dir: Path, stamp: str, record: Dict[str, Any], sent: str, reply: str) -> None:
+    base, n = stamp, 1
+    while (rec_dir / f"{stamp}.json").exists():  # two audits in one second keep both records
+        n += 1
+        stamp = f"{base}-{n}"
     (rec_dir / f"{stamp}.json").write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
     (rec_dir / f"{stamp}.md").write_text(f"# Audit ({record.get('status')})\n\n## Sent\n\n{sent}\n\n## Reply\n\n"
                                          f"{reply}\n", encoding="utf-8")
