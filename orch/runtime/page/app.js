@@ -186,7 +186,9 @@
         busy(btn, false);
         return c ? submit(L.applyChoice(body, c, L.newId()), btn) : reply;
       }
-      if (reply.shown) toast(reply.shown); else if (reply.ok === false) toast(reply.error || "That did not work.");
+      if (reply.queued) toast(S && S.viewer && S.viewer.orch_running ? "Sent to the Orch that runs this project."
+        : "No Orch is running this project, so nothing changes now. The request waits in the run folder until Orch runs it again.");
+      else if (reply.shown) toast(reply.shown); else if (reply.ok === false) toast(reply.error || "That did not work.");
       loadState();
       return reply;
     } finally { busy(btn, false); }
@@ -317,8 +319,11 @@
     $("title").textContent = name; document.title = name + " - Orch board";
     const stopped = agentList().some(a => a.stopped_by_user && a.lifecycle === "open");
     const bits = (status, label) => h("span", { class: "state-label" }, h("span", { class: "dot status-" + status, "aria-hidden": "true" }), label);
-    paint($("runstate"), JSON.stringify([S.finished, S.paused, stopped]), () => [
-      S.finished ? bits("finished", "Finished") : S.paused ? bits("waiting_job", "Paused") : bits("writing static", "Running"),
+    const viewing = !!(S.viewer && !S.viewer.orch_running);
+    paint($("runstate"), JSON.stringify([S.finished, S.paused, stopped, viewing]), () => [
+      viewing ? h("span", { class: "state-label", title: "Shown with orch serve: no Orch runs it, so buttons only leave requests for the next Orch" },
+        h("span", { class: "dot status-closed", "aria-hidden": "true" }), S.finished ? "Finished · saved run, not running" : "Saved run, not running")
+      : S.finished ? bits("finished", "Finished") : S.paused ? bits("waiting_job", "Paused") : bits("writing static", "Running"),
       stopped ? bits("failed", "Agents stopped") : null]);
     const nb = $("nightbtn"); nb.classList.toggle("on", !!S.night); nb.setAttribute("aria-pressed", S.night ? "true" : "false");
     $("stopbtn").textContent = stopped ? "Start agents" : "Stop agents";

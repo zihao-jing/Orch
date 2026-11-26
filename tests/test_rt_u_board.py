@@ -86,3 +86,27 @@ class DashboardDataTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in current["records"]], ["20260101-170900", "20260101-170100"])
         self.assertEqual(board.audit("20260101-170100")["report"], "Earlier reply")
         self.assertEqual(board.audit("../state"), {"error": "not found"})
+
+
+class ViewerOrchRunning(unittest.TestCase):
+    """`orch serve` says whether an Orch holds the run, from the pid in its run lock."""
+
+    def test_the_lock_names_a_live_or_a_gone_process(self):
+        import os
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from orch.runtime.board import Viewer
+        with tempfile.TemporaryDirectory() as d:
+            v = Viewer(Path(d))
+            self.assertFalse(v.orch_running())  # no lock
+            (Path(d) / "locks").mkdir()
+            lock = Path(d) / "locks" / "run.lock"
+            lock.write_text(json.dumps({"pid": os.getpid()}))
+            self.assertTrue(v.orch_running())
+            gone = subprocess.Popen(["true"])
+            gone.wait()
+            lock.write_text(json.dumps({"pid": gone.pid}))
+            self.assertFalse(v.orch_running())
+            lock.write_text("")
+            self.assertFalse(v.orch_running())

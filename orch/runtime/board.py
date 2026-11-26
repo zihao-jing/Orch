@@ -15,6 +15,7 @@ import hashlib
 import ipaddress
 import json
 import mimetypes
+import os
 import re
 import socket
 import threading
@@ -444,7 +445,27 @@ class Viewer:
             return self._snap
 
     def state(self) -> Dict[str, Any]:
-        return public_state(self.snapshot())
+        out = public_state(self.snapshot())
+        out["viewer"] = {"orch_running": self.orch_running()}
+        return out
+
+    def orch_running(self) -> bool:
+        """Whether an Orch holds this run: the pid its run lock names is alive. Read only, so it never takes the lock
+        from an Orch that is starting."""
+        info = read_json(self.run_dir / "locks" / "run.lock", {}) or {}
+        try:
+            pid = int(info.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
     def submit(self, command: Any) -> Dict[str, Any]:
         self.snapshot()
