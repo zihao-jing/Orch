@@ -33,7 +33,11 @@
   }
   function agentName(agents, id) {
     const a = agents && agents[id];
-    return (a && a.display) || plainName(id);
+    const d = a && a.display;
+    if (d && d !== id && d.toLowerCase() !== "the " + String(id).toLowerCase() && d.toLowerCase() !== "the " + String((a && a.role) || "").toLowerCase()) {
+      return d;
+    }
+    return plainName(id);
   }
 
   function pad(n) { return n < 10 ? "0" + n : "" + n; }
@@ -49,7 +53,7 @@
     return same ? clock(t) : pad(d.getDate()) + "." + pad(d.getMonth() + 1) + ". " + clock(t);
   }
   function ago(t, now) {
-    if (!t) return "";
+    if (!t || t <= 0) return "–";
     const s = Math.max(0, Math.floor(now - t));
     if (s < 45) return "just now";
     if (s < 3600) return Math.round(s / 60) + " min ago";

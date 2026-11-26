@@ -8,8 +8,8 @@
   let S = null;                 // the last /api/state
   let offset = 0;               // server time minus browser time, seconds
   let old = null;               // an earlier run being read ({id, state})
-  let es = null, tries = 0;     // the event stream
-  const live = {};              // agent -> last live lines
+  let es = null, tries = 0, connectedOnce = false;     // the event stream
+  const live = {}, liveN = {};  // agent -> last live lines, and last seen n
   const openMsgs = new Set(), openAct = new Set(), detail = {};
   let older = [], olderMore = null, found = null, foundMore = false, findSeq = 0;
   let who = "manager";          // the talk panel's recipient
@@ -33,6 +33,15 @@
       if (Array.isArray(k)) add(e, k);
       else if (k !== null && k !== undefined && k !== false) e.append(k.nodeType ? k : document.createTextNode(String(k)));
     });
+  }
+  // a nested list of nodes, text and empties as a flat list of nodes
+  function flat(list) {
+    const out = [];
+    [].concat(list).forEach(k => {
+      if (Array.isArray(k)) out.push(...flat(k));
+      else if (k !== null && k !== undefined && k !== false) out.push(k.nodeType ? k : document.createTextNode(String(k)));
+    });
+    return out;
   }
   // h("div", {class: "x", on: {click: f}, data: {a: 1}}, children...)  text only, never HTML
   function h(tag, a, ...kids) {
@@ -77,7 +86,7 @@
     const a = document.activeElement, all = Array.prototype.slice.call(el.querySelectorAll(ctl));
     const at = a && el.contains(a) ? all.indexOf(a) : -1;
     const sel = at >= 0 && typeof a.selectionStart === "number" ? [a.selectionStart, a.selectionEnd] : null;
-    el.replaceChildren(...[].concat(build()));
+    el.replaceChildren(...flat(build()));
     if (at >= 0) {
       const n = el.querySelectorAll(ctl)[at];
       if (n && n.tagName === a.tagName) { n.focus(); if (sel) { try { n.setSelectionRange(sel[0], sel[1]); } catch (e) { /* ignore */ } } }
@@ -122,7 +131,7 @@
     return new Promise(resolve => {
       $("dlg-h" + sfx).textContent = title;
       const close = v => d.close(String(v));
-      $("dlg-b" + sfx).replaceChildren(...[].concat(typeof body === "function" ? body(close) : body));
+      $("dlg-b" + sfx).replaceChildren(...flat(typeof body === "function" ? body(close) : body));
       $("dlg-a" + sfx).replaceChildren(...buttons.map(b => h("button", { type: "button", class: b.cls || "", on: { click: () => close(b.value) } }, b.label)));
       if (!sfx) modalRefresh = refresh || null;
       d.returnValue = "";
@@ -195,25 +204,53 @@
   function connect() {
     if (es) es.close();
     try { es = new EventSource("api/events"); } catch (e) { setLost(true); setTimeout(connect, L.backoff(tries++)); return; }
-    es.onopen = () => { tries = 0; setLost(false); loadState(); };
+    es.onopen = () => {
+      const reconn = connectedOnce;
+      connectedOnce = true;
+      tries = 0;
+      setLost(false);
+      loadState();
+      if (reconn) {
+        const seen = new Set(Object.keys(liveN).concat(Array.from(openAct)));
+        seen.forEach(id => loadLive(id, null, id in liveN ? liveN[id] + 1 : 0));
+      }
+    };
     es.addEventListener("state", () => loadState());
     es.addEventListener("live", ev => { try { onLive(JSON.parse(ev.data)); } catch (e) { /* ignore a bad line */ } });
     es.onerror = () => { es.close(); setLost(true); setTimeout(connect, L.backoff(tries++)); };
   }
   function onLive(d) {
+    if (typeof d.n === "number") {
+      if (d.agent in liveN && d.n <= liveN[d.agent]) return;
+      liveN[d.agent] = d.n;
+    }
     const list = live[d.agent] || (live[d.agent] = []);
-    list.push({ at: d.at, k: d.k, s: d.s });
+    list.push({ n: d.n, at: d.at, k: d.k, s: d.s });
     if (list.length > 60) list.shift();
     document.querySelectorAll('[data-live="' + d.agent + '"]').forEach(e => { e.textContent = L.preview(d.s, 110); });
     document.querySelectorAll('[data-livelog="' + d.agent + '"]').forEach(e => { e.append(liveLine(list[list.length - 1])); });
   }
   const liveLine = x => document.createTextNode((x.k === "tool" ? "> " : "") + x.s + "\n");
-  async function loadLive(id, box) {
+  async function loadLive(id, box, fromN) {
+    const from = fromN !== undefined ? fromN : (id in liveN ? liveN[id] + 1 : 0);
     try {
-      const j = await getJson("api/live?agent=" + encodeURIComponent(id) + "&from=0");
-      live[id] = (j.items || []).slice(-60);
-      box.replaceChildren(...live[id].map(liveLine));
-    } catch (e) { box.textContent = "Not available."; }
+      const j = await getJson("api/live?agent=" + encodeURIComponent(id) + "&from=" + from);
+      if (j.reset || from === 0) live[id] = [];
+      const list = live[id] || (live[id] = []);
+      (j.items || []).forEach(it => {
+        if (typeof it.n === "number") {
+          if (!j.reset && from > 0 && id in liveN && it.n <= liveN[id]) return;
+          liveN[id] = it.n;
+        }
+        list.push({ n: it.n, at: it.at, k: it.k, s: it.s });
+      });
+      if (list.length > 60) live[id] = list.slice(-60);
+      const boxes = box ? [box] : Array.prototype.slice.call(document.querySelectorAll('[data-livelog="' + id + '"]'));
+      boxes.forEach(b => b.replaceChildren(...live[id].map(liveLine)));
+      const last = live[id][live[id].length - 1];
+      if (last) document.querySelectorAll('[data-live="' + id + '"]').forEach(e => { e.textContent = L.preview(last.s, 110); });
+      else if (j.reset) document.querySelectorAll('[data-live="' + id + '"]').forEach(e => { e.textContent = ""; });
+    } catch (e) { if (box) box.textContent = "Not available."; }
   }
 
   // --------------------------------------------------------------------------------------------- rendering
@@ -324,7 +361,7 @@
     if (a.assignment && a.assignment.line) box.append(h("div", { class: "line" }, h("b", {}, "Task: "), a.assignment.line));
     if (a.status === "failed" && a.failed_why) box.append(h("div", { class: "line" }, h("b", {}, "Why: "), a.failed_why));
     const last = (live[a.id] || []).slice(-1)[0];
-    box.append(h("div", { class: "line" }, h("b", {}, "Last activity: "), a.last_output ? h("span", { data: { ago: a.last_output } }, L.ago(a.last_output, t)) : "none yet",
+    box.append(h("div", { class: "line" }, h("b", {}, "Last activity: "), a.last_output ? h("span", { data: { ago: a.last_output } }, L.ago(a.last_output, t)) : "–",
       " ", h("span", { class: "mute", data: { live: a.id } }, last ? L.preview(last.s, 110) : "")));
     if (a.waiting) {
       const why = a.holds.map(x => ({ terminal: "a terminal is open", "switch": "model is being switched", turn: "it is writing", send_failed: "sending failed", stopped: "stopped by you" }[x])).filter(Boolean);
@@ -392,14 +429,14 @@
     d.append(fb);
     if (L.sendableToCritic(messages()).indexOf(m.id) >= 0) fb.append(h("button", { type: "button", class: "sm", on: { click: act("SendToCritic", { message_id: m.id, agent: m.sender }) } }, "Send to critic"));
     const more = h("div", { class: "acts", style: "margin-top:6px" }), area = h("div");
-    if (m.turn) more.append(h("button", { type: "button", class: "sm", on: { click: () => showTurn(m, area) } }, "Show the whole reply"));
+    if (m.turn || m.reply_turn || m.sender !== "orch") more.append(h("button", { type: "button", class: "sm", on: { click: () => showTurn(m, area) } }, "Show the whole reply"));
     more.append(h("button", { type: "button", class: "sm", on: { click: () => showSent(m, area) } }, "Show the text as sent"));
     fb.append(more, area);
     d.addEventListener("toggle", () => { if (d.open) openMsgs.add(m.id); else openMsgs.delete(m.id); });
     return d;
   }
   async function showTurn(m, area) {
-    try { const j = await getJson("api/turn?id=" + encodeURIComponent(m.turn)); area.replaceChildren(h("pre", {}, j.output || j.text || "Nothing written.")); }
+    try { const j = await getJson("api/turn?id=" + encodeURIComponent(m.turn || m.reply_turn || m.id)); area.replaceChildren(h("pre", {}, j.output || j.text || "Nothing written.")); }
     catch (e) { area.textContent = "Not available."; }
   }
   async function showSent(m, area) {
@@ -515,7 +552,7 @@
         const effWrap = h("div", { class: "field" });
         const fillEff = () => {
           const ef = L.efforts(cat, msel.value);
-          effWrap.replaceChildren(...(ef.length ? [h("label", {}, "Effort"), draftSelect(k + "effort", ef.map(e => [e, e]), a.choice.effort || (cat.find(m => m.id === msel.value) || {}).default_effort)] : []));
+          effWrap.replaceChildren(...flat(ef.length ? [h("label", {}, "Effort"), draftSelect(k + "effort", ef.map(e => [e, e]), a.choice.effort || (cat.find(m => m.id === msel.value) || {}).default_effort)] : []));
         };
         msel.addEventListener("change", () => { delete drafts[k + "effort"]; fillEff(); });
         fillEff();
@@ -611,11 +648,11 @@
   }
   function renderOld(j, r) {
     const note = $("oldnote"); note.hidden = false;
-    note.replaceChildren("You are reading an earlier run (" + (r.project || "run") + "). Nothing here can be changed. ",
+    note.replaceChildren(document.createTextNode("You are reading an earlier run (" + (r.project || "run") + "). Nothing here can be changed. "),
       h("button", { type: "button", class: "sm", on: { click: () => { old = null; note.hidden = true; ["needs", "team", "progress", "messages"].forEach(i => { $(i)._sig = ""; }); render(); } } }, "Back to the current run"));
     $("needs").hidden = true;
     const items = (j.tl_items || []).concat((j.chat || []).map(c => ({ ts: c.ts, from: c.role === "human" ? "You" : (c.who || c.role), to: "", text: c.text })));
-    paint($("team"), "old" + r.id, () => (j.agents || []).map(a => h("div", { class: "agent" }, h("h3", {}, a.called || a.name), h("span", { class: "mute small" }, ROLE[a.role === "verifier" ? "critic" : a.role] || a.role || ""))));
+    paint($("team"), "old" + r.id, () => (j.agents || []).map(a => h("div", { class: "agent" }, h("h3", {}, L.agentName({ [a.name]: { display: a.called, role: a.role } }, a.name)), h("span", { class: "mute small" }, ROLE[a.role === "verifier" ? "critic" : a.role] || a.role || ""))));
     paint($("progress"), "old" + r.id, () => (j.tl_groups || []).map(g => h("div", { class: "line" }, g.label || g.key)));
     paint($("messages"), "old" + r.id, () => items.length ? items.map(it => h("details", { class: "msg" }, h("summary", {}, h("span", { class: "tm" }, String(it.ts || "").slice(11, 16)),
       h("b", {}, L.plainName(it.from || "")), it.to ? ["to", h("b", {}, L.plainName(it.to))] : null, h("span", { class: "pv" }, L.preview(it.text || it.preview || it.title || ""))),
