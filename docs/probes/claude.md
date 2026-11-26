@@ -47,7 +47,7 @@ Everything below was observed live unless a row says "not verified". Event lines
 6. Error turns are `result.subtype:"success"` with `is_error:true`; check `is_error` and `terminal_reason`. The 5 minute MSG-5 check can use the `queued` line instead of "answered".
 7. Killing the CLI with SIGTERM stops the job (REC-9 "stop agents" semantics are fine). With SIGKILL the job lives on with no owner; Orch's `lost` job handling (JOB-7) has to cover this.
 8. `system/init` is not printed at process start; it appears only with the first turn (and again at every turn). An idle process emits nothing, so liveness must come from the pid. A bad `--resume` fails at startup, before any message.
-9. Unattended background jobs have a built-in time limit (30 min default in stream-json mode, max 2 h) unless `BASH_DEFAULT_TIMEOUT_MS` is raised; "hours-long jobs" need that variable. Not tested beyond 12 min.
+9. Unattended background jobs have a built-in time limit (30 min default in stream-json mode, max 2 h) unless `BASH_DEFAULT_TIMEOUT_MS` is raised; "hours-long jobs" need that variable. Measured later: with both variables at 86400000, a background job with no `timeout` parameter ran 36 minutes and ended normally (exit 0), and the CLI woke itself. Longer than 36 minutes is not tested.
 10. The CLI keeps writing session transcripts to the user's normal `~/.claude/projects/` (one folder per probe working folder). Using a separate `CLAUDE_CONFIG_DIR` per agent avoids touching the user's config but then `--resume` of an old session cannot find it.
 
 ## Details
@@ -399,7 +399,7 @@ Compact (user text `/compact`, session had one background job finished earlier):
 
 ### Not tested or not verifiable here
 
-- Jobs longer than 12 minutes; enforcement at the 30 minute default.
+- Jobs longer than 36 minutes; enforcement at the 30 minute default.
 - Interrupt while text is streaming; interrupt with a queued message.
 - Real rate limit, billing, overload errors from the real service (deliberately not provoked); real error text may differ from the mock.
 - Message text without `uuid`; crash between writing to the fifo and the CLI reading it.

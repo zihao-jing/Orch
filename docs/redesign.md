@@ -387,8 +387,8 @@ Settings the adapters must make (details in `docs/probes/`):
 
 - **Claude:** `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` raised, or background jobs end at 30 minutes (2 hours at
   most). Deny rules for `nohup`, `setsid` and `&`.
-- **Qoder:** background jobs end at 10 minutes (whether this can be raised is being tested). No interrupt without
-  ending the CLI. Never send `/model`: it changes the user's global settings.
+- **Qoder:** background jobs end at 10 minutes unless the worker sets the Bash tool's own `timeout` (at most 2 hours; the
+  environment variables do not raise it). No interrupt without ending the CLI. Never send `/model`: it changes the user's global settings.
 - **Codex:** a very large `thread_unload_delay_secs`, or an idle thread without a connection is unloaded after a minute
   and its jobs are killed; `thread/resume` after every connect.
 - **OpenCode:** after a server restart its job list still shows dead jobs as running: check `GET /api/shell/{id}`. Filter
