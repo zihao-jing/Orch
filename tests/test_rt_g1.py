@@ -178,6 +178,14 @@ class TestDecision(unittest.TestCase):
         actions = pipeline(s, ev)
         assert_has(self, actions, Send, recipient="manager", key=K.REVIEW_RUBRIC_MISSING)
         assert_none(self, actions, OpenGate)
+        # the answer to that message is a review: its rubric is kept and its ACCEPT opens the gate (live run S)
+        ask = assert_has(self, actions, Send, recipient="manager", key=K.REVIEW_RUBRIC_MISSING).message
+        s.messages["rm"] = message("rm", "manager", key=ask.key, values=ask.text.values)
+        s, ev = turn_ended(s, "manager", reply=Reply(untagged="Verdict.", decision="ACCEPT", score=4.8,
+                                                     rubric=["works"]), started_by=["rm"])
+        actions = pipeline(s, ev)
+        self.assertEqual(assert_has(self, actions, OpenGate).gate.kind, "milestone")
+        self.assertEqual(ms_of(actions)[0].rubric, ["works"])
 
     def test_MS_6_the_rubric_of_a_reply_is_kept(self):
         s, ev = manager_reply(review_snap(), decision="ACCEPT", rubric=["a", "b"], score=3.0)
@@ -189,7 +197,8 @@ class TestDecision(unittest.TestCase):
         actions = pipeline(s, ev)
         self.assertEqual([g for g in find(actions, OpenGate) if g.gate.kind == "milestone"], [])
         low = assert_has(self, actions, Send, recipient="manager", key=K.REVIEW_SCORE_LOW)
-        self.assertEqual(low.message.text.values, {"milestone": "m1", "score": 2.0, "pass_score": 3.0})
+        self.assertEqual(low.message.text.values, {"milestone": "m1", "title": "Milestone m1",
+                                                   "score": 2.0, "pass_score": 3.0})
         self.assertFalse(ms_of(actions)[0].accepted)
 
     def test_MS_7_revise_changes_nothing_and_the_review_waits_for_a_changed_checklist(self):
@@ -307,6 +316,13 @@ class TestPlan(unittest.TestCase):
         self.assertEqual([(m.id, m.status) for m in ms_of(actions)], [("m1", "current"), ("m2", "pending"), ("m3", "pending")])
         start = assert_has(self, actions, Send, recipient="manager", key=K.MILESTONE_START)
         self.assertEqual(start.message.text.values["milestone"], "m1")
+        # a bare approval is not sent on its own: the start message says it, so the manager gets one turn
+        answers = assert_has(self, actions, Send, recipient="manager", key=K.GATE_ANSWERS)
+        assert_has(self, actions, Drop, message_id=answers.message.id)
+        self.assertTrue(start.message.text.values["approved_plan"])
+        # with a note, the answer goes as it is
+        actions = pipeline(s, event(GateAnswer, s, "", gate_id=g.id, approve=True, text="Keep it short."))
+        assert_none(self, actions, Drop)
 
     def test_MS_6_a_reply_without_a_list_is_asked_again(self):
         s, ev = self.reply("I think we should begin.")

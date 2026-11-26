@@ -10,6 +10,7 @@ or a quote they are not read.
   with a question sends no message to anyone else; write to {critic} after my answer. Until then you may still write to
   it, in a reply without a question, about work that does not depend on it. While a question is open, don't ask it again.
 - <pause>what I have to do and send back</pause> tells me that the work now waits for me. What is running goes on.
+  A plan or a milestone you hand in waits for my approval anyway: it needs no pause.
 - <rubric>…</rubric>: a milestone's criteria, one per line. Write it again only to change it.
 - <score>4.5</score>: the overall score out of 5 in a milestone review, after a table with the score of each criterion.
 - <decision>ACCEPT</decision> ends a review when the milestone is met, <decision>REVISE</decision> when more has to be

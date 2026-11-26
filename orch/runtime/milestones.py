@@ -122,6 +122,9 @@ def merge(old: Sequence[Milestone], listed: Sequence[Tuple[str, str, str]]) -> L
 # ----------------------------------------------------------------------------------------------------- the module
 
 
+# the messages whose answer is a review of the milestone they name
+REVIEW_ASKS = (K.CHECKLIST_COMPLETE, K.GATE_ANSWERS, K.REVIEW_RUBRIC_MISSING, K.REVIEW_SCORE_LOW)
+
 class _Module:
     name = NAME
 
@@ -141,6 +144,7 @@ class _Run:
         self.ms: List[Milestone] = list(snap.milestones)
         self.out: List[C.Action] = []
         self.dirty, self.finished, self.n = False, snap.finished, 0
+        self.approved_plan = False  # this event: the plan was approved (the start message says so)
         mgr = snap.manager
         self.manager = mgr.id if mgr else ""
 
@@ -174,7 +178,8 @@ class _Run:
 
     def start_message(self, m: Milestone) -> None:
         self.tell_manager(K.MILESTONE_START, {"milestone": m.id, "title": m.title, "text": m.text,
-                                              "checklist_path": m.checklist_path, "last_title": self.last_before(m)})
+                                              "checklist_path": m.checklist_path, "last_title": self.last_before(m),
+                                              "approved_plan": self.approved_plan})
 
     def open_gate(self, kind: C.GateKind, mid: str = "") -> List[C.Gate]:
         return [g for g in self.snap.gates.values() if g.is_open and g.kind == kind and (not mid or g.milestone == mid)]
@@ -324,7 +329,7 @@ class _Run:
         """Did the turn take in a message of these keys about this milestone (or answers that decide it again)?"""
         for x in msgs:
             v = x.text.values if x.text else {}
-            if x.key in keys and v.get("milestone") == m.id and (v.get("title"), v.get("text")) == (m.title, m.text):
+            if x.key in keys and v.get("milestone") == m.id and (v.get("title"), v.get("text", m.text)) == (m.title, m.text):
                 return True  # an old one of a rewritten milestone does not count (MS-13)
             if x.key == K.GATE_ANSWERS and K.GATE_ANSWERS in keys and v.get("decide_again") == m.title:
                 return True
@@ -342,7 +347,7 @@ class _Run:
             self.put(m)
         if r.decision is None or m.accepted or self.open_gate(C.GateKind.MILESTONE, m.id):
             return
-        if m.notified in ("", REOPENED) or not self.asked(m, msgs, (K.CHECKLIST_COMPLETE, K.GATE_ANSWERS)):
+        if m.notified in ("", REOPENED) or not self.asked(m, msgs, REVIEW_ASKS):
             return
         if any(isinstance(a, C.HoldDecision) and a.milestone_id == m.id and a.decision is not None for a in self.prior):
             return
@@ -356,9 +361,10 @@ class _Run:
     def accept(self, m: Milestone, t: C.Turn, r: C.Reply) -> None:
         s = self.snap.settings
         if not m.rubric:
-            return self.tell_manager(K.REVIEW_RUBRIC_MISSING, {"milestone": m.id})
+            return self.tell_manager(K.REVIEW_RUBRIC_MISSING, {"milestone": m.id, "title": m.title})
         if s.pass_score is not None and m.score is not None and m.score < s.pass_score:
-            return self.tell_manager(K.REVIEW_SCORE_LOW, {"milestone": m.id, "score": m.score, "pass_score": s.pass_score})
+            return self.tell_manager(K.REVIEW_SCORE_LOW, {"milestone": m.id, "title": m.title,
+                                                          "score": m.score, "pass_score": s.pass_score})
         m = replace(m, accepted=True, summary=r.summary or r.untagged)
         self.put(m)
         if s.approve_milestones and not self.snap.night:
@@ -385,23 +391,30 @@ class _Run:
                 self.apply_change(g)
         for a in self.prior:
             if isinstance(a, C.Send) and a.message.key == K.GATE_ANSWERS:
+                started = []
                 for gid in a.message.gates:
                     g = snap.gates.get(gid)
                     ans = closing.get(gid) or (g.answer if g else None)
                     if g and ans:
-                        self.answered(g, bool(ans.approve))
+                        started.append(self.answered(g, bool(ans.approve)) and not (ans.text or "").strip())
+                if len(started) == 1 and started[0]:  # a bare approval: the start message says it, in one turn
+                    self.out.append(C.Drop(a.message.id, C.DropReason.MERGED))
 
-    def answered(self, g: C.Gate, ok: bool) -> None:
+    def answered(self, g: C.Gate, ok: bool) -> bool:
+        """True when the approval started a milestone (its start message then tells the manager)."""
         if g.kind == C.GateKind.PLAN and ok and not self.ms and g.new:
+            self.approved_plan = True
             self.start_plan([replace(m) for m in g.new])
+            return True
         elif g.kind == C.GateKind.MILESTONE:
             m = self.cur()
             if m is None or m.id != g.milestone:
-                return
+                return False
             if ok and m.accepted:
-                self.advance(m)
+                return self.advance(m)
             elif not ok:
                 self.put(replace(m, accepted=False))
+        return False
 
     def apply_change(self, g: C.Gate) -> None:
         """MS-11 to 14: apply the approved list on what is there now."""
@@ -438,14 +451,15 @@ class _Run:
         self.finished = False
         self.start_message(self.cur())
 
-    def advance(self, m: Milestone) -> None:
+    def advance(self, m: Milestone) -> bool:
         self.put(replace(m, status=S.DONE, ended=self.snap.now))
         nxt = next((x for x in self.ms if x.status == S.PENDING), None)
         if nxt:
             self.start(nxt)
-        else:
-            self.finished = True  # MS-14: the run stays open
-            self.note(K.NOTE_FINISHED, {})
+            return True
+        self.finished = True  # MS-14: the run stays open
+        self.note(K.NOTE_FINISHED, {})
+        return False
 
     # ---- what holds in any event
     def upkeep(self) -> None:

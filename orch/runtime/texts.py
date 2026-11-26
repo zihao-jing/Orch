@@ -260,7 +260,8 @@ def _manager_takeover(t: _Text) -> str:
 
 
 def _milestone_start(t: _Text) -> str:
-    last = t.fill("“{last_title}” is done. ") if t.get("last_title") else ""
+    last = t.fill("“{last_title}” is done. ") if t.get("last_title") else "I approved the plan. " \
+        if t.get("approved_plan") else ""
     return last + t.fill(
         "The milestone “{title}” starts now.\n\n{text}\n\n"
         "Write {critic} its instruction, and set the rubric. {critic} keeps its checklist for it in `{checklist_path}`.")
@@ -497,8 +498,8 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                      "and the files, and write {critic} what to do so that the work goes on. Ask me or pause only if it "
                      "really needs me.",
     K.CHECKLIST_COMPLETE: _checklist_complete,
-    K.REVIEW_RUBRIC_MISSING: "This milestone ({milestone}) has no rubric. Set one first, then score against it and decide.",
-    K.REVIEW_SCORE_LOW: "Your score of {score} out of 5 is below the {pass_score} we agreed on, so the milestone is not "
+    K.REVIEW_RUBRIC_MISSING: "The milestone “{title}” ({milestone}) has no rubric. Set one first, then score against it and decide.",
+    K.REVIEW_SCORE_LOW: "Your score of {score} out of 5 is below the {pass_score} we agreed on, so “{title}” is not "
                         "accepted. Write {critic} what to fix and to update its checklist.",
     K.GATE_ANSWERS: _gate_answers,
     K.MILESTONE_CHANGE_REQUEST: _milestone_change,

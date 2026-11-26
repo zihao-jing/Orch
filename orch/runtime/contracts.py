@@ -449,11 +449,11 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.MANAGER_TAKEOVER: ("turns_dir", "latest"),
     TextKey.PLAN_REQUEST: ("goal",),
     TextKey.PLAN_LIST_MISSING: (),
-    TextKey.MILESTONE_START: ("milestone", "title", "text", "checklist_path", "last_title"),
+    TextKey.MILESTONE_START: ("milestone", "title", "text", "checklist_path", "last_title", "approved_plan"),
     TextKey.SILENCE_CHECK: ("attempt", "attempts"),
     TextKey.CHECKLIST_COMPLETE: ("milestone", "title", "text", "rubric", "checklist", "jobs"),
-    TextKey.REVIEW_RUBRIC_MISSING: ("milestone",),
-    TextKey.REVIEW_SCORE_LOW: ("milestone", "score", "pass_score"),
+    TextKey.REVIEW_RUBRIC_MISSING: ("milestone", "title"),
+    TextKey.REVIEW_SCORE_LOW: ("milestone", "title", "score", "pass_score"),
     TextKey.GATE_ANSWERS: ("answers", "unsent", "decide_again"),  # answers: [{kind, question, answer, approve}]
     #   (approve: True/False for plan, milestone and change gates, else None); unsent:
     #                                      [{to, body}]; decide_again: milestone title or ""
@@ -1640,7 +1640,8 @@ class Release(Action):
 @dataclass(frozen=True)
 class Drop(Action):
     """Store: status failed, `drop`. With a Send of the same event: recorded, never sent."""
-    emitters: ClassVar[Tuple[str, ...]] = ("routing", "gates", "discussion", "recovery", "workers", "engine")
+    emitters: ClassVar[Tuple[str, ...]] = ("routing", "gates", "discussion", "recovery", "workers", "milestones",
+                                           "engine")
     message_id: str = ""
     reason: DropReason = DropReason.REJECTED
 

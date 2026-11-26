@@ -29,7 +29,7 @@ VALUES = {
     "health": "quiet", "request": "", "open_report": False, "idle_since": T0 - 720, "workers": ["worker-1", "worker-2"],
     "chars": 9000, "limit": 8000, "words": ["boss"], "gates": ["question (A or B?)"], "rules": ["Be brief."],
     "milestones": ["1. Data"], "score": 4.5, "pass_score": 4.8, "rounds": 5000, "choices": ["opus", "gpt"], "choice": "opus",
-    "new_session": True, "files": ["a.yaml"], "milestone_change": False,
+    "new_session": True, "files": ["a.yaml"], "milestone_change": False, "approved_plan": False,
 }
 TO_WORKER = ("job_wakeup", "job_lost", "retry_continue", "restart_continue", "message_again", "session_return",
              "session_fresh", "handover_write", "handover_instruction")
@@ -92,7 +92,7 @@ class TestTexts(unittest.TestCase):
     def test_PRM_1_each_text_uses_the_values_that_carry_content(self):
         free = {"agent", "attempts", "state_file", "turns_dir", "latest", "since", "available", "milestone",
                 "decide_again", "unsent", "request", "open_report", "idle_since", "new_session", "jobs", "workers",
-                "last_title", "score"}
+                "last_title", "score", "approved_plan"}
         for key in TextKey:
             if key in (TextKey.COMMAND_REFUSED, TextKey.HANDOVER_WRITE):
                 continue
@@ -143,9 +143,10 @@ class TestTexts(unittest.TestCase):
         self.assertEqual(out, "Progress check on worker-1, 9 minutes into its run: off track.\n\nIt edits the docs.")
 
     def test_MS_6_an_accept_below_the_agreed_score_goes_back(self):
-        out = texts.words(C.TextRef(TextKey.REVIEW_SCORE_LOW, {"milestone": "m1", "score": 3.5, "pass_score": 4.0}),
+        out = texts.words(C.TextRef(TextKey.REVIEW_SCORE_LOW, {"milestone": "m1", "title": "Data", "score": 3.5,
+                                                               "pass_score": 4.0}),
                           snapshot())
-        self.assertEqual(out, "Your score of 3.5 out of 5 is below the 4.0 we agreed on, so the milestone is not accepted. "
+        self.assertEqual(out, "Your score of 3.5 out of 5 is below the 4.0 we agreed on, so “Data” is not accepted. "
                               "Write the critic what to fix and to update its checklist.")
 
     def test_SIL_3_silence_check(self):
