@@ -707,7 +707,7 @@ def _agent_folder(d: Path) -> Dict[str, Any]:
         if own.is_file():
             raw["system_prompt_file"] = str(own)
         elif role in DEFAULT_PROMPT:
-            raw["system_prompt_file"] = str(PROMPTS_DIR / DEFAULT_PROMPT[role])
+            raw["system_prompt_file"] = str(PROMPTS_DIR.parent / "runtime" / "prompts" / DEFAULT_PROMPT[role])
     elif raw.get("system_prompt_file"):
         raw["system_prompt_file"] = _expand(raw["system_prompt_file"], d)
     if role == "manager" and "goal" not in raw and "goal_file" not in raw and (d / "goal.md").is_file():

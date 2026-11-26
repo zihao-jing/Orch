@@ -292,7 +292,7 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual((mon.agent("worker").turn_limit(True), mon.agent("worker").check_every), (0.0, 20.0))
         aud = mon.agent("auditor")
         self.assertFalse((d / "agents/auditor/system_prompt.md").exists())  # orch's own prompt: it audits orch
-        self.assertIn("You are the auditor", aud.current_system_prompt())
+        self.assertIn("You audit how a team of AI agents communicates", aud.current_system_prompt())
         self.assertEqual((mon.controller.audit_every, mon.controller.audit_points), (10, 5))
         self.assertIn("Bash", aud.backend_options["disallowed_tools"])
         critic = mon.agent("critic")  # PRM-2: Orch's own prompt for the critic, never a project copy
