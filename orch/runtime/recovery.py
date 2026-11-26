@@ -190,7 +190,7 @@ class _Decide:
                 hold: bool = False) -> None:
         """One failed try. turn: the turn it cut off; hold: a try without a turn."""
         sw = a.switch
-        if sw is not None and sw.step in (O, C):
+        if sw is not None and (sw.step in (O, C) or sw.step == H and sw.handover_by != a.id):  # the new one is open
             return self.switch_failed(a, sw, error, why, after, hold)
         if sw is not None and sw.step == H and sw.handover_by == a.id:
             return self.handover_missing(a, sw)
@@ -481,7 +481,7 @@ class _Decide:
     def session(self, a: Agent, ev: SessionChanged) -> None:
         sw = a.switch
         if ev.change in (SessionChange.LOST, SessionChange.DIFFERENT):
-            if sw is None or sw.step in (O, C) or sw.step == H and sw.handover_by == a.id:
+            if sw is None or sw.step in (O, C, H):
                 self.failure(a, ErrorClass.SESSION_LOST, ev.detail, self.cut(a))
         elif ev.change in (SessionChange.NEW, SessionChange.RESUMED):
             if sw is not None and sw.step == O:
