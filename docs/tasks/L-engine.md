@@ -95,3 +95,17 @@ engine.state() / submit(command) / message(id) / messages(...)   # the Runtime p
 ## Report (append below)
 
 Ids done, test results (rt_l and full suite counts), requests for contract or module changes, anything unsure.
+
+- Implemented the event loop, durable intent replay, command replies, process lifecycle, job polling, and background smoke tests. The mock integration coverage includes MSG-1, MSG-2, MSG-5, MSG-6, REC-7, REC-8, REC-9, and JOB-4. It also covers crashes around `Store.apply`, send failures, command files, and module order.
+- The Task L selection (`python3 tests/run.py test_rt_l.`) passed all 13 tests. The store selection passed all 59 tests in the combined store and engine run. The literal `rt_l` filter also selected unrelated adapter cases, with failures in process reuse and sandboxed Unix socket binding in the initial run.
+
+- The full suite discovered 1,063 tests. The run showed unrelated failures and errors, including denied process inspection and local socket binding. A legacy waiter-loop test stalled until its temporary shell was stopped. Other workers remained stalled, so the runner was interrupted and did not print final pass, fail, or skip counts.
+- Implementation and tests are in `4b8b0c7` on `rd-l`. This report was appended after the commit.
+
+### Requests
+
+- Provide `orch.config.add_worker(project, like, worker)` as declared in the contracts. The engine calls it when present. This checkout has no helper to copy the source worker's configuration.
+- Expose terminal process ownership and shutdown through the adapter contract so take-back can terminate an external terminal. The engine can already stop Orch's own CLI, generate the launch command, read the transcript, and reopen the saved session.
+- Specify the update and audit execution hooks for `UpdateOrch` and `AuditRun`. The command contracts are placeholders and the engine returns unsuccessful replies for those commands.
+- Let the supervisor decide wakeup from job-end or job-check events if JOB-4 must act before the next scheduled tick. The current supervisor schedules fallback on Tick.
+- Add a Store operation to reset an in-doubt transmission while preserving `checked_at`. The engine currently reapplies the recorded check through `Store.act`.
