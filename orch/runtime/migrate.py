@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
 import shutil
@@ -55,20 +56,34 @@ def _orch_dir(project: Union[str, Path]) -> Path:
     return p
 
 
+# sha256 of the old runtime's default prompts (orch/prompts/, removed): a project copy equal to one is Orch's own
+OLD_PROMPTS = {
+    "manager": "980787a4e6b3cbe80a00e421f49207406ad1b6b30d83ec49b2ff6780907f95b9",
+    "verifier": "a2d85647f395ec29f461e9501601bddd96c96931cba94ee0ca5194d2daca6464",
+    "monitor": "008ad51ad5dcf1c5e3920e64d9a6b39c566db3fe5674ede2690944b81a953911",
+}
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
 def _orch_prompts_for(role: str) -> set:
+    """Digests of Orch's own prompts for a role: the old runtime's and the current one."""
     canon = config.ROLE_ALIASES.get(role, role)
     rt_name = "critic" if canon == "verifier" else canon
-    out = set()
-    for p in (
-        config.PROMPTS_DIR / config.DEFAULT_PROMPT.get(canon, f"{rt_name}.md"),
-        RUNTIME_PROMPTS_DIR / f"{rt_name}.md",
-    ):
-        if p.is_file():
-            try:
-                out.add(p.read_text(encoding="utf-8").strip())
-            except OSError:
-                pass
+    out = {OLD_PROMPTS[canon]} if canon in OLD_PROMPTS else set()
+    p = RUNTIME_PROMPTS_DIR / f"{rt_name}.md"
+    if p.is_file():
+        try:
+            out.add(_digest(p.read_text(encoding="utf-8")))
+        except OSError:
+            pass
     return out
+
+
+def is_orch_prompt(role: str, text: str) -> bool:
+    return _digest(text) in _orch_prompts_for(role)
 
 
 def backup_prompts(project: Union[str, Path], log: Any = None) -> List[str]:
@@ -91,12 +106,11 @@ def backup_prompts(project: Union[str, Path], log: Any = None) -> List[str]:
         role = config.ROLE_ALIASES.get(str(raw.get("role", "worker")), str(raw.get("role", "worker")))
         if role not in ("manager", "verifier", "monitor"):
             continue
-        defaults = _orch_prompts_for(role)
         own = d / "system_prompt.md"
         bak = d / "system_prompt.md.bak"
         if own.is_file():
             text = own.read_text(encoding="utf-8").strip()
-            if text and text not in defaults:
+            if text and not is_orch_prompt(role, text):
                 os.replace(own, bak)
                 rel = f"agents/{d.name}/system_prompt.md.bak"
                 moved.append(rel)
@@ -327,6 +341,7 @@ def build_snapshot(
         return_after=float(settings.get("fallback_cooldown", 18000.0) or 18000.0),
         golden_limit=mon.controller.golden_limit or 8000,
         pass_score=mon.controller.min_score if mon.controller.min_score is not None else 4.5,
+        writing=mon.controller.writing,
         approve_plan=mon.controller.approve_plan,
         approve_milestones=mon.controller.approve_milestones,
     )

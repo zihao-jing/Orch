@@ -623,7 +623,6 @@ def _build_agent(raw: Dict[str, Any], defaults: Dict[str, Any], base: Path, mon_
 
 
 ROLE_ALIASES = {"critic": "verifier", "reviewer": "verifier", "writer": "worker"}
-PROMPTS_DIR = Path(__file__).with_name("prompts")
 DEFAULT_PROMPT = {"manager": "manager.md", "verifier": "critic.md", "worker": "worker.md", "auditor": "auditor.md",
                   "monitor": "monitor.md"}
 # workflow settings an agent.yaml may carry (usually: the manager's goal and approvals, the critic's checklist
@@ -707,7 +706,7 @@ def _agent_folder(d: Path) -> Dict[str, Any]:
         if own.is_file():
             raw["system_prompt_file"] = str(own)
         elif role in DEFAULT_PROMPT:
-            raw["system_prompt_file"] = str(PROMPTS_DIR.parent / "runtime" / "prompts" / DEFAULT_PROMPT[role])
+            raw["system_prompt_file"] = str(Path(__file__).with_name("runtime") / "prompts" / DEFAULT_PROMPT[role])
     elif raw.get("system_prompt_file"):
         raw["system_prompt_file"] = _expand(raw["system_prompt_file"], d)
     if role == "manager" and "goal" not in raw and "goal_file" not in raw and (d / "goal.md").is_file():
@@ -722,7 +721,7 @@ def _writing_file(value: Any, base: Path, proj: Optional[Path]) -> str:
     orch's general rules are in runtime/prompts/style.md, and the writing file is for a project's own kind of document)."""
     v = str(value or "").strip()
     if v.lower() in ("off", "none", "false"):
-        return ""
+        return "off"
     if v:
         return _expand(v, base)
     own = proj / "writing.md" if proj else None
@@ -912,21 +911,17 @@ def load_config(path: str) -> Config:
                 for key, role in (("manager", "manager"), ("critic", "verifier"), ("worker", "worker"))}
         for a in agents:
             a.prompt_vars = dict(team)
-            proto = {"manager": "manager", "verifier": "critic", "worker": "worker", "monitor": "monitor"}.get(a.role)
-            if controller.mode == "managed" and controller.protocol and proto:
-                a.protocol_path = str(PROMPTS_DIR / "protocol" / f"{proto}.md")
-            if controller.mode == "managed" and controller.writing and a.role in ("manager", "verifier", "worker"):
+            if controller.mode == "managed" and controller.writing not in ("", "off") and a.role in ("manager", "verifier", "worker"):
                 a.writing_path = controller.writing
         m_runtime = "new"  # the only runtime (N); a `runtime:` key is still accepted
         from .runtime import migrate as rt_migrate
         for a in agents:
             if a.role in ("manager", "verifier", "monitor"):
-                defaults_sp = rt_migrate._orch_prompts_for(a.role)
                 if a.system_prompt_path:
                     sp_p = Path(a.system_prompt_path)
-                    if sp_p.is_file() and PROMPTS_DIR not in sp_p.parents and rt_migrate.RUNTIME_PROMPTS_DIR not in sp_p.parents:
+                    if sp_p.is_file() and rt_migrate.RUNTIME_PROMPTS_DIR not in sp_p.parents:
                         txt = sp_p.read_text(encoding="utf-8").strip()
-                        if txt and txt not in defaults_sp:
+                        if txt and not rt_migrate.is_orch_prompt(a.role, txt):
                             os.replace(sp_p, Path(str(sp_p) + ".bak"))
                 a.system_prompt = ""
                 rt_name = "critic" if a.role == "verifier" else a.role

@@ -1027,6 +1027,9 @@ class Settings:
     golden_limit: int = 8000
     compact_wait: float = 600.0  # how long compact() may hold an agent
     pass_score: Optional[float] = 4.5
+    # a project's own writing rules, added to the manager's, critic's and workers' system prompts and read each time:
+    # "" = `.orch/writing.md` in the workspace when there is one, "off" = none, else a path
+    writing: str = ""
     approve_plan: bool = True
     approve_milestones: bool = True
 

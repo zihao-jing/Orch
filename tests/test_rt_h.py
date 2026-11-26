@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 import re
 
 from rt_helpers import *
@@ -258,6 +259,28 @@ class TestPrompts(unittest.TestCase):
             self.assertEqual([b for b, m in marks.items() if m in p], [backend])
         p = texts.system_prompt(snapshot(agent("worker-1", choice=C.Choice(backend="command"))), "worker-1")
         self.assertIn("background option", p)
+
+    def test_a_projects_writing_rules_end_three_prompts_and_are_read_each_time(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / ".orch").mkdir()
+            rules = Path(d) / ".orch" / "writing.md"
+            rules.write_text("<!-- note -->\n- Tables have units in the header.", encoding="utf-8")
+            snap = snapshot(agent("monitor"), run=C.RunInfo(workspace=d))
+            for who in ("manager", "critic", "worker-1"):
+                p = texts.system_prompt(snap, who)
+                self.assertTrue(p.rstrip().endswith("This project's writing rules\n\n- Tables have units in the header."), who)
+                self.assertNotIn("note -->", p)
+            self.assertNotIn("units in the header", texts.system_prompt(snap, "monitor"))
+            rules.write_text("- Cite every number.", encoding="utf-8")
+            self.assertIn("Cite every number.", texts.system_prompt(snap, "critic"))
+            snap.settings.writing = "off"
+            self.assertNotIn("writing rules", texts.system_prompt(snap, "critic").split("How to write")[1])
+            other = Path(d) / "paper-rules.md"
+            other.write_text("- One claim per sentence.", encoding="utf-8")
+            snap.settings.writing = str(other)
+            self.assertIn("One claim per sentence.", texts.system_prompt(snap, "manager"))
+        self.assertNotIn("This project's writing rules", texts.system_prompt(snapshot(), "manager"))
 
     def test_the_manager_uses_display_names(self):
         p = texts.system_prompt(snapshot(agent("critic", display="Mira")), "manager")

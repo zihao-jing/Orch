@@ -10,6 +10,7 @@ import hashlib
 import random
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from . import reminders
@@ -617,7 +618,25 @@ def system_prompt(snap: Snapshot, agent: str) -> str:
     parts = [_prompt(f"{a.role.value}.md", values), _prompt(f"protocol/{a.role.value}.md", values)]
     if a.role in (Role.MANAGER, Role.CRITIC, Role.WORKER):
         parts.append("How to write\n\n" + _fill(_bullets(writing_rules(a.role)), values))
+        own = project_writing(snap)
+        if own:
+            parts.append("This project's writing rules\n\n" + own)
     return "\n\n".join(p for p in parts if p) + "\n"
+
+
+def project_writing(snap: Snapshot) -> str:
+    """The project's own writing rules (Settings.writing), read each time so an edit applies from the next system
+    prompt. HTML comments are left out."""
+    w = (snap.settings.writing or "").strip()
+    if w == "off":
+        return ""
+    ws = (snap.run.workspace or "").rstrip("/")
+    path = Path(w) if w else (Path(ws) / ".orch" / "writing.md" if ws else None)
+    try:
+        text = path.read_text(encoding="utf-8") if path and path.is_file() else ""
+    except OSError:
+        text = ""
+    return re.sub(r"<!--.*?-->", "", text, flags=re.S).strip()
 
 
 def _relative(snap: Snapshot, path: str) -> str:

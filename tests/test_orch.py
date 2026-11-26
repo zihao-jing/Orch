@@ -287,7 +287,7 @@ class TestProjectFolder(unittest.TestCase):
         self.assertEqual((mo.backend, mo.backend_options["model"]), ("opencode", "alibaba-token-plan-cn/qwen3.8-flash"))
         self.assertEqual([f["backend_options"]["model"] for f in mo.fallback], ["zenmux/deepseek/deepseek-v4.1-flash"])
         self.assertIn("Edit", mo.backend_options["disallowed_tools"])
-        self.assertIn("Quick check", mo.current_system_prompt())
+        self.assertIn("You check for me how a worker's run is going", mo.current_system_prompt())
         self.assertNotRegex(mo.current_system_prompt().lower().replace("`.orch/`", ""), r"manager|orch\b")
         self.assertEqual(mon.agent("worker").fresh_session, "compact")
         aud = mon.agent("auditor")

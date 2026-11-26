@@ -378,7 +378,7 @@ class TestSettingsAndPromptMigration(unittest.TestCase):
 
         # Manager has a hand-edited prompt; critic has Orch's default prompt; worker has its own prompt/task
         (orch_dir / "agents" / "manager" / "system_prompt.md").write_text("Custom manager prompt.", encoding="utf-8")
-        default_critic = (config.PROMPTS_DIR / "critic.md").read_text(encoding="utf-8")
+        default_critic = (Path(config.__file__).with_name("runtime") / "prompts" / "critic.md").read_text(encoding="utf-8")
         (orch_dir / "agents" / "critic" / "system_prompt.md").write_text(default_critic, encoding="utf-8")
         (orch_dir / "agents" / "worker" / "system_prompt.md").write_text("Worker custom task file.", encoding="utf-8")
 

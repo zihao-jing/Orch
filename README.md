@@ -66,6 +66,7 @@ Commands default to `./.orch`, so no path is needed when you run them from the p
 <project>/.orch/
   settings.yaml                shared model list, retry_waits, fallback_cooldown
   golden.md                    (created during the run) rules, preferences and key decisions kept by the manager
+  writing.md                   (optional) this project's own writing rules (papers, tables, …)
   audit-decisions.md           (optional) your notes on audit findings
   runs/                        run state, messages, turns, checklists and rubrics (gitignored)
   agents/
@@ -158,7 +159,10 @@ Keys read from `agents/<name>/agent.yaml`:
 **Prompts.** Orch always uses its own built-in prompts for `manager`, `critic`, `monitor`, and `auditor`. If a
 project has a hand-edited `system_prompt.md` for one of those roles, Orch moves it to `system_prompt.md.bak`. For a
 `worker`, `agents/<worker>/system_prompt.md` (if present) becomes its task text. You steer the project through
-`agents/manager/goal.md` and `.orch/golden.md` (maintained by the manager, read by the manager only).
+`agents/manager/goal.md`, `.orch/golden.md` (maintained by the manager, read by the manager only), and optional
+`.orch/writing.md`: your project's own writing rules, added at the end of the manager's, critic's and workers'
+system prompts (read again for each new session; HTML comments are left out). `writing:` in the manager's
+`agent.yaml` names another file, or `off`.
 
 When an existing project without `.orch/settings.yaml` is started, Orch extracts its agent models into
 `.orch/settings.yaml` and keeps the original files until you confirm the migration on the dashboard.
