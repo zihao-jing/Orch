@@ -183,7 +183,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .assignment, .live-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-preview { color: var(--mute); font-style: italic; }
 .live-preview:empty { display: none; }
-.agent-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.agent-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-top: 8px; }
+.agent-actions > * { flex: none; white-space: nowrap; }
+.agent-actions > details.menu { margin-left: auto; }
 .agent-actions .icon { width: 26px; height: 26px; font-size: 16px; background: transparent; }
 .activity-body { margin-top: 6px; }
 .livelog { background: var(--surface); padding: 7px; border-radius: 6px; font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--ink2); max-height: 200px; overflow: auto; white-space: pre-wrap; }

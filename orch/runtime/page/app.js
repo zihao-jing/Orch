@@ -478,16 +478,15 @@
     if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "sm", title: "Talk to " + name, on: { click: () => openTalk(a.id) } }, "Talk"));
     controls.append(h("button", { type: "button", class: "sm", title: "Choose the model for " + name, on: { click: () => openModel(a.id) } }, "Model"));
     if (a.role !== "monitor" && a.lifecycle === "open") controls.append(terminalLink(a));
-    controls.append(h("span", { class: "grow" }));
     body.append(controls);
     const activity = h("div", { class: "activity-body", data: { livelog: a.id }, hidden: !openAct.has(a.id) });
-    controls.insertBefore(h("button", { type: "button", class: "sm", title: "Show this agent’s recent output and tools",
+    controls.append(h("button", { type: "button", class: "sm", title: "Show this agent’s recent output and tools",
       on: { click: ev => {
         activity.hidden = !activity.hidden;
         ev.currentTarget.textContent = activity.hidden ? "Activity" : "Hide activity";
         if (activity.hidden) openAct.delete(a.id);
         else { openAct.add(a.id); paintActivity(a.id); loadLive(a.id, "open"); }
-      } } }, openAct.has(a.id) ? "Hide activity" : "Activity"), controls.querySelector(".grow"));
+      } } }, openAct.has(a.id) ? "Hide activity" : "Activity"));
     body.append(activity);
     if (a.role === "worker") L.workerActions(a).forEach(type => (type === "WorkerDelete" ? items : controls).append(h("button", { type: "button",
       class: type === "WorkerDelete" ? "danger-text" : "sm",
