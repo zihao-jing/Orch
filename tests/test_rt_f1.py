@@ -52,6 +52,19 @@ class TestChoices(unittest.TestCase):
         self.assertEqual(backup.env["ANTHROPIC_AUTH_TOKEN"], SECRET)
         self.assertNotEqual(main.session_key, backup.session_key)
 
+    def test_MOD_1_several_backups_in_one_comma_separated_line(self):
+        for y in ({"model": "opus", "backup": "glm, gpt,kimi"}, {"model": "opus", "backup": ["glm", "gpt", "kimi"]},
+                  {"model": "opus", "backup": "glm", "backup2": "gpt, kimi"}):
+            self.assertEqual([c.name for c in models.choices(SETTINGS, y)], ["", "glm", "gpt", "kimi"], y)
+            self.assertEqual([f["model_id"] for f in config._resolve_models(dict(y), dict(y), {}, config.parse_models(
+                SETTINGS["models"]), "w")["fallback"]], ["glm", "gpt", "kimi"])
+        for bad in ({"model": "opus", "backup": "glm, glm"}, {"model": "opus", "backup2": "glm"},
+                    {"model": "opus", "backup": "glm, nope"}):
+            with self.assertRaises(config.ConfigError):
+                models.choices(SETTINGS, bad)
+        text = models.with_choice("model: x\nbackup: a\nbackup2: b\n", "opus", backups=["glm", "gpt", "kimi"])
+        self.assertEqual(yaml.safe_load(text), {"model": "opus", "backup": "glm, gpt, kimi"})
+
     def test_MOD_1_keys_are_never_stored_or_shown(self):
         backup = models.choices(SETTINGS, self.y())[1]
         self.assertNotIn(SECRET, repr(to_dict(backup)))

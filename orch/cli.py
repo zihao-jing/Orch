@@ -106,15 +106,13 @@ approve_milestones: true    # and after each milestone the manager accepts
 role: critic
 description: Turns milestones into instructions and reviews every change.
 model: gpt-6.2-sol
-backup: claude-haiku
-backup2: qwen4-max-preview
+backup: claude-haiku, qwen4-max-preview   # backups, tried in order
 """,
         "agents/worker/agent.yaml": """\
 role: worker
 description: Does the work in the repository.
 model: claude-haiku
-backup: deepseek-v4-pro
-backup2: glm-5.3
+backup: deepseek-v4-pro, glm-5.3
 fresh_session: compact      # each milestone: summarise in place (milestone = new session; never = keep)
 """,
         "agents/auditor/agent.yaml": AUDITOR_YAML,

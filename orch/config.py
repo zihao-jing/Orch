@@ -288,19 +288,30 @@ def _model(models: Dict[str, Dict[str, Any]], mid: Any, where: str) -> Dict[str,
     return models[mid]
 
 
+def backup_ids(y: Dict[str, Any], where: str = "agent") -> List[str]:
+    """An agent's backups in order: `backup: a, b, c` (comma-separated, or a YAML list), then an older `backup2`."""
+    def split(v: Any) -> List[str]:
+        items = v if isinstance(v, (list, tuple)) else str(v or "").split(",")
+        return [str(x).strip() for x in items if str(x or "").strip()]
+    ids = split(y.get("backup")) + split(y.get("backup2"))
+    if y.get("backup2") and not split(y.get("backup")):
+        raise ConfigError(f"{where}: `backup2` needs a `backup`")
+    if len(set(ids)) != len(ids):
+        raise ConfigError(f"{where}: a backup is named twice: {', '.join(ids)}")
+    return ids
+
+
 def _resolve_models(merged: Dict[str, Any], own: Dict[str, Any], defaults: Dict[str, Any],
                     models: Dict[str, Dict[str, Any]], where: str) -> Dict[str, Any]:
-    """`model: <id>`, `backup: <id>`, `backup2: <id>` in an agent's settings, resolved from the project's model list
+    """`model: <id>` and `backup: <id>, <id>, …` (see backup_ids) in an agent's settings, resolved from the project's model list
     into the inline form (backend, backend_options, env, fallback). Options the agent itself gives are applied on top
     of its model's (and of a backup's on the same backend, except `model`); its env on top of every model's (a
     backup's own env keys win). Without these keys the inline settings are used as they are."""
-    mid, b1, b2 = merged.get("model"), merged.get("backup"), merged.get("backup2")
-    if not (mid or b1 or b2):
+    mid, bids = merged.get("model"), backup_ids(merged, where)
+    if not (mid or bids):
         return merged
-    if (b1 or b2) and merged.get("fallback") is not None:
-        raise ConfigError(f"{where}: give backups either as `backup`/`backup2` ids or as `fallback`, not both")
-    if b2 and not b1:
-        raise ConfigError(f"{where}: `backup2` needs a `backup`")
+    if bids and merged.get("fallback") is not None:
+        raise ConfigError(f"{where}: give backups either as `backup` ids or as `fallback`, not both")
     out = {k: v for k, v in merged.items() if k not in ("model", "backup", "backup2")}
     own_opts = dict(own.get("backend_options") or {})
     own_env = {str(k): str(v) for k, v in (own.get("env") or {}).items()}
@@ -326,10 +337,8 @@ def _resolve_models(merged: Dict[str, Any], own: Dict[str, Any], defaults: Dict[
             out["retries"] = e["retries"]
     primary_backend = str(out.get("backend") or "claude")
     backups = []
-    for key, bid in (("backup", b1), ("backup2", b2)):
-        if not bid:
-            continue
-        e = _model(models, bid, f"{where}: {key}")
+    for bid in bids:
+        e = _model(models, bid, f"{where}: backup")
         f: Dict[str, Any] = {"backend": e["backend"], "backend_options": opts_for(e, False, primary_backend),
                              "env": {**def_env, **own_env, **e["env"]}, "model_id": str(bid),
                              "retries": int(e.get("retries", out.get("retries", 0)) or 0)}

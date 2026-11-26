@@ -1,7 +1,7 @@
 """Models (F1): the choices of an agent, the model list, choosing one on the dashboard, the smoke test (MOD-1…5, 7).
 
 `.orch/settings.yaml` holds the list (`models:`, parsed by config.parse_models); an agent's `agent.yaml` names its model
-by id (`model`, `backup`, `backup2`) or gives it inline. Keys live only in these two files: they pass through
+by id (`model`, and `backup: a, b, c` for its backups in order) or gives it inline. Keys live only in these two files: they pass through
 `Choice.env` to the CLI and nowhere else (Choice._stored drops them).
 
 What applies on top of a listed model: the agent's own `backend_options` (its own `effort` only where the model is its
@@ -48,9 +48,8 @@ def choices(settings: Dict[str, Any], agent_yaml: Dict[str, Any]) -> List[Choice
     y = agent_yaml or {}
     main = _listed(models, str(y["model"]), y, True) if y.get("model") else _inline(y)
     out = [main]
-    for key in ("backup", "backup2"):
-        if y.get(key):
-            out.append(_listed(models, str(y[key]), y, False, main.backend))
+    for bid in config.backup_ids(y):
+        out.append(_listed(models, bid, y, False, main.backend))
     if y.get("fallback") and len(out) == 1:
         primary = {"backend": main.backend, "backend_options": _with_model(main), "env": main.env, "retries": 0}
         for f in config._build_fallback(y["fallback"], primary, "fallback"):
@@ -324,10 +323,11 @@ def with_choice(text: str, model_id: str, effort: str = "", backups: Sequence[st
     for key in ("backend", "model_id") + (("fallback",) if backups else ()):
         text = _remove(text, [key])
         want.pop(key, None)
-    for i, b in enumerate(backups):
-        key = "backup" if i == 0 else f"backup{i + 1}"
-        text = _set(text, key, b, after="model" if i == 0 else "backup")
-        want[key] = b
+    if backups:
+        text = _remove(text, ["backup2"])
+        want.pop("backup2", None)
+        text = _set(text, "backup", ", ".join(backups), after="model")
+        want["backup"] = ", ".join(backups)
     had = isinstance(want.get("backend_options"), dict)
     opts = dict(want.get("backend_options") or {})
     if effort and "effort" in opts:
@@ -490,7 +490,7 @@ def _block_scalar(node: yaml.Node) -> bool:
 def list_models(settings: Dict[str, Any], agents: Dict[str, Dict[str, Any]]
                 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """(models to add to the list, per agent the keywords of with_choice). Agents that refer to the list already, or
-    have more inline backups than agent.yaml can refer to (2), keep what they have. Holds keys: only for the files."""
+    keep what they have. Holds keys: only for the files."""
     models = {str(k): dict(v) for k, v in ((settings or {}).get("models") or {}).items()}
     known, added, refs = dict(models), {}, {}
 
@@ -515,8 +515,6 @@ def list_models(settings: Dict[str, Any], agents: Dict[str, Dict[str, Any]]
             continue
         every = choices(settings, y)
         main, backups = every[0], every[1:]
-        if len(backups) > 2:
-            continue
         prefixes = tuple(k[:-len("BASE_URL")] for k in main.env if k.endswith("_BASE_URL"))
         moved = [k for k in main.env if _KEY_VARS.search(k) or (prefixes and k.startswith(prefixes))]
         ref: Dict[str, Any] = {"model_id": add(main, {k: v for k, v in _with_model(main).items() if k in ("model", "effort")},

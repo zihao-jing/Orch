@@ -104,8 +104,8 @@ fallback_cooldown: 18000        # seconds (5 h) on a working backup before retur
 
 - `models`: each entry accepts `backend`, `backend_options`, `env` (`$VARS` are expanded from your shell), and
   `retries`.
-- `retry_waits`: wait durations before retrying a transient API failure on the same model, before trying `backup` and
-  `backup2` in order. Billing errors and missing CLIs skip straight to a backup that avoids them.
+- `retry_waits`: wait durations before retrying a transient API failure on the same model, before trying the
+  agent's backups in order. Billing errors and missing CLIs skip straight to a backup that avoids them.
 - `fallback_cooldown`: how long an agent stays on a backup that succeeded before automatically returning to its main
   model (when the session can continue).
 
@@ -133,8 +133,7 @@ approve_milestones: true    # and after each milestone the manager accepts
 role: critic
 description: Turns milestones into instructions and reviews every change.
 model: gpt-6.2-sol
-backup: claude-haiku
-backup2: qwen4-max-preview
+backup: claude-haiku, qwen4-max-preview   # backups, tried in order
 ```
 
 ```yaml
@@ -142,14 +141,13 @@ backup2: qwen4-max-preview
 role: worker
 description: Does the work in the repository.
 model: claude-haiku
-backup: deepseek-v4-pro
-backup2: glm-5.3
+backup: deepseek-v4-pro, glm-5.3
 fresh_session: compact      # each milestone: summarise in place (milestone = new session; never = keep)
 ```
 
 Keys read from `agents/<name>/agent.yaml`:
 
-- **Every agent**: `role`, `description`, `model`, `backup`, `backup2`, `fresh_session` (`compact`, `milestone`, or
+- **Every agent**: `role`, `description`, `model`, `backup` (one or more model ids, comma-separated, tried in order), `fresh_session` (`compact`, `milestone`, or
   `never`), `working_dir`, `env`.
 - **Manager**: `goal_file`, `approve_plan`, `approve_milestones`, `min_score`, `max_rounds` (a safety cap on worker
   replies delivered to the critic), `golden_board`, `golden_limit`.
