@@ -157,3 +157,33 @@ with what you saw.
 ## Report
 
 (append here: what changed, the screenshots, anything left over, and any data bug found in item 5)
+
+### Dashboard update
+
+- The timeline opens on the newest 30 matching messages in chronological order. Interaction levels and Orch notes are saved locally and work with text search and the agent filter. Older pages use the sequence cursor and show an exact remaining count. Rows distinguish messages to the user, messages waiting for an answer, and Orch notices.
+- Message details show Markdown and load the writing turn, its system instructions, and the exact delivered text on demand. The writing model and input/output character counts come from the recorded turn. Open rows and panels survive state refreshes.
+- A slim header, compact team rows, and action menus keep milestones and work visible. The terminal link copies the command. Closed gates are omitted from Needs you, and informational notices appear in the timeline and as toasts when fresh.
+- Checklist items, talk history, activity, earlier runs and audit records start at 15 entries. Older audit replies and activity pages load on demand. Earlier runs open read-only.
+- `board.py` supplies exact filtered message counts and per-turn summary metadata, the newest and previous pages of activity, and an audit history index. The existing responses remain available without the new query options.
+
+### Finished-run checks
+
+The headless Chrome check used the supplied `s-live` run with write requests blocked. It verified the 30-of-47 initial page, older paging, level and notes filters, search with the agent filter, lazy input/system/whole-reply panels, exact delivered text, action menus, and both audit replies. The page fit a 360 px viewport with 16 px inputs and 44 px touch targets. The interaction-label colours measured at least 6.16:1 on the light filter background and 6.89:1 on the dark filter background. The local server was stopped after verification.
+
+- Before, 1440 × 900 — `/tmp/u-before.png`
+- Desktop, 1440 × 900 — `/tmp/u-1440.png`
+- Full-height desktop, 1440 × 1430 — `/tmp/u-full.png`
+- Phone, 400 × 1120 — `/tmp/u-phone.png`
+- Dark, 1440 × 900 — `/tmp/u-dark.png`
+
+### Saved-state findings
+
+- The worker’s active choice really is the named `deepseek-v4-pro` backup. The team shows the short reported model once. The model window identifies the selected choice by backend, provider, model, effort and name, and marks it in use.
+- The manager has a saved open discussion with `by_terminal: true` and no open terminal. The page labels it “Terminal discussion pending”. The discussion remains available to apply or end.
+- The worker’s saved assignment still points to its earlier test-run instruction, even after the final report and finish. The page labels it “Last assignment” when a final report is outstanding or the run is finished.
+- All six saved gates are closed. Needs you previously treated answered gates without a recorded `sent_in` as actionable. It now appears only for open gates.
+
+### Tests
+
+- `python3 tests/run.py rt_k rt_j rt_u` — 91 passed.
+- `python3 tests/run.py` — 781 tests, 775 passed, 6 skipped, no failures or errors.
