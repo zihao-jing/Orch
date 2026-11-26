@@ -83,7 +83,8 @@ def lines(snap: Snapshot, message: Message, rng: Any) -> Tuple[List[TextRef], Di
 
 def _critic(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: Dict[str, str], out: List[TextRef],
             given: Dict[str, str]) -> None:
-    workers = [w.id for w in snap.workers]
+    # a failed worker, or one I stopped, keeps its status line but is not offered for work
+    workers = [w.id for w in snap.workers if w.status != AgentStatus.FAILED and not w.stopped_by_user]
     for w in snap.workers:
         out.append(TextRef(TextKey.REM_WORKER_LINE, worker_line(snap, w, message)))
     out.append(TextRef(TextKey.REM_LABELS, {"workers": workers}))
@@ -96,10 +97,7 @@ def _critic(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: Di
     unwatched = [w for w in workers if w in snap.watch and snap.watch[w].told_unwatched]
     if unwatched and due[TextKey.REM_UNWATCHED]:
         out.append(TextRef(TextKey.REM_UNWATCHED, {"workers": unwatched}))
-    path = snap.checklist.path or (snap.milestone.checklist_path if snap.milestone else "")
-    if path and seen.get("checklist") != path:
-        out.append(TextRef(TextKey.REM_CHECKLIST, {"path": path}))
-        given["checklist"] = path
+    _checklist(snap, seen, out, given)
     if not snap.golden.words:  # the critic is not pointed to a board that names what it must not know
         _golden(snap, due, seen, out, given)
     _discussion(snap, message, due, seen, out, given)
@@ -114,6 +112,7 @@ def _manager(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: D
         gates = [gate_line(x) for x in snap.open_gates()]
         if gates:
             out.append(TextRef(TextKey.REM_OPEN_GATES, {"gates": gates}))
+    _checklist(snap, seen, out, given)
     _golden(snap, due, seen, out, given)
     if g.path and due[TextKey.REM_GOLDEN_KEEP]:
         out.append(TextRef(TextKey.REM_GOLDEN_KEEP, {"path": g.path}))
@@ -135,6 +134,14 @@ def _manager(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: D
     elif not snap.night and seen.get("night") == "on":
         out.append(TextRef(TextKey.REM_NIGHT_OVER))
         given["night"] = ""
+
+
+def _checklist(snap: Snapshot, seen: Dict[str, str], out: List[TextRef], given: Dict[str, str]) -> None:
+    """The critic's checklist path, once per session and again when it moves (critic and manager alike)."""
+    path = snap.checklist.path or (snap.milestone.checklist_path if snap.milestone else "")
+    if path and seen.get("checklist") != path:
+        out.append(TextRef(TextKey.REM_CHECKLIST, {"path": path}))
+        given["checklist"] = path
 
 
 def _golden(snap: Snapshot, due: Dict[TextKey, bool], seen: Dict[str, str], out: List[TextRef],
@@ -182,8 +189,11 @@ def worker_line(snap: Snapshot, w: Agent, message: Optional[Message] = None) -> 
             "idle_since": w.idle_since, "jobs": [short(j.label, 60) for j in snap.running_jobs(w.id)]}
 
 
-def gate_line(g: Gate) -> str:
-    """"question (Which split?)"; a gate Orch opened for a failure by its cause: "frozen (critic)"."""
-    if g.cause is not None and not g.text.strip():
-        return f"{g.cause.value.replace('_', ' ')}" + (f" ({g.agent})" if g.agent else "")
-    return g.kind.value.replace("_", " ") + (f" ({short(g.text, 80)})" if g.text.strip() else "")
+def gate_line(g: Gate) -> Any:
+    """The gate's own words cut to one line; Orch's words as {"key", "values"}, rendered for the reader by texts."""
+    first = next((x for x in g.text.splitlines() if x.strip()), "")
+    if first:
+        return short(first, 80)
+    if g.words is not None:
+        return {"key": g.words.key.value, "values": dict(g.words.values)}
+    return {"kind": g.kind.value}

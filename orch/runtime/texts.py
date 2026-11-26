@@ -40,7 +40,7 @@ WHY = {
     FailCause.NO_ANSWER: "it did not answer", FailCause.FROZEN: "it stopped responding",
     ErrorClass.TRANSIENT: "its provider kept failing", ErrorClass.BILLING: "a billing problem",
     ErrorClass.MISSING_CLI: "its program is missing", ErrorClass.SESSION_LOST: "its conversation could not be continued",
-    ErrorClass.OTHER: "an unknown error", SwitchReason.USER: "chosen by hand", SwitchReason.BACKUP: "its model failed",
+    ErrorClass.OTHER: "an unknown error", "unreadable": "its answer could not be read", SwitchReason.USER: "chosen by hand", SwitchReason.BACKUP: "its model failed",
     SwitchReason.RETURN: "its usual model works again",
 }
 HEALTH = {Health.HEALTHY: "healthy", Health.QUIET: "quiet", Health.OFF_TRACK: "off track", Health.STOPPED: "stopped"}
@@ -158,7 +158,8 @@ def _when(t: Any) -> str:
 
 def _worker_final(t: _Text) -> str:
     full = t.seen.get("review") != "1"
-    t.given["review"] = "1"
+    if full:
+        t.given["review"] = "1"
     return t.fill("From {worker}, finished and ready for review:\n\n{body}") + (t.fill(
         "\n\nReview it, bring your checklist up to date, and either write to {worker} what comes next or leave it idle.")
         if full else "")
@@ -195,8 +196,16 @@ def _job_wakeup(t: _Text) -> str:
             "continue with what depended on it.")
 
 
+def _many(t: _Text) -> bool:
+    return len(t.get("jobs") or []) > 1
+
+
 def _job_lost(t: _Text) -> str:
     jobs = [j.get("job") if isinstance(j, dict) else j for j in t.get("jobs") or []]
+    if len(jobs) > 1:
+        return (f"Background jobs of yours have no known result: {', '.join(f'`{j}`' for j in jobs)}. They were probably "
+                "cut off, but they may still be running. Check their processes and output before you go on; start one "
+                "again only if it is gone.")
     return (f"A background job of yours has no known result: {', '.join(f'`{j}`' for j in jobs)}. It was probably cut "
             "off, but it may still be running. Check its process and output before you go on; start it again only if it "
             "is gone.")
@@ -222,14 +231,16 @@ def _session_fresh(t: _Text) -> str:
         if t.snap.run.goal:
             out += f"\n\nMy goal:\n\n{t.snap.run.goal.strip()}"
     elif t.role == Role.CRITIC:
-        out += " Where the work stands is in your checklist."
+        out += " Where the work stands is in your checklist, if it has one. Then wait for my instruction."
     else:
         out += " Also check the jobs you started."
     return out
 
 
 def _handover_request(t: _Text, read: str, extra: str = "") -> str:
-    return t.fill("{agent} changes to another model ({why}) and starts a new conversation that knows nothing so far. "
+    lost = str(t.get("why")) == ErrorClass.SESSION_LOST.value
+    return t.fill(("{agent} goes on in a new conversation ({why}) that knows nothing so far. " if lost else
+                   "{agent} changes to another model ({why}) and starts a new conversation that knows nothing so far. ")
                   + extra + f"Read the current progress first ({read}), then write {{agent}} a short instruction to go on "
                   "with: where the work stands, what comes next, what holds. It replaces your last message to it if that "
                   "is still unanswered, so carry over what matters.")
@@ -251,13 +262,14 @@ def _manager_takeover(t: _Text) -> str:
 def _milestone_start(t: _Text) -> str:
     last = t.fill("“{last_title}” is done. ") if t.get("last_title") else ""
     return last + t.fill(
-        "The next milestone starts now: “{title}” ({milestone}).\n\n{text}\n\n"
+        "The milestone “{title}” starts now.\n\n{text}\n\n"
         "Write {critic} its instruction, and set the rubric. {critic} keeps its checklist for it in `{checklist_path}`.")
 
 
 def _checklist_complete(t: _Text) -> str:
     full = t.seen.get("review") != "1"
-    t.given["review"] = "1"
+    if full:
+        t.given["review"] = "1"
     parts = [t.fill("Every item of {critic}'s checklist is ticked, for the milestone “{title}” ({milestone}).")
              + t.jobs(" Still running: ", ".")]
     if t.get("text"):
@@ -283,8 +295,15 @@ def _gate_answers(t: _Text) -> str:
     rows = []
     for a in t.get("answers") or []:
         what = kinds.get(str(a.get("kind")), "Your question")
-        q = " ".join(str(a.get("question") or "").split())
-        rows.append(f"- {what}{f' (“{q}”)' if q else ''}: {str(a.get('answer') or 'done').strip()}")
+        words = " ".join(str(a.get("answer") or "").split())
+        if a.get("approve") is True:
+            answer = "approved" + (f": {words}" if words else "")
+        elif a.get("approve") is False:
+            answer = "not approved" + (f": {words}" if words else "")
+        else:
+            answer = words or ("done" if a.get("kind") == "pause" else "no answer")
+        q = " ".join(str(a.get("question") or "").split()) if a.get("kind") in ("question", "pause") else ""
+        rows.append(f"- {what}{f' (“{q}”)' if q else ''}: {answer}")
     parts = ["My answers:\n\n" + "\n".join(rows)] if rows else ["I have closed what was open."]
     unsent = t.get("unsent") or []
     if unsent:
@@ -298,7 +317,8 @@ def _gate_answers(t: _Text) -> str:
 
 def _milestone_rows(t: _Text) -> str:
     rows = []
-    for i, m in enumerate(t.get("milestones") or [], 1):
+    kept = [m for m in t.get("milestones") or [] if m.get("status") != MilestoneStatus.DROPPED]
+    for i, m in enumerate(kept, 1):
         state = "" if m.get("status") == MilestoneStatus.PENDING else f" ({m.get('status')})"
         text = str(m.get("text") or "").strip()
         rows.append(f"{i}. [{m.get('id')}] {m.get('title')}{f' — {text}' if text else ''}{state}")
@@ -311,8 +331,9 @@ def _milestone_change(t: _Text) -> str:
     parts.append("The milestones now:\n\n" + _milestone_rows(t))
     parts.append("Please propose the new list: the whole list in this numbered form, one milestone per line, without the "
                  "states in brackets. Finished milestones stay as they are. Keep the id of a milestone that you keep or "
-                 "rewrite, leave out a later one that should go, and give a new one no id. Nothing changes before I "
-                 "approve it. Add a <summary> of what changes and why.")
+                 "rewrite, leave out a later one that should go, and give a new one no id. Dropped milestones stay out "
+                 "unless you list one again. If the current milestone changes, add its new <rubric>. Nothing changes "
+                 "before I approve it. Add a <summary> of what changes and why.")
     return "\n\n".join(parts)
 
 
@@ -357,6 +378,8 @@ def _discussion_apply(t: _Text) -> str:
     d = t.snap.discussions.get(t.reader)
     if d is not None and d.milestone_change:
         out += " Include the whole new list of milestones in the numbered form."
+    if t.role == Role.CRITIC:
+        out += " Also sum up in plain text what changes, without <silent/>."
     return out + (t.fill("\n\n{request}") if t.get("request") else "")
 
 
@@ -367,7 +390,7 @@ def _worker_line(t: _Text) -> str:
     elif status == STATUS[AgentStatus.IDLE] and t.get("idle_since"):
         status += f" for {duration(t.snap.now - float(t.get('idle_since')))}"
     work = f"assigned: {t.value('assignment')}" if t.get("assignment") else "nothing assigned yet"
-    report = "; its last report still waits for your reply" if t.get("open_report") else ""
+    report = "; you have not written to it since its last report" if t.get("open_report") else ""
     return f"{t.get('worker')}: {status}; {work}{report}"
 
 
@@ -385,6 +408,20 @@ def _workers(t: _Text) -> str:
     if n == 1:
         return f"1 worker is available: {t.value('workers')}."
     return f"{n} workers are available. Split work only into parts that don't depend on each other; using one is fine."
+
+
+GATE_KINDS = {"question": "a question", "pause": "a pause", "plan": "the plan", "milestone": "a milestone",
+              "milestone_change": "a change of milestones", "operational": "a problem"}
+
+
+def _gate(t: _Text, g: Any) -> str:
+    """One open gate in one line: its words, Orch's words rendered for this reader, or its kind."""
+    if isinstance(g, dict) and g.get("key"):
+        sub = _Text(t.snap, TextRef(TextKey(g["key"]), dict(g.get("values") or {})), t.reader)
+        return reminders.short(next((x for x in _compose(sub).splitlines() if x.strip()), ""), 80)
+    if isinstance(g, dict):
+        return GATE_KINDS.get(str(g.get("kind")), "a question")
+    return str(g)
 
 
 def _golden_use(t: _Text) -> str:
@@ -409,10 +446,12 @@ def _ask_terminal(t: _Text) -> str:
 TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     # to the critic
     K.WORKER_FINAL: _worker_final,
-    K.WORKER_INTERMEDIATE: "From {worker}, job still running ({jobs}), not ready for review:\n\n{body}",
-    K.WORKER_TO_CRITIC: "I asked {worker}: “{question}” It answered:\n\n{body}",
+    K.WORKER_INTERMEDIATE: lambda t: t.fill("From {worker}, " + ("jobs" if _many(t) else "job")
+                                            + " still running ({jobs}), not ready for review:\n\n{body}"),
+    K.WORKER_TO_CRITIC: lambda t: t.fill("I asked {worker}: “{question}” It answered:\n\n{body}" if str(
+        t.get("question") or "").strip() else "From {worker}, to me:\n\n{body}"),
     K.WORKER_FAILED: _worker_failed,
-    K.DIRECT_MESSAGE_NOTICE: "I told {worker} directly:\n\n{body}",
+    K.DIRECT_MESSAGE_NOTICE: "I wrote to {worker} directly:\n\n{body}\n\nNo answer needed; go by it.",
     K.CHECKLIST_UNREADABLE: "I cannot read your checklist `{path}` ({problem}). Please put it in order.",
     K.NOBODY_WATCHES: "The progress checks on {worker} keep failing, so nobody watches its runs. Look yourself when one "
                       "takes long.",
@@ -440,7 +479,7 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                       "starts with: what was asked and decided, where things stand (files, running jobs), what comes next "
                       "and what to watch out for. Reply with that text only, and start nothing new.",
     K.HANDOVER_REQUEST_CRITIC: _handover_critic,
-    K.HANDOVER_REQUEST_MANAGER: lambda t: _handover_request(t, "its checklist, the files, its latest report"),
+    K.HANDOVER_REQUEST_MANAGER: lambda t: _handover_request(t, "the critic's checklist, the files, its latest report"),
     K.HANDOVER_INSTRUCTION: "You take over this work in a new conversation. Check the current files and running jobs "
                             "before you change anything.\n\n{body}",
     K.MANAGER_TAKEOVER: _manager_takeover,
@@ -454,13 +493,13 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                          "per line: “1. Short title — what has to be true when it is done”.",
     K.MILESTONE_START: _milestone_start,
     K.SILENCE_CHECK: "Nothing is going on: nobody works, no job runs and no message waits (check {attempt} of {attempts}; "
-                     "after the last one the work pauses for me). Find out why, from {critic}'s checklist, its last report "
+                     "after the last one the work pauses for me). Find out why, from the critic's checklist, its last report "
                      "and the files, and write {critic} what to do so that the work goes on. Ask me or pause only if it "
                      "really needs me.",
     K.CHECKLIST_COMPLETE: _checklist_complete,
     K.REVIEW_RUBRIC_MISSING: "This milestone ({milestone}) has no rubric. Set one first, then score against it and decide.",
     K.REVIEW_SCORE_LOW: "Your score of {score} out of 5 is below the {pass_score} we agreed on, so the milestone is not "
-                        "accepted. What should {critic} do next?",
+                        "accepted. Write {critic} what to fix and to update its checklist.",
     K.GATE_ANSWERS: _gate_answers,
     K.MILESTONE_CHANGE_REQUEST: _milestone_change,
     K.MILESTONE_CHANGE_UNREADABLE: "I could not read the new list of milestones ({problem}). Please send the whole list "
@@ -482,13 +521,16 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.REM_GOLDEN_SIZE: "The golden board (`{path}`) has {chars} characters; bring it below {limit} by merging and removing.",
     K.REM_MESSAGE_CRITIC: 'Only <message to="critic">…</message> reaches {critic}; write it as its user, about the work '
                           "alone.",
-    K.REM_OPEN_GATES: "Still waiting for me: {gates}. Don't ask again.",
+    K.REM_OPEN_GATES: lambda t: "Still waiting for me: " + "; ".join(f"“{_gate(t, g)}”" for g in t.get("gates") or [])
+                                + ". Don't ask again.",
     K.REM_DISCUSSION: "We are in a discussion: what you write to others is only a draft until I apply it.",
     K.REM_DISCUSSION_OVER: "Our discussion is over and I did not apply it: what you drafted for others was not sent.",
     K.REM_NIGHT: "It is night mode and I am away: decide everything yourself and keep the work moving. Write each question "
-                 "anyway, with your choice and why; I look at it later. Pause only if nothing at all can go on without me.",
+                 "anyway, with your choice and why; I look at it later. A question then holds nothing back: write to "
+                 "{critic} in the same reply. Pause only if nothing at all can go on without me.",
     K.REM_NIGHT_OVER: "Night mode is over; questions wait for me again.",
-    K.REM_CHECKLIST: "Keep your steps and checklist in `{path}`.",
+    K.REM_CHECKLIST: lambda t: t.fill("{critic}'s checklist is `{path}`." if t.role == Role.MANAGER
+                                      else "Keep your steps and checklist in `{path}`."),
     K.REM_ASK_AND_END: "If you need an answer to go on, ask me in plain text and end your turn.",
     K.REM_WRITING: lambda t: "\n".join(t.fill(str(x)) for x in t.get("rules") or []),
     K.REM_STATE_EDITED: "I edited your notes in `{path}`; read them and go by them.",
@@ -511,8 +553,12 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.GATE_HANDOVER: "{agent} needs a handover for its new conversation, but {by} does not answer. Choose working models, "
                      "starting with the manager, then the critic, then the workers.",
     # answers to a command, for the user
-    K.ASK_JOBS_CLOSE: "{worker} has a running job ({jobs}). Let it finish or stop it before closing the worker?",
-    K.ASK_JOBS_DELETE: "{worker} has a running job ({jobs}). Let it finish or stop it before deleting the worker for good?",
+    K.ASK_JOBS_CLOSE: lambda t: t.fill("{worker} has " + ("running jobs ({jobs}). Let them" if _many(t) else
+                                                      "a running job ({jobs}). Let it")
+                                     + " finish or stop " + ("them" if _many(t) else "it") + " before closing the worker?"),
+    K.ASK_JOBS_DELETE: lambda t: t.fill("{worker} has " + ("running jobs ({jobs}). Let them" if _many(t) else
+                                                      "a running job ({jobs}). Let it")
+                                     + " finish or stop " + ("them" if _many(t) else "it") + " before deleting the worker for good?"),
     K.ASK_JOB_TERMINAL: _ask_terminal,
     K.ASK_FORCE_SWITCH: _force,
     K.SMOKE_FAILED: "The test of {choice} for {agent} failed, so nothing was switched: {why}.",
@@ -524,7 +570,7 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.NOTE_MONITOR_FAILED: "{monitor} could not check {worker}: {why}.",
     K.NOTE_SWITCHED: lambda t: t.fill("{agent} now runs on {choice}") + (", in a new conversation." if t.get("new_session")
                                                                           else ", in the same conversation."),
-    K.NOTE_REVIEW_WITHDRAWN: "The milestone “{title}” ({milestone}) changed, so its review was withdrawn and its rubric is "
+    K.NOTE_REVIEW_WITHDRAWN: "The milestone “{title}” changed, so its review was withdrawn and its rubric is "
                              "written again.",
     K.NOTE_FINISHED: "All milestones are done. The sessions are kept; you can add milestones at any time.",
     K.NOTE_MIGRATED: lambda t: "This project was moved to the new version. The old files are kept:\n\n"

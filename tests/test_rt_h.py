@@ -76,7 +76,7 @@ def give(snap, agent_id, **given):
 def seen_all(snap):
     pool = ",".join(w.id for w in snap.workers)
     give(snap, "critic", workers=pool, golden=snap.golden.digest, checklist=snap.checklist.path)
-    return give(snap, "manager", golden=snap.golden.digest)
+    return give(snap, "manager", golden=snap.golden.digest, checklist=snap.checklist.path)
 
 
 class TestTexts(unittest.TestCase):
@@ -146,7 +146,7 @@ class TestTexts(unittest.TestCase):
         out = texts.words(C.TextRef(TextKey.REVIEW_SCORE_LOW, {"milestone": "m1", "score": 3.5, "pass_score": 4.0}),
                           snapshot())
         self.assertEqual(out, "Your score of 3.5 out of 5 is below the 4.0 we agreed on, so the milestone is not accepted. "
-                              "What should the critic do next?")
+                              "Write the critic what to fix and to update its checklist.")
 
     def test_SIL_3_silence_check(self):
         out = texts.words(C.TextRef(TextKey.SILENCE_CHECK, {"attempt": 2, "attempts": 3}), snapshot())
@@ -161,6 +161,7 @@ class TestTexts(unittest.TestCase):
             self.assertEqual(first.given["review"], "1")
             give(snap, who, review="1")
             again = texts.render(snap, m)
+            self.assertNotIn("review", again.given)  # only the full text counts as shown
             self.assertLess(len(again.text), len(first.text))
             self.assertIn("Labels checked" if who == "manager" else "ready for review", again.text)
         self.assertIn("Correct", again.text)  # the manager's review keeps checklist and rubric
@@ -267,6 +268,49 @@ class TestPrompts(unittest.TestCase):
         self.assertTrue(all("preference.md" not in f.read_text(encoding="utf-8") for f in PROMPTS.rglob("*.md")))
 
 
+class TestReview(unittest.TestCase):
+    def test_GATE_4_approval_gates_say_approved_or_not_without_quoting_the_reply(self):
+        out = texts.words(C.TextRef(TextKey.GATE_ANSWERS, {"answers": [
+            {"kind": "plan", "question": "1. Data\n2. Model", "answer": "", "approve": True},
+            {"kind": "milestone", "question": "long reply", "answer": "More tests.", "approve": False},
+            {"kind": "pause", "question": "Stop?", "answer": "", "approve": None}], "unsent": [], "decide_again": ""}),
+            snapshot())
+        self.assertIn("- The plan: approved", out)
+        self.assertIn("- The milestone: not approved: More tests.", out)
+        self.assertIn("- The pause (“Stop?”): done", out)
+        self.assertNotIn("long reply", out)
+
+    def test_MS_10_dropped_milestones_are_left_out_and_a_new_rubric_asked_for(self):
+        out = texts.words(C.TextRef(TextKey.MILESTONE_CHANGE_REQUEST, {"milestones": [
+            {"id": "m1", "title": "Data", "text": "Clean.", "status": "current"},
+            {"id": "m2", "title": "Old", "text": "", "status": "dropped"}]}), snapshot())
+        self.assertIn("1. [m1] Data — Clean. (current)", out)
+        self.assertNotIn("Old", out)
+        self.assertIn("add its new <rubric>", out)
+
+    def test_WRK_failed_and_stopped_workers_keep_a_line_but_get_no_label(self):
+        snap = seen_all(snapshot(agent("worker-1", status="failed"), agent("worker-2"), workers=2))
+        snap.agents["worker-2"].stopped_by_user = True
+        refs, _ = reminders.lines(snap, message("x1", "critic"), Fixed(False))
+        out = texts.reminder(snap, "critic", refs)
+        self.assertIn("worker-1: failed", out)
+        self.assertNotIn('to="worker-1"', out)
+        self.assertNotIn('to="worker-2"', out)
+
+    def test_PRM_9_the_manager_is_told_the_checklist_once(self):
+        snap = snapshot()
+        snap.checklist.path = "/run/checklist-2.md"
+        refs, given = reminders.lines(snap, message("x1", "manager"), Fixed(False))
+        self.assertIn("The critic's checklist is `/run/checklist-2.md`.", texts.reminder(snap, "manager", refs))
+        give(snap, "manager", **given)
+        self.assertNotIn("rem_checklist", keys(snap, message("x2", "manager"))[0])
+
+    def test_discussion_apply_asks_the_critic_for_a_plain_summary(self):
+        snap = snapshot(C.Discussion("critic", T0))
+        out = texts.render(snap, message("x1", "critic", key=TextKey.DISCUSSION_APPLY, values={"request": ""})).text
+        self.assertIn("without <silent/>", out)
+
+
 class TestReminders(unittest.TestCase):
     def test_PRM_4_critic_every_turn_exactly_worker_lines_and_labels(self):
         snap = seen_all(snapshot(
@@ -276,7 +320,7 @@ class TestReminders(unittest.TestCase):
         self.assertEqual(given, {})
         self.assertEqual(texts.reminder(snap, "critic", refs), "\n".join([
             "<system-reminder>",
-            "worker-1: idle for 12 min; assigned: Check the labels; its last report still waits for your reply",
+            "worker-1: idle for 12 min; assigned: Check the labels; you have not written to it since its last report",
             "worker-2: waiting for a job (`train.py`); nothing assigned yet",
             'To a worker: <message to="worker-1">…</message> or <message to="worker-2">…</message>. Plain text goes to me; '
             "add <silent/> when nothing in the reply needs me.",
@@ -291,7 +335,7 @@ class TestReminders(unittest.TestCase):
 
     def test_the_report_in_this_message_is_not_called_unanswered(self):
         snap = snapshot(agent("worker-1", open_report="x1"))
-        self.assertNotIn("still waits", texts.render(snap, message("x1", "critic", "worker-1")).text)
+        self.assertNotIn("since its last report", texts.render(snap, message("x1", "critic", "worker-1")).text)
 
     def test_WRK_6_WRK_9_pool_is_told_when_new_or_changed(self):
         snap = snapshot(workers=2)
@@ -341,7 +385,7 @@ class TestReminders(unittest.TestCase):
         got, _ = keys(snap, message("x1", "manager"), True)
         self.assertEqual(got, ["rem_message_critic", "rem_open_gates", "rem_golden_use", "rem_golden_keep", "rem_writing"])
         refs, _ = reminders.lines(snap, message("x1", "manager"), Fixed(True))
-        self.assertIn("question (Which split?). Don't ask again", texts.reminder(snap, "manager", refs))
+        self.assertIn("Still waiting for me: “Which split?”. Don't ask again", texts.reminder(snap, "manager", refs))
 
     def test_PRM_4_in_a_discussion_only_the_board_is_kept(self):
         snap = seen_all(snapshot(gate("g1"), BOARD, C.Discussion("manager", T0)))
