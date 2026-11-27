@@ -155,6 +155,22 @@ def fail_five_times(test: Any, w: World) -> None:
 
 
 class TestRetry(unittest.TestCase):
+    def test_manual_retry_continues_failed_turn_once_on_current_model(self):
+        w = world(choices=[CLAUDE])
+        w.message("m1")
+        w.taken("m1")
+        w.end(error="billing", started_by=["m1"])
+        self.assertTrue(public_state(w.s)["agents"][W]["can_retry"])
+        acts = w.do(RetryAgent(W, w.s.now, id="click"))
+        assert_has(self, acts, ReleaseAgent, reason=HoldReason.SEND_FAILED)
+        assert_has(self, acts, Send, key=TextKey.RETRY_CONTINUE, continues=w.s.turns[W].id)
+        assert_has(self, acts, CommandReply, ok=True)
+        assert_none(self, acts, StartSwitch)
+        self.assertFalse(w.s.can_retry(W))
+        duplicate = w.do(RetryAgent(W, w.s.now, id="second-click"))
+        assert_has(self, duplicate, CommandReply, ok=False)
+        assert_none(self, duplicate, Send)
+
     def test_REC_1_five_tries_with_the_waits_then_the_backup(self):
         w = world()
         w.message("m1")

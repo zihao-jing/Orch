@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+import secrets
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -34,7 +35,6 @@ FIXED_EFFORTS: Dict[str, List[str]] = {
 _AGY_LEVEL = re.compile(r"-(low|medium|high|xhigh|max)$")
 _KEY_VARS = re.compile(r"_(BASE_URL|AUTH_TOKEN|API_KEY|TOKEN|MODEL)$")
 
-SMOKE_ID = "x00000000a11e"  # each smoke test has its own temporary session
 SMOKE_TEXT = "Reply with the single word OK."
 SMOKE_WAIT = 180.0  # seconds
 
@@ -250,7 +250,8 @@ def smoke_test(adapter: Adapter, spec: AgentSpec, clock: Clock, wait: Callable[[
 
     try:
         adapter.start(spec, None)
-        adapter.send(SMOKE_ID, SMOKE_TEXT)
+        # OpenCode stores prompt IDs across sessions, including temporary probe sessions.
+        adapter.send("x" + secrets.token_hex(6), SMOKE_TEXT)
         while done is None and clock.now() < end:
             for ev in adapter.events():
                 if isinstance(ev, ModelReported):

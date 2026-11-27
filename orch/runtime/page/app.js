@@ -527,6 +527,9 @@
   }
   function agentActions(a, close) {
     const name = nm(a.id), controls = h("div", { class: "agent-actions" });
+    if (a.status === "failed") controls.append(h("button", { type: "button", class: "link", disabled: !a.can_retry,
+      title: a.can_retry ? "Retry the interrupted work on the selected model" : "This agent is not waiting for a manual retry",
+      on: { click: act("RetryAgent", { agent: a.id }) } }, "Retry"));
     if (a.role !== "monitor" && a.lifecycle === "open") controls.append(h("button", { type: "button", class: "link", title: "Talk to " + name,
       on: { click: () => close ? close("talk") : openTalk(a.id) } }, "Talk"));
     controls.append(h("button", { type: "button", class: "link", title: "Choose the model for " + name,

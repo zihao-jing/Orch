@@ -806,6 +806,7 @@ class Refusal(_Str):
     WRONG_ROLE = "wrong_role"  # e.g. a discussion with a worker
     ALREADY = "already"  # already open, closed, chosen, running
     NOT_OPEN = "not_open"  # no discussion, terminal or switch to end
+    NOT_RETRYABLE = "not_retryable"
     TERMINAL_OPEN = "terminal_open"
     GATE_OPEN = "gate_open"  # e.g. night mode while a question is open
     SWITCHING = "switching"  # the switch under way is past the point where it can be replaced
@@ -1124,6 +1125,14 @@ class Snapshot:
         return not (writing or self.open_jobs(agent)
                     or any(m.recipient == agent and m.open and m.sent_at for m in self.messages.values()))
 
+    def can_retry(self, agent: str) -> bool:
+        a = self.agents.get(agent)
+        t = self.turns.get(agent)
+        return bool(a and a.is_open and a.failed_why and HoldReason.SEND_FAILED in a.holds
+                    and not a.switch and not a.stopped_by_user and agent not in self.terminals
+                    and not ({HoldReason.TERMINAL, HoldReason.STOPPED} & set(a.holds))
+                    and not self.running_jobs(agent) and not (t and t.status == TurnStatus.RUNNING))
+
     def open_gates(self, answer_only: bool = False) -> List[Gate]:
         return [g for g in self.gates.values() if g.is_open and (g.is_answer_gate or not answer_only)]
 
@@ -1433,6 +1442,12 @@ class ChooseModel(UserCommand):
     backup: str = ""
     force: bool = False
     confirmed: bool = False
+
+
+@dataclass(frozen=True)
+class RetryAgent(UserCommand):
+    """Resume an exhausted agent on its currently selected model."""
+    handler: ClassVar[str] = "recovery"
 
 
 @dataclass(frozen=True)
@@ -2205,6 +2220,7 @@ def public_state(snap: Snapshot) -> Dict[str, Any]:
         p["sessions"], p["proc"] = len(a.sessions), a.proc is not None
         p.pop("session_key")
         p["waiting"] = len(snap.waiting_for(aid))
+        p["can_retry"] = snap.can_retry(aid)
         p["jobs"] = [j.id for j in snap.running_jobs(aid)]
         if a.switch:
             p["switch"] = {k: p["switch"][k] for k in ("reason", "forced", "step", "step_at", "created", "new_session",

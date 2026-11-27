@@ -55,6 +55,7 @@ REFUSED = {
     Refusal.CLOSED: "It is closed.", Refusal.DELETED: "It was deleted.",
     Refusal.WRONG_ROLE: "This is not possible with this agent.", Refusal.ALREADY: "This is already the case.",
     Refusal.NOT_OPEN: "There is nothing to end.", Refusal.TERMINAL_OPEN: "A terminal is open on this agent.",
+    Refusal.NOT_RETRYABLE: "This agent is not waiting for a manual retry.",
     Refusal.GATE_OPEN: "A question is still open.", Refusal.SWITCHING: "The model switch is too far along to change.",
     Refusal.FILE_CHANGED: "The file has changed since you opened it.",
     Refusal.NOT_POSSIBLE: "This agent's program cannot do it.",

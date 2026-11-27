@@ -175,7 +175,9 @@ class TestChoose(unittest.TestCase):
 
 class TestSaveChoice(unittest.TestCase):
     def path(self, text):
-        d = Path(tempfile.mkdtemp(dir="/Users/fancy/.claude/jobs/4b93f1df/tmp/f"))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
         p = d / "agent.yaml"
         p.write_text(text)
         os.chmod(p, 0o640)
@@ -238,6 +240,19 @@ class TestMigrate(unittest.TestCase):
 
 
 class TestSmoke(unittest.TestCase):
+    def test_repeated_probes_use_distinct_orch_message_ids(self):
+        clock = FakeClock()
+        spec = AgentSpec("critic", choice=Choice("opencode", "dashscope", "qwen4-max"), cwd="/work")
+        ids = set()
+        for _ in range(2):
+            cli = MockCLI(clock, "critic").script(CliReply("OK", model="dashscope/qwen4-max"))
+            result = models.smoke_test(MockAdapter(clock, cli), spec, clock, clock.advance)
+            self.assertTrue(result.ok, result.why)
+            mid, _ = cli.sent[0]
+            self.assertRegex(mid, r"^x[0-9a-f]{12}$")
+            self.assertNotIn(mid, ids)
+            ids.add(mid)
+
     def run_smoke(self, choice, reply):
         clock = FakeClock()
         cli = MockCLI(clock, "worker-1").script(reply)

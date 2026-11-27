@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Type
 from .contracts import (Action, AdvanceSwitch, Agent, AgentFailed, Choice, CloseGate, CommandReply, Drop, DropReason,
                         ErrorClass, Event, FailCause, ForceSwitch, Gate, GateAnswer, GateCause, GateKind, HoldAgent,
                         HoldReason, MarkFailed, Message, MessageStatus, OpenGate, OrchStarted, ProcessExited, Refusal,
-                        ReleaseAgent, Resend, RestartSession, Retry, RetryState, Role, Send, SendFailed, SessionChange,
+                        ReleaseAgent, Resend, RestartSession, Retry, RetryAgent, RetryState, Role, Send, SendFailed, SessionChange,
                         SessionChanged, SmokeResult, SmokeTest, Snapshot, StartSwitch, Switch, SwitchReason, SwitchStep,
                         Text, TextKey, TextRef, Tick, ToolStart, ToUser, Trigger, Turn, TurnEnded, TurnStatus, USER,
                         new_id)
@@ -72,6 +72,13 @@ class _Decide:
             self.gate_answered(ev)
         elif isinstance(ev, ForceSwitch):
             self.force(ev, a)
+        elif isinstance(ev, RetryAgent):
+            if a is not None and self.s.can_retry(a.id):
+                self.works_again(a, a.choice)
+                self.add(CommandReply(ev.id))
+            else:
+                why = Refusal.UNKNOWN if a is None else Refusal.NOT_RETRYABLE
+                self.add(CommandReply(ev.id, False, TextRef(TextKey.COMMAND_REFUSED, {"why": why})))
         elif a is not None:
             self.agent_event(a, ev)
         return self.out
