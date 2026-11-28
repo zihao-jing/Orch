@@ -109,3 +109,25 @@ Seconds since start; `gemini-3.8-flash-low`, default mode, open stdin pipe.
 ```
 
 One run, one model, 45 s. Whether a much longer job is also waited for is not verified.
+
+# Probe P6: the missing pieces (terminal, transcript, compact, one job, model list)
+
+Run on 2026-11-28 in a scratch folder (not in any user project), model `gemini-3.8-flash-low`, default mode, no settings changed. agy was **1.5.17** at the start and had updated itself to **1.5.19** by the second step; everything below is 1.5.19 unless marked. Drivers: a stream-json driver (pipe stdin, one message after each `result`), a pty driver for interactive mode, and a `ps` watcher for the job test.
+
+| Question | Answer | Verified? |
+|---|---|---|
+| Model list | `agy models` prints `Fetching available models...` on its first line, then one `<id>\t<display name>` per line. Ids carry the effort (`gemini-4-neon-xhigh`, `gemini-3.8-flash-low`); some have none (`gemini-pro-orchestrator`). Also lists Claude and GPT-OSS ids. | verified |
+| Terminal take-over | `agy --conversation <id> --model <m>` in a terminal opens the conversation with its history on screen; a message typed there is answered in the same conversation. A stream process started afterwards with `--conversation <id>` saw that reply (quoted it). | verified (pty) |
+| Terminal: first run in a folder | Interactive mode asks "Do you trust the contents of this project?" (default Yes) before anything else. Stream mode never asks. | verified |
+| Transcript | `~/.gemini/antigravity-cli/brain/<conv>/.system_generated/logs/transcript.jsonl`, one step per line: `step_index`, `source` (`USER_EXPLICIT`, `MODEL`, `SYSTEM`), `type` (`USER_INPUT`, `PLANNER_RESPONSE`, `SYSTEM_MESSAGE`, `CHECKPOINT`, `GENERIC`), `status`, `created_at` (UTC, seconds), `content`; model steps add `model` and token counts. User text is wrapped in `<USER_REQUEST>…</USER_REQUEST><ADDITIONAL_METADATA>…`. Turns from stream mode and from the terminal are both there. `transcript_full.jsonl` adds `tool_calls` on model steps and the tool results (`GENERIC`). | verified |
+| Resume notice | Each resume adds a `SYSTEM_MESSAGE` step: "All your subagents and background tasks have been stopped due to server restart." It appears in the stream as `system_message` DONE right after the first `user_input`. Background jobs do not survive the process. | verified |
+| Compact | `/compact` sent as a stream-json message: `result` SUCCESS with an empty response; the transcript gets a `CHECKPOINT` step ("# Resuming from a compaction …"). Context of the next turn: 16.1k tokens before, 15.5k after (small history; the rest is the fixed prompt). The code word given before was still recalled. | verified |
+| `result.usage` | Totals for the whole process, not the turn. Per-step tokens are in the transcript. | verified |
+| Background job, how it shows (changed since 1.5.8) | The model passed `WaitMsBeforeAsync: 500` (asked for 0) and the command went to the background as `<conv>/task-2`: the model replied STARTED while it ran. **The stream has no task id**: the tool step stays `ACTIVE` until the command ends, and its `DONE` carries the command's final output. The task id is only in the transcript (`GENERIC`: "Tool is running as a background task with task id: <conv>/task-2"), and the end notice there names it (`SYSTEM_MESSAGE … sender=<conv>/task-2`). | verified |
+| Stop one job | The job runs as `/bin/zsh -c <CommandLine>`, a child of agy, leader of its own process group, with the command as its children. SIGTERM to the command ended the job; agy reported `Command exited with code 143` to the model, the turn ended normally, and the process stayed up. | verified |
+
+## Surprises (P6)
+
+- agy updates itself while in use (1.5.17 to 1.5.19 within minutes). Output formats can change between runs.
+- With 1.5.19 the adapter's job detection (task id in the tool output) no longer fires: a background job looks like one long tool call. The transcript has what is needed.
+- The model does not always pass the `WaitMsBeforeAsync` value it is told; 500 still went to the background.

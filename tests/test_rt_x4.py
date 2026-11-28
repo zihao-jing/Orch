@@ -17,11 +17,11 @@ from unittest import mock
 
 from rt_helpers import FakeClock
 
-from orch.runtime.adapters.agy import AgyAdapter
+from orch.runtime.adapters.agy import COMPACT, AgyAdapter, _epoch, models_from
 from orch.runtime.adapters.base import AdapterError
 from orch.runtime.adapters.oneshot import CommandAdapter
 from orch.runtime.contracts import (AgentSpec, Choice, ErrorClass, JobEnded, JobNoticed, JobStarted, ModelReported,
-                                    ProcessExited, SessionChange, SessionChanged, SessionRef, Text, ToolEnd, TurnEnded,
+                                    ProcRef, ProcessExited, SessionChange, SessionChanged, SessionRef, Text, ToolEnd, TurnEnded,
                                     TurnStarted, TurnStatus)
 
 CONV = "be77b97a-6aa4-45af-9521-f210ab8aa3f4"
@@ -64,6 +64,7 @@ def agy_adapter(clock: FakeClock, path: str, *, want: str = "", queue=("m1",)) -
     """An adapter reading a recorded output file; the process counts as alive while the test reads."""
     a = AgyAdapter(clock)
     a.agent, a.joined, a.out_path, a.stream, a.want = "w1", True, path, "out-test", want
+    a.brain = os.path.join(os.path.dirname(path), "brain")  # never the user's own agy files
     a.queue.extend(queue)
     return a
 
@@ -232,6 +233,233 @@ class AgyParseTest(unittest.TestCase):
         self.assertNotEqual(job_started.uid, tool_end.uid)
         self.assertEqual(job_started.uid.split(":")[0], tool_end.uid.split(":")[0])  # same record
         self.assertLess(int(job_started.pos), int(tool_end.pos))  # the last one carries the record's end
+
+
+# Recorded (probe P6, agy 1.5.19, ids kept short): the stream does not say the command went to the background; the
+# tool step stays ACTIVE until the command ends. The transcript says it (GENERIC, same step_index) and names the task
+# that ended (SYSTEM_MESSAGE sender=<conv>/task-2).
+BG_STREAM = [
+    L({"event": "init", "conversation_id": CONV, "init": {"model": "gemini-3.8-flash-low"}}),
+    L({"event": "step_update", "step_update": {"step_index": 0, "state": "DONE", "step_type": "user_input"}}),
+    L({"event": "step_update", "step_update": {"step_index": 2, "state": "ACTIVE", "step_type": "tool",
+                                               "tool_name": "run_command", "tool_info": {"name": "run_command",
+                                               "parameters": {"CommandLine": "sleep 97.31 && echo JOBDONE"}}}}),
+]
+BG_STREAM_END = [
+    L({"event": "step_update", "step_update": {"step_index": 2, "state": "DONE", "step_type": "tool",
+                                               "tool_name": "run_command", "duration_seconds": 7.88,
+                                               "tool_info": {"name": "run_command",
+                                                             "parameters": {"CommandLine": "sleep 97.31 && echo JOBDONE"},
+                                                             "output": "Command exited with code 143.\n\nNo output from the command."}}}),
+    L({"event": "step_update", "step_update": {"step_index": 4, "state": "DONE", "step_type": "system_message"}}),
+    L({"event": "result", "result": {"conversation_id": CONV, "status": "SUCCESS",
+                                     "response": "STARTED\nThe background command was terminated (SIGTERM / exit code 143).\n"}}),
+]
+BG_TRANSCRIPT = [
+    L({"step_index": 2, "source": "SYSTEM", "type": "GENERIC", "status": "DONE", "created_at": "2026-11-28T11:04:21Z",
+       "content": f"Created At: 2026-11-28T19:04:21+08:00\nTool is running as a background task with task id: {CONV}/task-2\n"
+                  f"Task Description: sleep 97.31 && echo JOBDONE\nTask logs are available at: file:///x/task-2.log\n"}),
+]
+BG_TRANSCRIPT_END = [
+    L({"step_index": 4, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "status": "DONE", "created_at": "2026-11-28T11:04:29Z",
+       "content": "The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] "
+                  f"timestamp=2026-11-28T11:04:29Z sender={CONV}/task-2 priority=MESSAGE_PRIORITY_HIGH content=Task id "
+                  f"\"{CONV}/task-2\" finished with result:\nCommand exited with code 143.\n"}),
+]
+# Recorded (probe P6): transcript.jsonl of a conversation with a terminal turn after an Orch turn.
+TRANSCRIPT = [
+    L({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "created_at": "2026-11-28T10:56:56Z",
+       "content": "<USER_REQUEST>\n<system_instructions>\nYou are w1.\n</system_instructions>\n\nRemember PELICAN.\n"
+                  "</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-28T18:56:56+08:00.\n"
+                  "</ADDITIONAL_METADATA>"}),
+    L({"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "created_at": "2026-11-28T10:56:56Z",
+       "model": "gemini-3.8-flash-low", "content": "OK"}),
+    L({"step_index": 4, "source": "USER_EXPLICIT", "type": "USER_INPUT", "created_at": "2026-11-28T10:58:19Z",
+       "content": "<USER_REQUEST>\nWhat was the code word? Reply with it and then the word TERMINAL.\n</USER_REQUEST>\n"
+                  "<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-28T18:58:19+08:00.\n</ADDITIONAL_METADATA>"}),
+    L({"step_index": 5, "source": "SYSTEM", "type": "SYSTEM_MESSAGE", "created_at": "2026-11-28T10:58:19Z",
+       "content": "[Notice] All your subagents and background tasks have been stopped due to server restart."}),
+    L({"step_index": 6, "source": "MODEL", "type": "PLANNER_RESPONSE", "created_at": "2026-11-28T10:58:19Z",
+       "model": "gemini-3.8-flash-low", "content": "PELICAN TERMINAL"}),
+]
+# Recorded (probe P6): `agy models`, shortened.
+MODELS_OUT = ("Fetching available models...\ngemini-4-neon-high\tGemini 4 Neon (High)\n"
+              "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\ngemini-pro-orchestrator\tOrchestrator (Carbon)\n")
+
+
+class AgyJobsTest(unittest.TestCase):
+    """agy 1.5.19: background jobs are known from agy's transcript (probe P6)."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.tmp = tempfile.mkdtemp(prefix="rt_x4_")
+        self.path = os.path.join(self.tmp, "out.jsonl")
+        open(self.path, "w").close()
+        logs = os.path.join(self.tmp, "brain", CONV, ".system_generated", "logs")
+        os.makedirs(logs)
+        self.tr = os.path.join(logs, "transcript_full.jsonl")
+        open(self.tr, "w").close()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_background_command_is_a_job_that_ends_inside_the_turn(self) -> None:
+        a = agy_adapter(self.clock, self.path)
+        write(self.path, *BG_STREAM)
+        evs = read_all(a)
+        self.assertIn("ToolStart", [type(e).__name__ for e in evs])
+        write(self.tr, *BG_TRANSCRIPT)
+        evs = read_all(a)  # the job is known while its tool step is still open
+        started = next(e for e in evs if isinstance(e, JobStarted))
+        jid = f"w1/{CONV}/task-2"
+        self.assertEqual((started.job.id, started.job.command), (jid, "sleep 97.31 && echo JOBDONE"))
+        self.assertEqual([e.tool_id for e in evs if isinstance(e, ToolEnd)], ["2"])
+        self.assertEqual([j.state.value for j in a.jobs()], ["running"])
+        write(self.tr, *BG_TRANSCRIPT_END)
+        write(self.path, *BG_STREAM_END)
+        evs = read_all(a)
+        kinds = [type(e) for e in evs]
+        self.assertEqual(kinds.count(JobEnded), 1)
+        self.assertEqual(next(e for e in evs if isinstance(e, JobEnded)).exit_code, 143)
+        self.assertNotIn(ToolEnd, kinds)  # ended with the job's start
+        self.assertLess(kinds.index(JobNoticed), kinds.index(TurnEnded))
+        self.assertEqual(a.jobs()[0].exit_code, 143)
+
+    def test_canceled_job_ends_from_the_transcript_alone(self) -> None:
+        """Probe P6: a job Orch stopped is "canceled with result" in the transcript, with no exit code."""
+        a = agy_adapter(self.clock, self.path)
+        write(self.path, *BG_STREAM)
+        write(self.tr, *BG_TRANSCRIPT)
+        read_all(a)
+        write(self.tr, L({"step_index": 5, "type": "SYSTEM_MESSAGE", "created_at": "2026-11-28T11:26:43Z",
+                          "content": f"[Message] timestamp=2026-11-28T11:26:43Z sender={CONV}/task-2 priority=LOW "
+                                     f"content=Task id \"{CONV}/task-2\" was canceled with result:\nTool execution "
+                                     "was canceled\n"}))
+        evs = read_all(a)
+        self.assertEqual([(type(e), getattr(e, "exit_code", None)) for e in evs], [(JobEnded, None), (JobNoticed, None)])
+
+    def test_transcript_read_before_the_tool_step_gives_no_open_tool(self) -> None:
+        a = agy_adapter(self.clock, self.path)
+        write(self.path, *BG_STREAM[:2])
+        read_all(a)
+        write(self.tr, *BG_TRANSCRIPT)
+        evs = read_all(a)  # the transcript's step came before the stream's
+        write(self.path, BG_STREAM[2])
+        evs += read_all(a)
+        self.assertNotIn("ToolStart", [type(e).__name__ for e in evs])  # transcript first: the step is a job
+        self.assertEqual(len([e for e in evs if isinstance(e, JobStarted)]), 1)
+
+    def test_steps_from_before_the_process_are_not_its_jobs(self) -> None:
+        a = agy_adapter(self.clock, self.path)
+        a.tr_since = _epoch("2026-11-28T12:00:00Z")
+        write(self.tr, *BG_TRANSCRIPT)
+        write(self.path, *BG_STREAM)
+        self.assertEqual([e for e in read_all(a) if isinstance(e, JobStarted)], [])
+
+    def test_reconnect_reads_the_jobs_again_from_the_transcript(self) -> None:
+        write(self.path, *BG_STREAM)
+        write(self.tr, *BG_TRANSCRIPT)
+        d = os.path.join(self.tmp, "cli", "w1")
+        os.makedirs(d)
+        a = AgyAdapter(self.clock)
+        a.brain = os.path.join(self.tmp, "brain")
+        self.assertFalse(a.reconnect(ProcRef(pid=1, started=0, endpoint=os.path.join(d, "in.fifo"),
+                                             output_file=self.path, stream="out-test", read_pos="0")))
+        self.assertEqual((a.agent, a.conv), ("w1", CONV))
+        read_all(a)
+        self.assertEqual([j.id for j in a.jobs()], [f"w1/{CONV}/task-2"])
+
+    def test_stop_job_ends_the_one_shell_group(self) -> None:
+        a = agy_adapter(self.clock, self.path)
+        a.pid = 500
+        write(self.path, *BG_STREAM)
+        write(self.tr, *BG_TRANSCRIPT)
+        read_all(a)
+        jid = f"w1/{CONV}/task-2"
+        rows = [(500, 1, 500, "agy --input-format stream-json"), (501, 500, 501, "/bin/zsh -c sleep 97.31 && echo JOBDONE"),
+                (502, 501, 501, "sleep 97.31")]
+        with mock.patch("orch.runtime.adapters.agy._ps", return_value=rows), \
+                mock.patch.object(AgyAdapter, "_alive_now", return_value=True), \
+                mock.patch("orch.runtime.adapters.agy.os.killpg") as kill:
+            self.assertTrue(a.stop_job(jid))
+            kill.assert_called_once_with(501, 15)
+            kill.reset_mock()
+            twin = rows + [(503, 500, 503, "/bin/zsh -c sleep 97.31 && echo JOBDONE")]
+            with mock.patch("orch.runtime.adapters.agy._ps", return_value=twin):
+                self.assertFalse(a.stop_job(jid))  # two alike: which one is not known
+            kill.assert_not_called()
+            self.assertFalse(a.stop_job("w1/other/task-9"))
+
+
+class AgyRestTest(unittest.TestCase):
+    """Compact, terminal, transcript, model list, arrived (probe P6)."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.tmp = tempfile.mkdtemp(prefix="rt_x4_")
+        self.path = os.path.join(self.tmp, "out.jsonl")
+        open(self.path, "w").close()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_compact_turn_is_reported_as_compacted_not_as_a_turn(self) -> None:
+        a = agy_adapter(self.clock, self.path, queue=(COMPACT,))
+        a.compacting = False
+        write(self.path, L({"event": "init", "conversation_id": CONV, "init": {}}),
+              L({"event": "step_update", "step_update": {"step_index": 15, "state": "DONE", "step_type": "user_input"}}),
+              L({"event": "result", "result": {"conversation_id": CONV, "status": "SUCCESS", "response": ""}}))
+        evs = read_all(a)
+        kinds = [type(e) for e in evs]
+        self.assertNotIn(TurnStarted, kinds)
+        self.assertNotIn(TurnEnded, kinds)
+        self.assertEqual(evs[-1].change, SessionChange.COMPACTED)
+        self.assertFalse(a.turn_open)
+
+    def test_compact_refused_before_anything_was_said_or_while_busy(self) -> None:
+        a = agy_adapter(self.clock, self.path, queue=())
+        a.need_system = True
+        self.assertFalse(a.compact())
+        a.need_system, a.turn_open = False, True
+        self.assertFalse(a.compact())
+
+    def test_terminal_command_is_interactive_on_the_conversation(self) -> None:
+        spec = AgentSpec(agent="w1", choice=Choice(backend="agy", model="gemini-3.8-flash-low",
+                                                   options={"executable": "/x/agy", "mode": "auto"}))
+        cmd = AgyAdapter(self.clock).terminal_command(spec, SessionRef(session_id=CONV))
+        self.assertEqual(cmd[0], "/x/agy")
+        self.assertNotIn("--input-format", cmd)
+        self.assertEqual(cmd[cmd.index("--conversation") + 1], CONV)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "gemini-3.8-flash-low")
+
+    def test_transcript_gives_user_lines_and_replies_after_since(self) -> None:
+        logs = os.path.join(self.tmp, "brain", CONV, ".system_generated", "logs")
+        os.makedirs(logs)
+        write(os.path.join(logs, "transcript.jsonl"), *TRANSCRIPT)
+        a = AgyAdapter(self.clock)
+        a.agent, a.brain = "w1", os.path.join(self.tmp, "brain")
+        everything = a.transcript(SessionRef(session_id=CONV), 0)
+        self.assertEqual([(s.by, s.text) for s in everything][:2], [("user", "Remember PELICAN."), ("w1", "OK")])
+        later = a.transcript(SessionRef(session_id=CONV), _epoch("2026-11-28T10:58:00Z"))
+        self.assertEqual([(s.by, s.text) for s in later],
+                         [("user", "What was the code word? Reply with it and then the word TERMINAL."),
+                          ("w1", "PELICAN TERMINAL")])
+        self.assertEqual(a.transcript(SessionRef(session_id="no-such"), 0), [])
+
+    def test_models_listing(self) -> None:
+        ms = models_from(MODELS_OUT)
+        self.assertEqual([m.model for m in ms], ["gemini-4-neon-high", "gemini-3.8-flash-low", "gemini-pro-orchestrator"])
+        self.assertEqual(ms[1].label, "Gemini 3.8 Flash (Low)")
+
+    def test_arrived(self) -> None:
+        a = agy_adapter(self.clock, self.path, queue=("m1", "m2"))
+        write(self.path, L({"event": "step_update", "step_update": {"step_index": 0, "state": "DONE",
+                                                                    "step_type": "user_input"}}))
+        read_all(a)
+        with mock.patch.object(AgyAdapter, "_alive_now", return_value=False):
+            self.assertTrue(a.arrived("m1"))  # taken in
+            self.assertFalse(a.arrived("m2"))  # queued in a process that died
+        self.assertIsNone(a.arrived("m9"))
 
 
 class AgyProcessTest(Real, unittest.TestCase):
