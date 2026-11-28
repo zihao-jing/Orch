@@ -65,6 +65,32 @@ class TestControls(RuntimeCase):
         self.assertFalse(self.incoming(W1, body="Discard instruction."))
         self.assertFalse(self.incoming(MANAGER, body="Do not forward."))
 
+    def test_apply_supersedes_review_question_and_pause_without_approval(self):
+        self.cli(MANAGER).script("<score>5</score><decision>ACCEPT</decision>", QUESTION + "<pause/>",
+                                 "Use the outcome of the discussion.")
+        self.cli(CRITIC).script("Ready.\n<done/>")
+        self.start()
+        self.write_checklist(True)
+        self.assign()
+        self.wait_for(lambda: any(g.kind == C.GateKind.MILESTONE for g in self.state.open_gates()), "review")
+        self.chat(MANAGER, "Any questions?")
+        self.wait_for(lambda: any(g.kind == C.GateKind.QUESTION for g in self.state.open_gates()), "question")
+        pending = self.state.open_gates()
+        self.assertTrue(self.state.paused)
+        current = self.state.milestone.id
+        self.command(C.DiscussionStart, MANAGER)
+        self.command(C.DiscussionApply, MANAGER, text="Revise it as discussed.")
+        self.advance(2)
+        self.assertFalse(self.state.open_gates())
+        self.assertFalse(self.state.paused)
+        self.assertEqual(current, self.state.milestone.id)
+        self.assertFalse(self.state.milestone.accepted)
+        for gate in pending:
+            self.assertTrue(self.state.gates[gate.id].withdrawn)
+            self.assertIsNone(self.state.gates[gate.id].answer)
+        self.assert_received_once(MANAGER, key=C.TextKey.DISCUSSION_APPLY)
+        self.assertFalse(self.incoming(MANAGER, key=C.TextKey.GATE_ANSWERS))
+
     def test_S14_TERM_4_TERM_6_terminal_holds_input_until_take_back(self):
         self.start()
         self.chat(W1, "Establish session.")

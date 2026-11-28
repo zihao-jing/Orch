@@ -19,6 +19,9 @@ class FakeRuntime:
     def state(self):
         return public_state(self.snap)
 
+    def dashboard_state(self):
+        return public_state(self.snap, dashboard=True)
+
     def submit(self, command):
         self.got.append(command)
         return reply_json(CommandReply(command_id=command.id, text=TextRef(next(iter(TextKey)), {})))
@@ -75,6 +78,19 @@ class TestServer(unittest.TestCase):
         self.assertNotIn("rendered", st["messages"]["m1"])
         self.assertEqual(st["messages"]["m1"]["text"]["shown"], "WORDS")
         self.assertEqual(call(self.port, "GET", "/api/state")[1]["rev"], st["rev"])
+
+    def test_board_state_omits_history_but_talk_can_page_it(self):
+        for i in range(100, 145):
+            self.rt.snap.messages[str(i)] = Message(str(i), "manager", "user", body="history " + str(i), seq=i)
+        status, st = call(self.port, "GET", "/api/state?view=board")
+        self.assertEqual(status, 200)
+        self.assertNotIn("history 100", json.dumps(st))
+        self.assertIn(100, st["inbox_seqs"])
+        url = "/api/messages?talk=manager&limit=15"
+        page = call(self.port, "GET", url)[1]
+        self.assertEqual([m["seq"] for m in page["messages"]], list(range(130, 145)))
+        older = call(self.port, "GET", url + "&before=130")[1]
+        self.assertEqual([m["seq"] for m in older["messages"]], list(range(115, 130)))
 
     def test_UI_1_rev_changes_with_the_state(self):
         r1 = call(self.port, "GET", "/api/state")[1]["rev"]

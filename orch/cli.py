@@ -609,8 +609,8 @@ def cmd_stop(a: argparse.Namespace) -> int:
 
 
 def cmd_tell(a: argparse.Namespace) -> int:
-    """Message one agent directly: `orch tell <run> <agent> "<text>"`."""
-    from .runtime.contracts import Chat
+    """Dispatch a critic instruction to a worker; human chat uses the board."""
+    from .runtime.contracts import CriticTell
     text = a.message if a.message != "-" else sys.stdin.read()
     if not text.strip():
         print("empty message")
@@ -619,13 +619,17 @@ def cmd_tell(a: argparse.Namespace) -> int:
     status = 0 if runs else 1
     for run in runs:
         st = read_json(run / "state.json", {}) or {}
-        names = list((((st.get("runtime") or {}).get("snap") or {}).get("agents") or {}).keys())
-        if names and a.agent not in names:
+        names = ((st.get("runtime") or {}).get("snap") or {}).get("agents") or {}
+        if a.agent not in names:
             print(f"{run}: no agent named {a.agent!r} (agents: {', '.join(names)})")
             status = 1
             continue
-        p = write_command(run, Chat(agent=a.agent, at=time.time(), id=_new_command_id(), text=text))
-        print(f"queued for {a.agent}: {p}")
+        if names[a.agent].get("role") != "worker":
+            print(f"{run}: orch tell is for critic-to-worker messages; use dashboard Talk for direct chat.")
+            status = 1
+            continue
+        p = write_command(run, CriticTell(agent=a.agent, at=time.time(), id=_new_command_id(), text=text))
+        print(f"queued from the critic to {a.agent}: {p}")
     return status
 
 
@@ -794,9 +798,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agents", action="store_true", help="also stop the running agents and their jobs")
     p.set_defaults(func=cmd_stop)
 
-    p = sub.add_parser("tell", help="message one agent directly, e.g. orch tell <run> critic \"focus on X\"")
+    p = sub.add_parser("tell", help="send a critic instruction to a worker")
     p.add_argument("target")
-    p.add_argument("agent", help="agent id, e.g. critic or worker-1")
+    p.add_argument("agent", help="worker id, e.g. worker-1")
     p.add_argument("message", help="text, or - to read stdin")
     p.add_argument("-m", "--monitor", action="append")
     p.set_defaults(func=cmd_tell)

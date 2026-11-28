@@ -27,6 +27,9 @@ CHANCES: Dict[TextKey, float] = {
     TextKey.REM_WRITING: 0.25,
     TextKey.REM_GOLDEN_SIZE: 0.25,  # only while the board stays over its limit
     TextKey.REM_CRITIC_BOUNDARY: 0.25,
+    TextKey.REM_CRITIC_SILENT: 0.25,
+    TextKey.REM_MANAGER_PAUSE: 0.10,
+    TextKey.REM_DEPENDENT_WORK: 0.30,
 }
 
 # messages that ask for nothing but a text to pass on
@@ -87,17 +90,23 @@ def _critic(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: Di
             given: Dict[str, str]) -> None:
     # a failed worker, or one I stopped, keeps its status line but is not offered for work
     workers = [w.id for w in snap.workers if w.status != AgentStatus.FAILED and not w.stopped_by_user]
-    for w in snap.workers:
-        out.append(TextRef(TextKey.REM_WORKER_LINE, worker_line(snap, w, message)))
-    out.append(TextRef(TextKey.REM_LABELS, {"workers": workers}))
-    if due[TextKey.REM_CRITIC_BOUNDARY]:
-        out.append(TextRef(TextKey.REM_CRITIC_BOUNDARY))
     pool = ",".join(workers)
     if seen.get("workers") != pool:
         out.append(TextRef(TextKey.REM_WORKERS, {"workers": workers}))
         given["workers"] = pool
     elif due[TextKey.REM_WORKERS] and len(workers) > 1:
         out.append(TextRef(TextKey.REM_WORKERS, {"workers": workers}))
+    for w in snap.workers:
+        out.append(TextRef(TextKey.REM_WORKER_LINE, worker_line(snap, w, message)))
+    out.append(TextRef(TextKey.REM_LABELS, {"workers": workers}))
+    if message.key == TextKey.WORKER_INTERMEDIATE:
+        out.append(TextRef(TextKey.REM_JOB_UPDATE, {"worker": message.sender}))
+    if due[TextKey.REM_DEPENDENT_WORK]:
+        out.append(TextRef(TextKey.REM_DEPENDENT_WORK))
+    if due[TextKey.REM_CRITIC_BOUNDARY]:
+        out.append(TextRef(TextKey.REM_CRITIC_BOUNDARY))
+    if due[TextKey.REM_CRITIC_SILENT]:
+        out.append(TextRef(TextKey.REM_CRITIC_SILENT))
     unwatched = [w for w in workers if w in snap.watch and snap.watch[w].told_unwatched]
     if unwatched and due[TextKey.REM_UNWATCHED]:
         out.append(TextRef(TextKey.REM_UNWATCHED, {"workers": unwatched}))
@@ -109,6 +118,11 @@ def _manager(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen: D
              given: Dict[str, str]) -> None:
     g = snap.golden
     talking = _discussion(snap, message, due, seen, out, given)
+    if message.key in (TextKey.CHECKLIST_COMPLETE, TextKey.REVIEW_RUBRIC_MISSING, TextKey.REVIEW_SCORE_LOW) or (
+            message.key == TextKey.GATE_ANSWERS and message.text.values.get("decide_again")):
+        out.append(TextRef(TextKey.REM_REVIEW_DECISION))
+    if due[TextKey.REM_MANAGER_PAUSE] and not talking:
+        out.append(TextRef(TextKey.REM_MANAGER_PAUSE))
     if due[TextKey.REM_MESSAGE_CRITIC] and not talking:
         out.append(TextRef(TextKey.REM_MESSAGE_CRITIC))
         gates = [gate_line(x) for x in snap.open_gates()]
@@ -166,8 +180,12 @@ def _discussion(snap: Snapshot, message: Message, due: Dict[TextKey, bool], seen
             out.append(TextRef(TextKey.REM_DISCUSSION))
             given["discussion"] = mark
         return True
+    agent = snap.agents[message.recipient]
+    if agent.role == Role.MANAGER and agent.discussion_end_notice:
+        out.append(TextRef(TextKey.REM_DISCUSSION_OVER))
+        given["discussion_end"] = agent.discussion_end_notice
     if seen.get("discussion"):
-        given["discussion"] = ""  # gone: REM_DISCUSSION_OVER is no longer said
+        given["discussion"] = ""
     return False
 
 
@@ -182,7 +200,7 @@ def worker_line(snap: Snapshot, w: Agent, message: Optional[Message] = None) -> 
         status = "retrying"
     return {"worker": w.id, "status": status, "assignment": w.assignment.line if w.assignment else "",
             "open_report": bool(w.open_report) and not (message and message.id == w.open_report),
-            "idle_since": w.idle_since, "jobs": [short(j.label, 60) for j in snap.running_jobs(w.id)]}
+            "idle_since": w.idle_since, "jobs": [short(j.label or j.id, 60) for j in snap.running_jobs(w.id)]}
 
 
 def gate_line(g: Gate) -> Any:

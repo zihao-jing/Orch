@@ -29,6 +29,9 @@ from .contracts import (Action, AdvanceSwitch, Agent, AgentFailed, Choice, Close
                         Text, TextKey, TextRef, Tick, ToolStart, ToUser, Trigger, Turn, TurnEnded, TurnStatus, USER,
                         new_id)
 
+from .adapters.opencode import missing_signature_history
+from .models import same_model
+
 NAME = "recovery"
 P, T, H, O, C, D, F = (SwitchStep.PENDING, SwitchStep.TESTING, SwitchStep.HANDOVER, SwitchStep.OPENING,
                        SwitchStep.CONFIRMING, SwitchStep.DONE, SwitchStep.FAILED)
@@ -92,7 +95,8 @@ class _Decide:
         elif isinstance(ev, TurnEnded):
             self.turn_ended(a, ev)
         elif isinstance(ev, (Text, ToolStart)):
-            if a.switch and a.switch.step == C and _running(t) and (isinstance(ev, ToolStart) or ev.text.strip()):
+            if (a.switch and a.switch.step == C and a.switch.target.backend != "opencode"
+                    and _running(t) and (isinstance(ev, ToolStart) or ev.text.strip())):
                 self.done(a, a.switch)
         elif isinstance(ev, SessionChanged):
             self.session(a, ev)
@@ -188,7 +192,13 @@ class _Decide:
             else:
                 self.handover_missing(a, sw)  # type: ignore[arg-type]
         elif sw is not None and sw.step == C:
-            self.done(a, sw)
+            reported = t.reported_model if t else ""
+            if sw.target.backend == "opencode" and (not reported or not same_model(sw.target, reported)):
+                why = f"OpenCode reported {reported or 'no model'}, expected {sw.target.label}"
+                self.test_failed(a, sw, SmokeResult(a.id, self.now, choice=sw.target, ok=False,
+                                                    error=ErrorClass.OTHER, why=why))
+            else:
+                self.done(a, sw)
         elif sw is None:
             self.release(a, HoldReason.SEND_FAILED)
             self.close_gates(a)
@@ -210,6 +220,8 @@ class _Decide:
         state = RetryState(attempt, 0.0, error, why, turn, list(r.tried))
         tries = self.s.settings.retries
         if error == ErrorClass.SESSION_LOST and (attempt == 1 or a.session is not None and a.session.confirmed):
+            if self.blocked(a):  # a user terminal owns this session until it closes
+                return self.retry(a, replace(state, until=self.now))
             return self.new_session(a, state)
         if error in (ErrorClass.BILLING, ErrorClass.MISSING_CLI):
             return self.choice_failed(a, state)
@@ -247,8 +259,9 @@ class _Decide:
             r = replace(r, attempt=r.attempt + 1)
             if r.attempt >= self.s.settings.retries and not self.s.running_jobs(a.id):
                 return self.choice_failed(a, r)
-        if r.error == ErrorClass.SESSION_LOST:
-            return self.new_session(a, r)
+        if r.error == ErrorClass.SESSION_LOST or (a.choice.backend == "opencode" and missing_signature_history(r.why)):
+            # Also recover pending retries classified as transient by older controllers.
+            return self.new_session(a, replace(r, error=ErrorClass.SESSION_LOST))
         restart = a.proc is None or frozen or (r.why in (FailCause.NO_ANSWER.value, FailCause.FROZEN.value)
                                                and not self.s.running_jobs(a.id))
         self.release(a, HoldReason.SEND_FAILED)
@@ -277,6 +290,10 @@ class _Decide:
         base = replace(self.fresh(a, c, SwitchReason.BACKUP), step=step, turn=turn, error=state.why)
         if sw is None:
             return self.add(StartSwitch(base))
+        if (state.why == FailCause.FROZEN.value and sw.new and sw.new.session_id
+                and c.session_key == sw.new.session_key):
+            # The interrupted handover and its work live here, not in the last committed session.
+            base = replace(base, new=sw.new, new_session=False)
         self.drop_first(sw)
         kept = self.s.messages.get(sw.handover_message)
         # what was written for the new session serves the next one too
@@ -722,8 +739,6 @@ class _Decide:
     def switch_tick(self, a: Agent, sw: Switch) -> None:
         r = a.retry
         if sw.step == P:
-            if sw.target.same(a.choice) and sw.reason == SwitchReason.USER:
-                return
             if self.ready(a, sw):
                 return self.test(a, sw)
             if sw.reason == SwitchReason.USER and r is not None and 0 < r.until <= self.now:
@@ -731,6 +746,18 @@ class _Decide:
         elif sw.step == H:
             if not self.blocked(a):
                 self.handover_tick(a, sw)
+        elif sw.step == C and sw.target.name and sw.target.backend == "opencode" and a.role == Role.WORKER and _running(self.s.turns.get(a.id)):
+            # A named backup's first turn can hang inside provider retries. The switch
+            # hold prevents the normal freeze supervisor from handling it.
+            t = self.s.turns[a.id]
+            if (self.blocked(a) or self.s.paused or self.s.finished or self.s.open_gates()
+                    or a.id in self.s.discussions or a.tools or self.s.open_jobs(a.id)
+                    or set(a.holds) - {HoldReason.SWITCH, HoldReason.TURN}):
+                return
+            if self.now - max(a.last_output, t.started, sw.step_at) >= self.s.settings.frozen_after:
+                state = RetryState(error=ErrorClass.TRANSIENT, why=FailCause.FROZEN.value, turn=t.id,
+                                   tried=list(r.tried) if r else [])
+                self.choice_failed(a, state, replace(sw, forced=True))
         elif sw.step in (O, C) and not self.blocked(a) and not _running(self.s.turns.get(a.id)):
             if r is not None and r.until > 0:
                 if r.until <= self.now:

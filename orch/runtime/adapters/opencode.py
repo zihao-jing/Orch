@@ -84,6 +84,20 @@ def _tag(data: Any) -> str:
     return str(data.get("_tag", "")) if isinstance(data, dict) else ""
 
 
+def missing_signature_history(text: str) -> bool:
+    return "missing gemini tool thought signature history" in text.lower()
+
+
+def _session_input_too_long(err: Any) -> bool:
+    # This gateway echoes the entire prompt before its nested BadRequest. Only inspect the
+    # provider's final error field, not words in the echoed conversation.
+    if not isinstance(err, dict) or err.get("type") != "provider.internal":
+        return False
+    tail = str(err.get("message") or "")[-2048:]
+    return bool(re.search(r"""['"]message['"]:\s*['"]Total tokens of image and text exceed max message tokens\.[^'"]*['"],\s*['"]param['"]:\s*['"]['"],\s*['"]type['"]:\s*['"]BadRequest['"]""", tail)
+                and re.search(r"""['"]standard_code['"]:\s*400001\s*}\s*$""", tail))
+
+
 def _fail(status: int, data: Any, what: str) -> AdapterError:
     text = (data.get("message") if isinstance(data, dict) else str(data or "")) or ""
     if status == 404:
@@ -173,6 +187,7 @@ class OpenCodeAdapter(BaseAdapter):
         self._reset_reading("")
 
     def _reset_reading(self, pos: str) -> None:
+        self._shell_directory: Optional[str] = None
         self._anchor = pos
         self._last_key = pos
         self._seen: set = {pos.split(":", 1)[1]} if ":" in pos else set()  # the record the position stands at
@@ -191,10 +206,11 @@ class OpenCodeAdapter(BaseAdapter):
 
     # ------------------------------------------------------------------------------------------------- server
 
-    def _call(self, method: str, path: str, body: Any = None, timeout: float = 10.0) -> Tuple[int, Any]:
+    def _call(self, method: str, path: str, body: Any = None, timeout: float = 10.0, *,
+              directory: Optional[str] = None) -> Tuple[int, Any]:
         if not (self.port and self.attached):
             raise AdapterError("opencode server is not connected")
-        return _request(self.port, self.pw, self.cwd, method, path, body, timeout)
+        return _request(self.port, self.pw, self.cwd if directory is None else directory, method, path, body, timeout)
 
     def _spawn(self, argv: List[str], env: Dict[str, str], cwd: str, log: Any) -> Any:
         """Start a server process of its own (a session of its own, so it can be signalled as a group)."""
@@ -398,12 +414,21 @@ class OpenCodeAdapter(BaseAdapter):
         if not choice.model:
             return
         want, have = self._model_body(choice), ((session or {}).get("data") or {}).get("model") or {}
-        if (have.get("id"), have.get("providerID"), have.get("variant") or "default") == \
-                (want["id"], want["providerID"], want.get("variant") or "default"):
+
+        def selection(m: Dict[str, Any]) -> tuple:
+            return m.get("id"), m.get("providerID"), m.get("variant") or "default"
+
+        if selection(have) == selection(want):
             return
         status, data = self._call("POST", f"/api/session/{sid}/model", {"model": want})
         if status not in (200, 204):
             raise _fail(status, data, "switch model")
+        status, data = self._call("GET", f"/api/session/{sid}")
+        if status != 200:
+            raise _fail(status, data, "verify session model")
+        actual = ((data or {}).get("data") or {}).get("model") or {}
+        if selection(actual) != selection(want):
+            raise AdapterError(f"OpenCode session model mismatch: requested {selection(want)}, got {selection(actual)}")
 
     def _latest(self) -> str:
         """The position of the session's newest record: nothing before it is read."""
@@ -624,6 +649,7 @@ class OpenCodeAdapter(BaseAdapter):
 
     def _begin(self, rid: str, ids: Tuple[str, ...]) -> List[Tuple[type, str, Dict[str, Any]]]:
         self._open = True
+        self._model = ""  # record the actual model for this turn, even when unchanged
         self._texts = {}
         return [(TurnStarted, f"start:{rid}", {"message_ids": ids})]
 
@@ -636,8 +662,17 @@ class OpenCodeAdapter(BaseAdapter):
             code = md.get("exit")
             code = int(code) if isinstance(code, (int, float)) else None
             prior = self._known.get(jid) or self._ended.get(jid) or Job(id=jid)
-            self._ended[jid] = Job(id=jid, agent=self.agent, label=prior.label, state=JobState.ENDED, exit_code=code,
-                                   ended=_created(rec) / 1000.0, command=prior.command)
+            command, started = prior.command, prior.started
+            if md.get("shellID") and not command:  # a reconnect may miss the original tool call
+                try:
+                    sh = self._shell(cli) or {}
+                except AdapterError:
+                    sh = {}  # missing metadata must not prevent the completion or wake-up
+                command = str(sh.get("command") or "")
+                started = ((sh.get("time") or {}).get("started") or 0) / 1000.0 or started
+            label = " ".join(command.split())[:200] or prior.label or cli
+            self._ended[jid] = Job(id=jid, agent=self.agent, label=label, started=started, state=JobState.ENDED,
+                                   exit_code=code, ended=_created(rec) / 1000.0, command=command)
             self._known.pop(jid, None)
             made.append((JobEnded, f"jobend:{cli}", {"job_id": jid, "exit_code": code}))
             if self._open:
@@ -687,7 +722,9 @@ class OpenCodeAdapter(BaseAdapter):
             label = name + (": " + " ".join(str(detail).split())[:200] if detail else "")
             made.append((ToolStart, f"{'toolstart' if first else 'toolupdate'}:{tid}",
                          {"tool_id": tid, "label": label, "call": call}))
-        if isinstance(inp, dict) and inp.get("background") is True and isinstance(md, dict):  # JOB-2: a shell job
+        # A foreground shell may return control to the agent while OpenCode keeps the command running.
+        if isinstance(inp, dict) and isinstance(md, dict) and (inp.get("background") is True or
+                (name == "shell" and status == "completed" and md.get("status") == "running")):
             cli = str(md.get("shellID") or "")
             jid = job_id(self.agent, cli)
             if cli and jid not in self._known and jid not in self._ended:
@@ -721,6 +758,8 @@ class OpenCodeAdapter(BaseAdapter):
 
     @staticmethod
     def _error_text(err: Any) -> str:
+        if _session_input_too_long(err):
+            return "provider.internal: session history exceeds the provider message token limit"
         if isinstance(err, dict):
             return f"{err.get('type', '')}: {err.get('message', '')}"[:300]
         return str(err or "turn failed")[:300]
@@ -729,7 +768,7 @@ class OpenCodeAdapter(BaseAdapter):
         text = self._error_text(err)
         kind = str(err.get("type", "")).lower() if isinstance(err, dict) else ""
         status = err.get("status") if isinstance(err, dict) else None
-        if SESSION_GONE.search(text):
+        if SESSION_GONE.search(text) or missing_signature_history(text) or _session_input_too_long(err):
             return ErrorClass.SESSION_LOST
         if any(w in kind for w in BILLING_TYPES) or classify_error(text) == ErrorClass.BILLING:
             return ErrorClass.BILLING
@@ -771,7 +810,16 @@ class OpenCodeAdapter(BaseAdapter):
     # -------------------------------------------------------------------------------------------------- jobs
 
     def _shell(self, cli: str) -> Optional[Dict[str, Any]]:
-        status, data = self._call("GET", f"/api/shell/{cli}")
+        # Shell IDs are scoped to the exact location string, even for aliases of the same directory.
+        if self._shell_directory is None:
+            status, session = self._call("GET", f"/api/session/{self.sid}")
+            if status != 200:
+                raise _fail(status, session, "shell session location")
+            location = ((session.get("data") or {}).get("location") or {})
+            self._shell_directory = location.get("directory") or self.cwd
+        status, data = self._call("GET", f"/api/shell/{cli}", directory=self._shell_directory)
+        if status not in (200, 404):
+            raise _fail(status, data, "shell status")
         d = (data or {}).get("data") if isinstance(data, dict) else None
         return d if status == 200 and isinstance(d, dict) else None
 
@@ -814,6 +862,9 @@ class OpenCodeAdapter(BaseAdapter):
         if not (self.sid and self.attached):
             return []
         running = self._running_jobs()
+        for job in running:  # after reconnect there may be no tool-start record left to replay
+            if self._kind.get(job.id) == "shell":
+                self._known.setdefault(job.id, job)
         ids = {j.id for j in running}
         for jid, job in list(self._known.items()):  # known, but gone from the list: did it end?
             if jid in ids or self._kind.get(jid) != "shell":
@@ -821,7 +872,7 @@ class OpenCodeAdapter(BaseAdapter):
             sh = self._shell(jid.split("/", 1)[1])  # 404: nothing known, the supervisor decides (lost)
             if sh and sh.get("status") in ENDED_SHELL and isinstance(sh.get("exit"), (int, float)):
                 t = sh.get("time") if isinstance(sh.get("time"), dict) else {}
-                self._ended[jid] = Job(id=jid, agent=self.agent, label=job.label, state=JobState.ENDED,
+                self._ended[jid] = Job(id=jid, agent=self.agent, label=job.label, started=job.started, state=JobState.ENDED,
                                        exit_code=int(sh["exit"]), ended=(t.get("completed") or 0) / 1000.0,
                                        command=job.command)
                 self._known.pop(jid)

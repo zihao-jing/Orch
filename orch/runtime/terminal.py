@@ -62,7 +62,7 @@ class _Module:
         jobs = snap.running_jobs(a.id)
         ends = not a.caps.shares_terminal and (writing or bool(jobs))  # TERM-5: Orch's CLI must close
         if ends and not ev.stop_job:
-            return [C.CommandReply(ev.id, False, TextRef(K.ASK_JOB_TERMINAL, {"agent": a.id, "jobs": [j.label for j in jobs]}),
+            return [C.CommandReply(ev.id, False, TextRef(K.ASK_JOB_TERMINAL, {"agent": a.id, "jobs": [j.label or j.id for j in jobs]}),
                                    choices=({"label": "stop", "set": {"stop_job": True}},))]
         out: List[C.Action] = []
         if ends and jobs:

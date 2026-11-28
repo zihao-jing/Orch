@@ -70,11 +70,22 @@
   // the text of a Orch-worded record: TextRef.shown (added by the server), else nothing
   function shownOf(ref) { return (ref && typeof ref.shown === "string") ? ref.shown : ""; }
 
-  // what a message says: Orch's words around its body, or the body alone
+  // Keep Orch's delivery text separate from the author's words on the dashboard.
+  function messageSections(m) {
+    const body = m.body || "", shown = shownOf(m.text);
+    const note = text => ({ orch: true, text });
+    const authored = { orch: false, text: body };
+    if (!shown || m.text.key === "critic_report") return [authored];
+    if (!body) return [note(shown)];
+    const at = shown.indexOf(body);
+    if (at < 0) return [note(shown), authored];
+    const before = shown.slice(0, at).trim(), after = shown.slice(at + body.length).trim();
+    return [...(before ? [note(before)] : []), authored, ...(after ? [note(after)] : [])];
+  }
   function messageText(m) {
     const w = shownOf(m.text), b = m.body || "";
-    if (!w) return b;
-    return (b && w.indexOf(b) < 0) ? w + "\n\n" + b : w;
+    if (!w || m.text.key === "critic_report") return b;
+    return b && !w.includes(b) ? w + "\n\n" + b : w;
   }
 
   function messageStatus(m) {
@@ -114,8 +125,9 @@
     return { rows: limit > 0 ? list.slice(-limit) : [], remaining: Math.max(0, list.length - limit) };
   }
 
-  function pageQuery({ limit = MESSAGE_PAGE, before = 0, q = "", agent = "", levels = Object.keys(LEVELS), notes = true, off = [] }) {
+  function pageQuery({ limit = MESSAGE_PAGE, before = 0, q = "", agent = "", levels = Object.keys(LEVELS), notes = true, discussions = true, off = [] }) {
     const p = new URLSearchParams({ timeline: "1", limit: String(limit), levels: levels.join(",") || "none", notes: notes ? "1" : "0" });
+    if (!discussions) p.set("discussions", "0");
     if (off.length) p.set("off", off.join(","));
     if (before > 0) p.set("before", String(before));
     if (q.trim()) p.set("q", q.trim());
@@ -177,12 +189,25 @@
     return messageStatus(m);
   }
 
+  function switchStatus(a, snap) {
+    const sw = a.switch;
+    if (!sw) return "";
+    if (sw.step !== "pending") return ({testing: "Testing new model", handover: "Handing over context",
+      opening: "Opening model session", confirming: "Confirming new model"})[sw.step] || "";
+    if (a.stopped_by_user || (a.holds || []).includes("stopped")) return "Switch waiting for agent to resume";
+    if (snap?.terminals?.[a.id] || (a.holds || []).includes("terminal")) return "Switch waiting for terminal release";
+    if (!sw.forced) {
+      if (a.status === "writing" || (a.holds || []).includes("turn")) return "Switch waiting for current turn";
+      if (a.status === "waiting_job" || a.jobs?.length) return "Switch waiting for job";
+    }
+    return "Switch requested";
+  }
+
   // one line about an agent beyond its status
   function agentTags(a, snap) {
     const t = [];
     if (a.stopped_by_user) t.push("stopped by you");
     if (a.retry) t.push("trying again" + (a.retry.until ? " at " + clock(a.retry.until) : ""));
-    if (a.switch) t.push(a.switch.step === "pending" ? "switch pending" : "switching model");
     if (snap && snap.terminals && snap.terminals[a.id]) t.push("terminal open");
     const discussion = snap && (snap.discussions || {})[a.id];
     if (discussion) {
@@ -360,8 +385,8 @@
   }
 
   const api = {
-    STATUS, GATE_KIND, MS_STATUS, NOTE_KEYS, plainName, agentName, clock, stamp, ago, duration, shownOf, messageText,
-    messageStatus, messageTone, isNotice, agentTags, jobStatus, workerActions, sortedMessages, mergeMessages, talkLog,
+    STATUS, GATE_KIND, MS_STATUS, NOTE_KEYS, plainName, agentName, clock, stamp, ago, duration, shownOf, messageSections, messageText,
+    messageStatus, messageTone, isNotice, agentTags, switchStatus, jobStatus, workerActions, sortedMessages, mergeMessages, talkLog,
     openGates, answeredWaiting, gateAnswer, newId, backoff, applyChoice, efforts, markdown, preview,
     progress, LEVELS, MESSAGE_PAGE, LIST_PAGE, messageLevel, latest, pageQuery, shortModel, characterSize,
     messageException, awaitsAnswer, statusHint, groupReplies,

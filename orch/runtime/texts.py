@@ -381,17 +381,17 @@ def _worker_line(t: _Text) -> str:
 def _labels(t: _Text) -> str:
     ids = list(t.get("workers") or [])
     to = " or ".join(f'<message to="{i}">…</message>' for i in ids)
-    return (f"To a worker: {to}. " if ids else "") + ("Plain text goes to me; add <silent/> when nothing in the reply "
-                                                      "needs me, and <done/> when the work I asked for is finished.")
+    return (f"To a worker: {to}. " if ids else "") + ("Use <silent/> while this round’s work is unfinished unless you need me to make a decision or change an instruction. "
+                                                      "Plain text reaches me; add <done/> when the work I asked for is finished and checked.")
 
 
 def _workers(t: _Text) -> str:
     n = len(t.get("workers") or [])
     if n == 0:
-        return "No worker is available at the moment."
+        return "No workers."
     if n == 1:
-        return f"1 worker is available: {t.value('workers')}."
-    return f"{n} workers are available: {t.value('workers')}."
+        return f"1 worker: {t.value('workers')}."
+    return f"{n} workers: {t.value('workers')}."
 
 
 GATE_KINDS = {"question": "a question", "pause": "a pause", "plan": "the plan", "milestone": "a milestone",
@@ -495,6 +495,7 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.REM_WORKER_LINE: _worker_line,
     K.REM_WORKERS: _workers,
     K.REM_LABELS: _labels,
+    K.REM_JOB_UPDATE: "Reply to {worker} only if it needs an answer or a change of direction.",
     K.REM_UNWATCHED: lambda t: t.fill("Nobody watches the runs of {workers}; look yourself when one takes longer than ")
                      + f"{round(t.snap.settings.frozen_after / 60)} minutes.",
     K.REM_GOLDEN_USE: _golden_use,
@@ -504,13 +505,16 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
                                  "preferences and decisions, merge what overlaps, remove what no longer holds.",
     K.REM_GOLDEN_SIZE: lambda t: f"The golden board (`{_board(t)}`) has " + t.fill("{chars} characters; bring it below "
                                                                                     "{limit} by merging and removing."),
+    K.REM_MANAGER_PAUSE: "If work must wait for me, use <pause>what I need to do</pause>.",
+    K.REM_REVIEW_DECISION: "End the review with one decision: <decision>ACCEPT</decision>, "
+                           "<decision>REVISE</decision>, or <decision>PAUSE</decision>.",
     K.REM_MESSAGE_CRITIC: 'Only <message to="critic">…</message> reaches {critic}; write it as its user, about the work '
                           "alone.",
     K.REM_OPEN_GATES: lambda t: "Still waiting for me: " + "; ".join(f"“{_gate(t, g)}”" for g in t.get("gates") or [])
                                 + ". Don't ask again.",
     K.REM_DISCUSSION: "We are in a discussion: write only to me. A message to others is not sent; when I apply the "
                       "discussion, you write them what we agreed.",
-    K.REM_DISCUSSION_OVER: "Our discussion is over and I did not apply it: what you drafted for others was not sent.",
+    K.REM_DISCUSSION_OVER: "Discussion ended. Messages allowed.",
     K.REM_NIGHT: "It is night mode and I am away: decide everything yourself and keep the work moving. Write each question "
                  "anyway, with your choice and why; I look at it later. A question then holds nothing back: write to "
                  "{critic} in the same reply. Pause only if nothing at all can go on without me.",
@@ -518,6 +522,8 @@ TEXTS: Dict[str, Union[str, Callable[[_Text], str]]] = {
     K.REM_CHECKLIST: lambda t: t.fill("{critic}'s checklist is `{path}`." if t.role == Role.MANAGER
                                       else "Keep your steps and checklist in `{path}`."),
     K.REM_ASK_AND_END: "If you need an answer to go on, ask me concisely in plain text and end your turn.",
+    K.REM_DEPENDENT_WORK: "Assign dependent work only when its inputs are ready.",
+    K.REM_CRITIC_SILENT: "Use <silent/> while this round’s work is unfinished unless you need me to make a decision or change an instruction. Place it outside worker messages: </message> <silent/>.",
     K.REM_CRITIC_BOUNDARY: 'Write directly to each worker as its lead, without headings such as "Instructions". '
                            "Give decisions as your own: state what to do and what changed, without mentioning me, "
                            "our conversation, who approved the work, or other workers.",

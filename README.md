@@ -240,7 +240,7 @@ Start the dashboard with `orch run --serve [--open]` or inspect saved runs any t
 | `orch status <target> [--latest]` | List runs under an output folder or config (`--latest` shows only the latest per monitor) |
 | `orch show <target> [-m MONITOR] [--round N] [--turn ID] [--width 90]` | Print rounds and turns of a run, or `--turn` for one turn's full input, output, and stderr |
 | `orch stop <target> [-m MONITOR] [--agents]` | Close Orch for a run (`--agents` also stops the running agents and their jobs) |
-| `orch tell <target> <agent> <message> [-m MONITOR]` | Send a direct message to one agent (pass `-` as message to read from stdin) |
+| `orch tell <target> <agent> <message> [-m MONITOR]` | Send a critic instruction to a worker; replies return to the critic. Use dashboard Talk for human messages. Pass `-` to read stdin. |
 | `orch audit [target] [--monitor MONITOR] [--digest]` | Queue an immediate audit on the running Orch, or `--digest` to print the digest without a model call |
 | `orch terminal [target] [agent] [--monitor MONITOR]` | Open an agent's session (default: manager) in your terminal while Orch holds its messages |
 | `orch report <target> [-m MONITOR]` | Regenerate static HTML reports (`report.html` and `index.html`) |

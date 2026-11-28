@@ -9,7 +9,7 @@ import re
 from typing import Any, List, Optional, Sequence, Tuple
 
 from .contracts import (
-    Action, Agent, BrokenLabel, Chat, CommandReply, Decision, Drop, DropReason, Ending, Event, HoldReason, Hold, Lifecycle,
+    Action, Agent, BrokenLabel, Chat, CriticTell, CommandReply, Decision, Drop, DropReason, Ending, Event, HoldReason, Hold, Lifecycle,
     Message, Problem, Refusal, Reject, ReturnToSender, Role, Send, SendToCritic, Snapshot,
     Tell, TextKey, TextRef, ToUser, Trigger, TurnEnded, TurnStatus, USER, new_id)
 
@@ -109,7 +109,7 @@ def _worker(snap: Snapshot, out: _Out, agent: Agent, turn) -> None:
     elif critic is not None:
         if turn.ending == Ending.INTERMEDIATE:
             key, values = TextKey.WORKER_INTERMEDIATE, {"worker": agent.id,
-                                                       "jobs": [j.label for j in snap.open_jobs(agent.id)]}
+                                                       "jobs": [j.label or j.id for j in snap.open_jobs(agent.id)]}
         else:
             key, values = TextKey.WORKER_FINAL, {"worker": agent.id}
         m = out.add(Send, out.message(agent.id, critic.id, text, key, values, Trigger.WORKER, turn=turn.id))
@@ -213,7 +213,17 @@ def _chat(snap: Snapshot, cmd: Chat) -> List[Action]:
     if a.role in (Role.AUDITOR, Role.MONITOR):
         return _refuse(cmd, Refusal.WRONG_ROLE)
     out = _Out(cmd)
-    out.add(Send, out.message(USER, a.id, cmd.text.strip(), trigger=Trigger.USER_CHAT))
+    if isinstance(cmd, CriticTell):
+        critic = snap.critic
+        if not critic or a.role != Role.WORKER:
+            return _refuse(cmd, Refusal.WRONG_ROLE)
+        if not critic.is_open or snap.drafting(critic.id):
+            return _refuse(cmd, Refusal.NOT_POSSIBLE)
+        m = out.message(critic.id, a.id, cmd.text.strip(), trigger=Trigger.CRITIC)
+        m.via_cli = True
+        out.add(Send, m)
+    else:
+        out.add(Send, out.message(USER, a.id, cmd.text.strip(), trigger=Trigger.USER_CHAT))
     out.actions.append(CommandReply(cmd.id))
     return out.actions
 

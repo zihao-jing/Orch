@@ -221,7 +221,8 @@ Nothing here is implemented yet.
   a draft, including what it was writing when the discussion began.
 - **DISC-2** Incoming messages and job ends enter the conversation at once.
 - **DISC-3** The user applies it: one consolidated message per recipient. Apply waits until the agent's current reply has
-  ended. For the critic, its one reply follows the
+  ended. A successful Apply immediately supersedes every currently open gate, including questions and pauses.
+  It records no individual answer, approves no plan, and advances no milestone. For the critic, its one reply follows the
   normal rules (labelled parts to workers, untagged text to the manager).
 - **DISC-4** Ending without applying drops drafts, never incoming messages.
 - **DISC-5** In a critic discussion nothing it writes reaches the manager.

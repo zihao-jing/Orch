@@ -17,6 +17,7 @@
   const detail = new Map();
   let timeline = { rows: [], remaining: 0, limit: L.MESSAGE_PAGE, busy: false, queued: false };
   let headVersion = "";
+  const applyingTalk = new Map(), sendingTalk = new Set(), acknowledgedTalk = new Map();
   let who = "manager";          // the talk panel's recipient
   let seenSeq = null, modalRefresh = null;
   let goldText = null, auditText = null, auditNotes = null, goldEdit = false, notesEdit = false, lastSide = 0;
@@ -173,7 +174,7 @@
       $("dlg-h" + sfx).textContent = title;
       const close = v => d.close(String(v));
       $("dlg-b" + sfx).replaceChildren(...flat(typeof body === "function" ? body(close) : body));
-      $("dlg-a" + sfx).replaceChildren(...buttons.map(b => h("button", { type: "button", class: b.cls || "", on: { click: () => close(b.value) } }, b.label)));
+      $("dlg-a" + sfx).replaceChildren(...buttons.map(b => h("button", { type: "button", class: b.cls || "", on: { click: () => { if (!b.valid || b.valid()) close(b.value); } } }, b.label)));
       if (!sfx) modalRefresh = refresh || null;
       d.returnValue = "";
       const done = () => {
@@ -196,7 +197,7 @@
   }
 
   // ------------------------------------------------------------------------------------------------ commands
-  async function submit(body, btn) {
+  async function submit(body, btn, batch = false) {
     busy(btn, true);
     try {
       let reply = null;
@@ -208,12 +209,13 @@
           reply = r.ok || j.ok !== undefined ? j : { ok: false, shown: j.error || "Orch did not accept that." };
         } catch (e) { if (i < 3) await sleep(L.backoff(i)); }
       }
-      if (!reply) { toast("Orch cannot be reached. What you typed is kept. Try again."); return null; }
+      if (!reply) { if (!batch) toast("Orch cannot be reached. What you typed is kept. Try again."); return null; }
       if (reply.choices && reply.choices.length) {
         const c = await choose(reply);
         busy(btn, false);
         return c ? submit(L.applyChoice(body, c, L.newId()), btn) : reply;
       }
+      if (batch) return reply; // The batch reports progress and refreshes the board once.
       if (reply.queued) toast("Sent to the Orch that runs this project.");
       else if (reply.shown) toast(reply.shown); else if (reply.ok === false) toast(reply.error || "That did not work.");
       loadState();
@@ -239,12 +241,12 @@
     if (loading) { again = true; return; }
     loading = true;
     try {
-      const j = await getJson("api/state");
+      const j = await getJson("api/state?view=board");
       S = j; offset = (j.now || Date.now() / 1000) - Date.now() / 1000;
       found();
       if (!old) {
         render();
-        const version = JSON.stringify(S.messages);
+        const version = S.message_version ?? JSON.stringify(S.messages);
         if (headVersion !== version) { headVersion = version; loadTimeline(); }
         loadSide(false);
       }
@@ -427,8 +429,9 @@
   const openAgents = new Set((() => { try { return JSON.parse(store.get("orch-team-open") || "[]"); } catch (e) { return []; } })());
   let teamFolded = store.get("orch-team-folded") === "1";
   function agentSummaryState(a) {
+    const switching = L.switchStatus(a, S);
+    if (switching) return switching;
     if (a.status === "failed") return "Failed";
-    if (a.switch && a.switch.step && ["done", "failed"].indexOf(a.switch.step) < 0) return "Switching model";
     if (a.status === "writing") return "Writing";
     if (a.status === "waiting_job") return "Job running";
     if (a.status === "closed") return "Closed";
@@ -460,7 +463,19 @@
       ((a.status === "writing" || a.status === "idle") && jobs.some(j => j.state === "running"));
     return h("span", { class: "dot status-" + a.status + (running ? " job-running" : ""), "aria-hidden": "true" });
   }
-  function agentModel(a) { return a.actual_model || (a.choice && (a.choice.model || a.choice.label)) || ""; }
+  function selectedModel(a) {
+    const c = a.choice || {};
+    return c.model ? [c.provider, c.model].filter(Boolean).join("/") : c.label || "";
+  }
+  function agentModel(a) {
+    return a.actual_model || selectedModel(a);
+  }
+  function modelDescription(a) {
+    const selected = selectedModel(a);
+    if (!a.actual_model) return "Selected model: " + selected;
+    return "Last reported by CLI: " + a.actual_model +
+      (selected && a.actual_model !== selected && a.actual_model !== a.choice?.model ? " · Selected model: " + selected : "");
+  }
   function agentCard(a) {
     const name = nm(a.id), role = ROLE[a.role] || "", status = L.STATUS[a.status] || "", model = agentModel(a);
     const jobs = activeJobs(a.id), job = jobs[jobs.length - 1];
@@ -474,6 +489,7 @@
         store.set("orch-team-open", JSON.stringify(Array.from(openAgents)));
         fold.setAttribute("aria-expanded", String(open));
         panel.hidden = !open;
+        syncTeamCardsButton(agentList());
       } } },
         h("span", { class: "agent-fold-mark", "aria-hidden": "true" }),
         agentStatusDot(a, jobs),
@@ -483,7 +499,7 @@
         a.waiting ? h("span", { class: "agent-count", title: a.waiting + " message(s) wait for " + name }, String(a.waiting)) : null);
     const tags = L.agentTags(a, S), assignment = assignmentText(a);
     panel.append(h("div", { class: "agent-meta" },
-      model ? h("span", { class: "model-name", title: model }, L.shortModel(model)) : null,
+      model ? h("span", { class: "model-name", title: modelDescription(a) }, L.shortModel(model)) : null,
       h("span", { class: "agent-when" }, status)));
     if (tags.length) panel.append(h("div", { class: "agent-line tags" }, tags.join(" · ")));
     if (assignment) panel.append(h("div", { class: "agent-line inline-assignment" },
@@ -499,10 +515,10 @@
       panel);
   }
   function agentDetails(a, assignment, jobs, refresh, close) {
-    const t = nowSrv(), status = L.STATUS[a.status] || "", model = agentModel(a);
+    const t = nowSrv(), status = L.switchStatus(a, S) || L.STATUS[a.status] || "", model = agentModel(a);
     const body = h("div");
     body.append(h("div", { class: "agent-meta" },
-      model ? h("span", { class: "model-name" }, model) : null,
+      model ? h("span", { class: "model-name" }, modelDescription(a)) : null,
       h("span", { class: "agent-when" }, status, (a.last_output || a.writing_since) ? [" · ", lastActivity(a)] : null)));
     const tags = L.agentTags(a, S);
     if (tags.length) body.append(h("div", { class: "agent-line tags" }, tags.join(" · ")));
@@ -584,9 +600,22 @@
     if (type === "WorkerDelete" && !(await confirmBox("Delete " + nm(a.id) + "?", "It cannot be opened again. Its messages stay in the record.", "Delete", "danger"))) return;
     cmd(type, { agent: a.id }, btn);
   }
+  function syncTeamCardsButton(list) {
+    const button = $("teamcards");
+    button.hidden = !list.length;
+    button.textContent = list.every(a => openAgents.has(a.id)) ? "Fold all" : "Expand all";
+  }
+  function toggleTeamCards() {
+    const list = agentList(), expand = list.some(a => !openAgents.has(a.id));
+    for (const a of list) { if (expand) openAgents.add(a.id); else openAgents.delete(a.id); }
+    store.set("orch-team-open", JSON.stringify(Array.from(openAgents)));
+    $("team")._sig = null;
+    renderTeam();
+  }
   function renderTeam() {
     const list = agentList(), t = Math.floor(nowSrv() / 60);
     $("workspace").classList.toggle("team-folded", teamFolded);
+    syncTeamCardsButton(list);
     const fb = $("teamfold");
     fb.setAttribute("aria-expanded", teamFolded ? "false" : "true");
     fb.title = teamFolded ? "Show the team" : "Fold the team into a narrow strip";
@@ -660,7 +689,55 @@
 
 
   // messages
-  const messageFilter = () => ({ q: $("msearch").value, off: [...hiddenWho], notes: $("orch-notes").checked });
+  const messageFilter = () => ({ q: $("msearch").value, off: [...hiddenWho], notes: $("orch-notes").checked,
+    discussions: $("show-discussions").checked });
+
+  // A silent-only turn has no outgoing message. Project its saved final output into
+  // the dashboard; never put a synthetic delivery into the runtime message ledger.
+  let silenceRun, checkedSilence, silentRows;
+  function syncSilentTurns(rows) {
+    if (silenceRun !== S.run.run_dir || !checkedSilence) {
+      silenceRun = S.run.run_dir; checkedSilence = new Set(); silentRows = new Map();
+    }
+    const checked = checkedSilence, records = silentRows;
+    const messages = S.message_version ? rows : [...Object.values(S.messages || {}), ...rows];
+    const sent = new Set(messages.map(m => m.turn).filter(Boolean));
+    const candidates = new Map();
+    for (const m of messages) {
+      if (m.reply_turn && S.agents[m.recipient]?.role === "critic") candidates.set(m.reply_turn, m.recipient);
+    }
+    for (const [agent, t] of Object.entries(S.turns || {})) {
+      if (S.agents[agent]?.role === "critic" && t.status === "ok" && t.reply?.silent) candidates.set(t.id, agent);
+    }
+    for (const [id, agent] of candidates) {
+      const current = S.turns?.[agent];
+      if (S.message_version) {
+        const meta = rows.find(m => m.reply_turn === id && m.silent_reply)?.silent_reply;
+        if (meta) records.set(id, {id: "silent:" + id, turn: id, sender: agent, recipient: "", body: "<silent/>",
+          ended: meta.ended, draft: meta.draft, silentOnly: true, written_by: meta});
+        else if (current?.id === id && current.reply?.silent_only && !sent.has(id)) {
+          records.set(id, {id: "silent:" + id, turn: id, sender: agent, recipient: "", body: "<silent/>",
+            ended: current.ended, draft: current.draft, silentOnly: true});
+        }
+        continue;
+      }
+      if (sent.has(id) || checked.has(id) || (current?.id === id && current.status !== "ok")) continue;
+      checked.add(id);
+      getJson("api/turn?id=" + encodeURIComponent(id)).then(t => {
+        if (t.status === "running") { checked.delete(id); return; }
+        if (t.status !== "ok" || !/^<silent\s*\/>$/.test((t.output || "").trim())) return;
+        const inputs = messages.filter(m => m.reply_turn === id);
+        // Older running servers omit ended_at: the first input was taken at turn start.
+        const started = Math.min(...inputs.map(m => m.taken_at).filter(n => n > 0));
+        const ended = Date.parse(t.ended_at) / 1000 || (current?.id === id && current.ended)
+          || (Number.isFinite(started) ? started + (t.duration_s || 0) : 0);
+        records.set(id, { id: "silent:" + id, turn: id, sender: agent, recipient: "",
+          body: t.output.trim(), ended, silentOnly: true, draft: t.draft ?? (current?.id === id ? current.draft : inputs.some(m => m.discussion_chat)),
+          written_by: { model: t.model, input_chars: Array.from(t.input || "").length, output_chars: Array.from(t.output).length } });
+        if (!old && checked === checkedSilence) renderMessages();
+      }).catch(() => checked.delete(id));
+    }
+  }
 
   function syncWriting(reconnect = false) {
     const current = new Set();
@@ -683,7 +760,7 @@
       } else if (writing.has(a.id)) {
         finishWriting(reply);
       }
-      reply.model = a.actual_model || (a.choice || {}).label;
+      reply.model = turn.reported_model || "";
     }
     for (const id of turnActivity.keys()) {
       if (current.has(id)) continue;
@@ -865,33 +942,35 @@
   }
 
   const toNames = (named, list) => list.map(r => L.agentName(named, r)).join(", ");
+  function orchBadge() {
+    return h("span", { class: "orch-badge", title: "Added by Orch" }, "Orch");
+  }
+  function messageContent(m, renderText = md) {
+    return L.messageSections(m).map(section => section.orch
+      ? h("div", { class: "orch-added" }, orchBadge(), md(section.text))
+      : renderText(section.text));
+  }
   function messageBody(m, run, named) {
-    const meta = m.written_by || {};
-    const sized = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
-    const facts = [meta.model ? "Written by " + L.shortModel(meta.model) : "",
-      sized ? L.characterSize(meta.input_chars) + " characters in, " + L.characterSize(meta.output_chars) + " out" : ""].filter(Boolean);
     const renderText = !run && m.turn && Object.values(S.gates || {}).some(g => g.kind === "milestone" && g.source_turn === m.turn)
       ? reviewText : md;
     // one output that wrote several messages: each with whom it went to and how it stands
     const texts = m.parts ? m.parts.map(p => h("div", { class: "part" },
         h("div", { class: "part-head" }, h("span", {}, "→ " + toNames(named, [p.recipient].concat(p.also || []))),
           h("span", { class: "st " + L.messageTone(p) + (L.messageException(p) ? "" : " plain") }, L.messageException(p) || L.messageStatus(p))),
-        renderText(L.messageText(p))))
-      : [renderText(L.messageText(m))];
-    const fb = h("div", { class: "fb" }, texts,
-      facts.length ? h("p", { class: "detail-hint", title: meta.model || "" }, facts.join(" · ")) : null);
+        messageContent(p, renderText)))
+      : messageContent(m, renderText);
+    const fb = h("div", { class: "fb" }, texts);
     if (m.turn) {
       const getTurn = () => cached("api/turn?id=" + encodeURIComponent(m.turn) + (run ? "&run=" + encodeURIComponent(run) : ""));
       const sender = L.agentName(named, m.sender);
-      const possessive = ((named[m.sender] || {}).display || "").startsWith("the ") ? "the " + sender.toLowerCase() + "'s" : sender + "'s";
-      fb.append(fold(m.id + ":input", "Input to " + possessive + " turn that wrote this", async () => {
+      fb.append(fold(m.id + ":input", "Input", async () => {
         const turn = await getTurn();
         return [h("pre", {}, turn.input || "No input was recorded."),
           fold(m.id + ":system", "System instructions for " + sender, () => h("pre", {}, turn.system_prompt || "No instructions were recorded."))];
-      }), fold(m.id + ":output", possessive[0].toUpperCase() + possessive.slice(1) + " whole reply", async () => {
+      }), fold(m.id + ":output", "Whole Output", async () => {
         const turn = await getTurn();
         return md(turn.output || turn.text || "Nothing was recorded.");
-      }, "Everything that turn wrote, including text sent in other messages."));
+      }));
     }
     return fb;
   }
@@ -908,19 +987,19 @@
       .sort((a, b) => rank(a) - rank(b));
     const allWorkers = to.length > 1 && to.every(r => (named[r] || {}).role === "worker");
     const toText = allWorkers ? to.length + " workers" : to.length > 2 ? L.agentName(named, to[0]) + " +" + (to.length - 1) : toNames(named, to);
-    const fullRoute = L.agentName(named, m.sender) + " → " + toNames(named, to) + (parts.length > 1 ? " (" + parts.length + " messages)" : "");
+    const fullRoute = m.silentOnly ? "No message sent" : L.agentName(named, m.sender) + " → " + toNames(named, to) + (parts.length > 1 ? " (" + parts.length + " messages)" : "");
     const size = Number.isFinite(meta.input_chars) && Number.isFinite(meta.output_chars);
     const d = h("details", { class: cls.filter(Boolean).join(" "), data: { message: m.id } },
       h("summary", { title: [fullRoute, hint].filter(Boolean).join(" · ") },
         h("span", { class: "tm", title: m.ended ? "Finished" : "Sent" }, L.stamp(m.ended || m.created, nowSrv())),
-        h("span", { class: "route" }, h("b", {}, L.agentName(named, m.sender)), h("span", { class: "to" }, " → " + toText)),
+        h("span", { class: "route" }, h("b", {}, L.agentName(named, m.sender)), m.via_cli ? h("small", { class: "mute", title: "Sent using orch tell" }, " · CLI") : null, m.silentOnly ? null : h("span", { class: "to" }, " → " + toText)),
         h("span", { class: "pv" }, parts.length > 1 ? h("span", { class: "count", title: parts.length + " messages from this output" }, parts.length) : null,
-          L.preview(L.messageText(m))),
-        h("span", { class: "st-slot" }, exception || L.messageStatus(odd) ? h("span", { class: "st " + L.messageTone(odd) + (exception ? "" : " plain"),
+          !m.body && L.messageSections(m)[0].orch ? orchBadge() : null, L.preview(m.body || L.messageText(m))),
+        h("span", { class: "st-slot" }, m.silentOnly ? h("span", { class: "st plain" }, "Not sent") : exception || L.messageStatus(odd) ? h("span", { class: "st " + L.messageTone(odd) + (exception ? "" : " plain"),
           title: hint }, exception || L.messageStatus(odd)) : null),
         h("span", { class: "by", title: meta.model ? "Written by " + meta.model : "" }, meta.model ? L.shortModel(meta.model) : ""),
-        size && meta.input_chars > 30000 ? h("span", { class: "sz large", title: meta.input_chars.toLocaleString() +
-          " input characters: more than 30,000" }, L.characterSize(meta.input_chars) + " in") : null));
+        size ? h("span", { class: meta.input_chars > 30000 ? "sz large" : "sz", title: "Input -> output characters" },
+          L.characterSize(meta.input_chars) + " -> " + L.characterSize(meta.output_chars) + " char") : null));
     function expand() {
       if (!d._body) { d._body = messageBody(m, run, named); d.append(d._body); }
     }
@@ -948,23 +1027,40 @@
 
   function renderMessages() {
     const who = [["user", "You", "user"]].concat(agentList().map(a => [a.id, nm(a.id), a.role]));
-    paint($("who"), JSON.stringify([who, [...hiddenWho]]), () => who.map(([id, name, role]) => h("button", { type: "button",
-      class: "level-toggle who-" + role, "aria-pressed": String(!hiddenWho.has(id)),
-      title: (id === "user" ? "Your messages and Orch's notes to you" : "What " + name + " wrote, and Orch's messages to it"),
-      on: { click: () => {
-        if (hiddenWho.has(id)) hiddenWho.delete(id); else hiddenWho.add(id);
+    paint($("who"), JSON.stringify([who, [...hiddenWho]]), () => {
+      const allOn = who.every(([id]) => !hiddenWho.has(id));
+      function save() {
         store.set("orch-message-hidden", JSON.stringify([...hiddenWho]));
-        $("who")._sig = null; renderMessages(); resetTimeline();
-      } } }, name)));
+        resetTimeline();
+      }
+      return [...who.map(([id, name, role]) => h("button", { type: "button",
+        class: "level-toggle who-" + role, "aria-pressed": String(!hiddenWho.has(id)),
+        title: (id === "user" ? "Your messages and Orch's notes to you" : "What " + name + " wrote, and Orch's messages to it"),
+        on: { click: () => {
+          if (hiddenWho.has(id)) hiddenWho.delete(id); else hiddenWho.add(id);
+          save();
+        } } }, name)),
+        h("button", { type: "button", class: "link filter-all", title: "Toggle all sender filters",
+          on: { click: () => {
+            who.forEach(([id]) => { if (allOn) hiddenWho.add(id); else hiddenWho.delete(id); });
+            save();
+          } } }, allOn ? "Deselect all" : "Select all")];
+    });
     const { rows, remaining, busy, ready } = timeline;
-    const shown = rows.length, total = shown + remaining;
+    syncSilentTurns(rows);
+    const search = $("msearch").value.trim().toLowerCase();
+    const oldest = remaining && rows.length ? rows[0].ended || rows[0].created : 0;
+    const silent = [...silentRows.values()].filter(m => m.ended >= oldest && !hiddenWho.has(m.sender)
+      && (!m.draft || $("show-discussions").checked) && (!search || m.body.toLowerCase().includes(search)));
+    const shown = rows.length + silent.length, total = shown + remaining;
     $("message-pages").hidden = remaining <= 0;
     $("older").disabled = $("show-all").disabled = busy;
     $("show-all").hidden = remaining <= L.MESSAGE_PAGE;
     $("remaining").textContent = remaining + " older";
     $("message-count").textContent = ready ? (remaining ? shown + " of " + total : shown + (shown === 1 ? " message" : " messages")) : "Loading…";
     // the newest on top; older pages load below
-    const stored = L.groupReplies(rows.slice().reverse());
+    const stored = L.groupReplies(rows.slice().reverse()).concat(silent)
+      .sort((a, b) => (b.ended || b.created || 0) - (a.ended || a.created || 0));
     for (const m of stored) {
       const reply = writing.get(m.sender);
       if (reply && reply.turn === m.turn) {
@@ -980,7 +1076,7 @@
     const matches = text => !q || String(text || "").toLowerCase().includes(q);
     const extra = [];
     for (const reply of writing.values()) {
-      if (hiddenWho.has(reply.sender)) continue;
+      if (hiddenWho.has(reply.sender) || (!$("show-discussions").checked && S.turns?.[reply.sender]?.draft)) continue;
       if (matches(reply.body) || matches(reply.input) || reply.toolLines.some(matches)) extra.push(reply);
     }
     if (!ready && !extra.length) return;
@@ -1010,11 +1106,22 @@
     renderMessages();
     try {
       const before = olderCount && view.rows.length ? view.rows[0].seq : 0;
-      const result = await requestTimeline(messageFilter(), olderCount || view.limit, before);
+      const result = await requestTimeline(messageFilter(), olderCount || L.MESSAGE_PAGE, before);
       if (timeline !== view || old) return;
-      view.rows = before ? [...result.rows, ...view.rows] : result.rows;
-      view.remaining = result.remaining;
-      if (olderCount) view.limit += olderCount;
+      if (before) {
+        view.rows = [...result.rows, ...view.rows];
+        view.remaining = result.remaining;
+        view.limit = view.rows.length;
+      } else {
+        // Keep previously opened pages if the new head overlaps; a disconnected
+        // window starts over rather than silently skipping intervening messages.
+        const first = result.rows[0]?.id;
+        const overlap = view.rows.findIndex(m => m.id === first);
+        const ids = new Set(result.rows.map(m => m.id));
+        const kept = overlap < 0 || !result.remaining ? [] : view.rows.slice(0, overlap).filter(m => !ids.has(m.id));
+        view.rows = [...kept, ...result.rows].slice(-view.limit);
+        view.remaining = result.remaining + result.rows.length - view.rows.length;
+      }
       view.ready = true;
     } catch (e) { if (timeline === view && !old) toast("Could not load messages."); }
     finally {
@@ -1035,10 +1142,22 @@
   }
 
   function wireFilters() {
-    $("orch-notes").checked = store.get("orch-message-notes") !== "0";
-    $("orch-notes").addEventListener("change", e => {
-      store.set("orch-message-notes", e.target.checked ? "1" : "0");
-      resetTimeline();
+    const options = [["orch-notes", "orch-message-notes"], ["show-discussions", "orch-message-discussions"]];
+    const toggle = $("message-types-all");
+    const allOn = () => options.every(([id]) => $(id).checked);
+    const syncToggle = () => { toggle.textContent = allOn() ? "Deselect all" : "Select all"; };
+    for (const [id, key] of options) {
+      $(id).checked = store.get(key) !== "0";
+      $(id).addEventListener("change", e => {
+        store.set(key, e.target.checked ? "1" : "0");
+        syncToggle(); resetTimeline();
+      });
+    }
+    syncToggle();
+    toggle.addEventListener("click", () => {
+      const on = !allOn();
+      for (const [id, key] of options) { $(id).checked = on; store.set(key, on ? "1" : "0"); }
+      syncToggle(); resetTimeline();
     });
     $("msearch").value = store.get("orch-message-search") || "";
     let timer = 0;
@@ -1064,12 +1183,44 @@
     $("talkin").focus();
   }
   function closeTalk() { $("talk").hidden = true; $("talkbtn").setAttribute("aria-expanded", "false"); $("talkbtn").focus(); }
-  function markSeen() { const l = messages(); if (l.length) { seenSeq = l[l.length - 1].seq; store.set("orch-seen", String(seenSeq)); } renderBadge(); }
+  function latestSeq() { return S.latest_seq ?? messages().at(-1)?.seq ?? 0; }
+  function markSeen() { if (S) { seenSeq = latestSeq(); store.set("orch-seen", String(seenSeq)); } renderBadge(); }
   function renderBadge() {
     if (!S) return;
-    if (seenSeq === null) { const v = store.get("orch-seen"); const l = messages(); seenSeq = v !== null ? Number(v) : (l.length ? l[l.length - 1].seq : 0); }
-    const n = messages().filter(m => m.recipient === "user" && m.seq > seenSeq && m.sender !== "orch").length;
+    if (seenSeq === null) { const v = store.get("orch-seen"); seenSeq = v !== null ? Number(v) : latestSeq(); }
+    const n = S.inbox_seqs ? S.inbox_seqs.filter(seq => seq > seenSeq).length : messages().filter(m => m.recipient === "user" && m.seq > seenSeq && m.sender !== "orch").length;
     paint($("talkbadge"), String(n) + $("talk").hidden, () => n && $("talk").hidden ? h("span", { class: "badge" }, String(n)) : []);
+  }
+  let talkPage;
+  async function fetchTalk(view, older = false) {
+    if (view.busy) return;
+    view.busy = true;
+    const version = S.message_version;
+    const box = $("talklog"), height = box.scrollHeight, top = box.scrollTop;
+    try {
+      const before = older ? view.rows[0]?.seq : 0;
+      const page = await getJson("api/messages?" + new URLSearchParams({talk: view.who, limit: L.LIST_PAGE, before}));
+      if (talkPage !== view) return;
+      const head = page.messages;
+      const overlap = view.rows.findIndex(m => m.id === head[0]?.id);
+      if (older) {
+        view.rows = [...head, ...view.rows]; view.more = page.more;
+        view.limit = Math.max(L.LIST_PAGE, view.rows.length);
+      } else {
+        const merged = page.more && overlap >= 0 ? [...view.rows.slice(0, overlap), ...head] : head;
+        view.more = merged.length > view.limit || (page.more && (overlap <= 0 || view.more));
+        view.rows = merged.slice(-view.limit);
+      }
+      if (!older) view.version = version;
+      view.error = false;
+    } catch (e) { view.error = true; }
+    finally {
+      view.busy = false;
+      if (view === talkPage && !$("talk").hidden && who === view.who) {
+        renderTalk();
+        if (older) box.scrollTop = top + box.scrollHeight - height;
+      }
+    }
   }
   function renderTalk(force) {
     const ids = talkable();
@@ -1081,14 +1232,22 @@
     if ($("talk").hidden) return;
     const a = S.agents[who] || {}, disc = S.discussions[who];
     const mgrId = Object.values(S.agents).find(x => x.role === "manager");
-    const all = L.talkLog(messages(), who, mgrId && mgrId.id);
+    const paged = !!S.message_version;
+    if (paged && (talkPage?.who !== who || talkPage.run !== S.run.id)) {
+      talkPage = {who, run: S.run.id, rows: [], more: false, limit: L.LIST_PAGE};
+    }
+    if (paged && talkPage.version !== S.message_version && !talkPage.error) fetchTalk(talkPage);
+    const all = paged ? talkPage.rows : L.talkLog(messages(), who, mgrId && mgrId.id);
     const talkKey = "talk-history:" + who;
-    const { rows: log, remaining } = L.latest(all, listLimit(talkKey));
+    const { rows: log, remaining } = paged ? {rows: all, remaining: talkPage.more} : L.latest(all, listLimit(talkKey));
     const current = writing.get(who);
     const live = current && !all.some(m => m.sender === who && m.turn === current.turn) ? current : null;
-    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), remaining, who, !!disc, disc && disc.phase, live?.id, live?.model]);
+    const sig = JSON.stringify([log.map(m => [m.id, m.status, m.drop]), remaining, paged && !!talkPage.error, paged && !talkPage.version, who, !!disc, disc && disc.phase, live?.id, live?.model]);
     const box = $("talklog"), near = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-    const changed = paint(box, sig, () => log.length || live ? [listMore(talkKey, remaining, () => {
+    const changed = paint(box, sig, () => log.length || live || (paged && talkPage.error) ? [paged ?
+      (remaining || talkPage.error ? h("button", {type: "button", class: "link more-list", on: {click: () => {
+        const more = !talkPage.error; talkPage.error = false; fetchTalk(talkPage, more);
+      }}}, talkPage.error ? "Retry" : "Show more") : null) : listMore(talkKey, remaining, () => {
       const height = box.scrollHeight, top = box.scrollTop;
       renderTalk();
       box.scrollTop = top + box.scrollHeight - height;
@@ -1096,8 +1255,8 @@
       const me = m.sender === "user";
       return h("div", { class: "cm" + (me ? " me" : "") + (L.isNotice(m) ? " note" : "") },
         h("div", { class: "w" }, (me ? "You" : nm(m.sender)) + " - " + L.stamp(m.created, nowSrv()) + (me ? " - " + L.messageStatus(m) : "")),
-        h("div", { class: "b" }, md(L.messageText(m))));
-    }), live ? writingRow(live, live.talkView) : null] : h("p", { class: "empty" }, "Nothing yet. Write below."));
+        h("div", { class: "b" }, messageContent(m)));
+    }), live ? writingRow(live, live.talkView) : null] : h("p", { class: "empty" }, paged && talkPage.busy ? "Loading…" : "Nothing yet. Write below."));
     if (force && live && !changed) {
       live.talkView.paintInput();
       live.talkView.paint();
@@ -1107,70 +1266,138 @@
     if (changed && (near || fresh)) box.scrollTop = box.scrollHeight;
     if (fresh) setTimeout(() => { box.scrollTop = box.scrollHeight; }, 0);   // again once the window is laid out
     $("talk-h").textContent = "Talk to";
+    if (applyingTalk.has(who) && (!disc || disc.started !== applyingTalk.get(who) || disc.phase !== "open")) applyingTalk.delete(who);
+    const applying = applyingTalk.has(who) || disc?.phase === "applying";
+    const sending = sendingTalk.has(who);
+    busy($("talksend"), sending);
+    $("talksend").textContent = sending ? "Sending…" : "Send";
+    const latest = all.filter(m => m.sender === "user").at(-1);
+    const ack = acknowledgedTalk.get(who);
+    if (ack !== undefined && latest && latest.seq > ack) acknowledgedTalk.delete(who);
+    const waiting = latest && !latest.drop && ["waiting", "delivered"].includes(latest.status);
+    const status = sending ? "" : acknowledgedTalk.has(who) ? "Sent. Waiting for " + nm(who) + "…"
+      : waiting && !live ? (latest.holds?.length ? L.messageStatus(latest) : "Waiting for " + nm(who) + "…") : "";
+    if ($("talkstatus").textContent !== status) $("talkstatus").textContent = status;
     const isLead = a.role === "manager" || a.role === "critic";
-    paint($("talkacts"), JSON.stringify([isLead, !!disc, disc && disc.phase, who, S.run && S.run.project]), () => [
-      isLead && disc ? [h("button", { type: "button", class: "sm ok", on: { click: applyDiscussion } }, "Apply discussion"),
-        h("button", { type: "button", class: "sm", on: { click: endDiscussion } }, "End without applying")] : null,
+    paint($("talkacts"), JSON.stringify([isLead, !!disc, applying, who, S.run && S.run.project]), () => [
+      isLead && disc ? [h("button", { type: "button", class: "sm ok", disabled: applying, "aria-busy": String(applying), on: { click: applyDiscussion } }, applying ? "Applying…" : "Apply discussion"),
+        h("button", { type: "button", class: "sm", disabled: applying, on: { click: endDiscussion } }, "End without applying")] : null,
       isLead && !disc ? h("button", { type: "button", class: "sm", title: "Messages to other agents wait until you apply the discussion", on: { click: act("DiscussionStart", { agent: who }) } }, "Discuss") : null,
       a.id && (isLead || a.role === "worker") ? terminalLink(a) : null,
     ]);
     paint($("talkinfo"), JSON.stringify([!!disc, disc && disc.phase, who]), () =>
-      disc ? h("div", { class: "banner info" }, disc.phase === "applying" ? "Applying the discussion. The agent is answering."
+      disc ? h("div", { class: "banner info" }, disc.phase === "applying" ? "Applying the discussion. Waiting for the agent to finish."
         : "A discussion is open. What " + nm(who) + " writes to others is a draft until you apply it.") : []);
   }
   async function applyDiscussion() {
-    const t = draft("apply:" + who, "textarea", { rows: 3, "aria-label": "Your words with it" });
-    const v = await modal("Apply the discussion", [h("p", {}, "The agent sends what you decided. You can add a few words."), t], [{ label: "Cancel", value: false }, { label: "Apply", value: true, cls: "ok" }]);
-    if (v) { const r = await cmd("DiscussionApply", { agent: who, text: t.value.trim() }); if (r && r.ok) clearDraft("apply:" + who); }
+    const agent = who, disc = S.discussions[agent];
+    if (!disc || disc.phase !== "open" || applyingTalk.has(agent)) return;
+    const t = draft("apply:" + agent, "textarea", { rows: 3, "aria-label": "Your words with it" });
+    const v = await modal("Apply the discussion", [h("p", {}, "Apply what you decided and close all currently open gates. This does not approve a plan or milestone. You can add a few words."), t], [{ label: "Cancel", value: false }, { label: "Apply", value: true, cls: "ok" }]);
+    if (!v || S.discussions[agent]?.started !== disc.started || S.discussions[agent]?.phase !== "open" || applyingTalk.has(agent)) return;
+    applyingTalk.set(agent, disc.started);
+    renderTalk();
+    const r = await cmd("DiscussionApply", { agent, text: t.value.trim() });
+    if (r?.ok) clearDraft("apply:" + agent);
+    else applyingTalk.delete(agent);
+    renderTalk();
   }
   async function endDiscussion() {
     if (await confirmBox("End the discussion?", "Drafts are dropped. Messages that came in stay.", "End it")) cmd("DiscussionEnd", { agent: who });
   }
   async function sendTalk() {
-    const t = $("talkin").value.trim();
-    if (!t) return;
-    const r = await cmd("Chat", { agent: who, text: t }, $("talksend"));
-    if (r && r.ok !== false) { clearDraft("talk:" + who); $("talkin").value = ""; }
+    const agent = who, input = $("talkin"), value = input.value, text = value.trim();
+    if (!text || sendingTalk.has(agent)) return;
+    const previous = latestSeq();
+    sendingTalk.add(agent);
+    renderTalk();
+    try {
+      const r = await cmd("Chat", { agent, text });
+      if (r?.ok) {
+        acknowledgedTalk.set(agent, previous);
+        if (drafts["talk:" + agent] === value) clearDraft("talk:" + agent);
+        if (who === agent && input.value === value) input.value = "";
+      }
+    } finally { sendingTalk.delete(agent); renderTalk(); }
   }
 
   // model window
-  // a new worker: like the first one, or on a model of the catalog
   async function addWorker() {
+    const trigger = $("addworker");
+    if (trigger.disabled) return;
     const cat = S.catalog || [], like = agentList().find(a => a.role === "worker" && a.lifecycle !== "deleted");
-    const likeModel = like ? L.shortModel(like.actual_model || like.choice.model || like.choice.label || "") : "";
-    const msel = h("select", { "aria-label": "Model" }, [h("option", { value: "" }, "Same as " + (like ? nm(like.id) : "the first worker") + (likeModel ? " (" + likeModel + ")" : ""))]
-      .concat(cat.map(m => h("option", { value: m.id }, m.label || m.model))));
-    const effWrap = h("div", { class: "field" });
-    const fillEff = () => {
-      const ef = msel.value ? L.efforts(cat, msel.value) : [];
-      const def = (cat.find(m => m.id === msel.value) || {}).default_effort;
-      const es = h("select", { "aria-label": "Effort" }, ef.map(e => h("option", { value: e }, e)));
-      if (def && ef.indexOf(def) >= 0) es.value = def;
-      effWrap.replaceChildren(...(ef.length ? [h("label", {}, "Effort"), es] : []));
-    };
-    msel.addEventListener("change", fillEff);
-    fillEff();
-    const body = h("div", {}, h("div", { class: "field" }, h("label", {}, "Model"), msel), effWrap,
-      cat.length ? null : h("p", { class: "mute small" }, "No other models are listed, so it starts like the first worker."));
-    const v = await modal("Add a worker", body, [{ label: "Add worker", value: "add", cls: "pri" }, { label: "Cancel", value: "" }]);
-    if (v !== "add") return;
-    const eff = effWrap.querySelector("select");
-    cmd("WorkerAdd", msel.value ? { model_id: msel.value, effort: eff ? eff.value : "" } : {}, $("addworker"));
+    const likeModel = like ? L.shortModel(selectedModel(like)) : "";
+    const same = "Same as " + (like ? nm(like.id) : "the first worker") + (likeModel ? " (" + likeModel + ")" : "");
+    const list = h("div", { class: "worker-batches" }), rows = [];
+    const field = (label, control) => h("label", { class: "batch-field" }, label, control);
+    function addRow() {
+      const model = h("select", { "aria-label": "Model" }, h("option", { value: "" }, same),
+        cat.map(m => h("option", { value: m.id }, m.label || m.model)));
+      const count = h("input", { type: "number", min: 1, max: Number.MAX_SAFE_INTEGER, step: 1, value: "1", required: true });
+      const effort = h("select", { "aria-label": "Effort" }), ef = field("Effort", effort);
+      function updateEffort() {
+        const options = L.efforts(cat, model.value), def = cat.find(m => m.id === model.value)?.default_effort;
+        effort.replaceChildren(...options.map(e => h("option", { value: e }, e)));
+        if (def && options.includes(def)) effort.value = def;
+        ef.hidden = !options.length;
+      }
+      model.addEventListener("change", updateEffort);
+      updateEffort();
+      const remove = h("button", { type: "button", class: "link", on: { click: () => {
+        rows.splice(rows.indexOf(row), 1); el.remove(); rows[0].remove.hidden = rows.length === 1;
+      } } }, "Remove");
+      const el = h("div", { class: "worker-batch" }, field("Model", model), field("Count", count), ef, remove);
+      const row = { model, count, effort, remove };
+      rows.push(row); list.append(el);
+      rows[0].remove.hidden = rows.length === 1;
+      if (rows.length > 1) model.focus();
+    }
+    addRow();
+    const more = h("button", { type: "button", class: "link", on: { click: addRow } }, "Add another batch");
+    const body = h("div", {}, list, more);
+    const result = await modal("Add workers", body, [{ label: "Add workers", value: "add", cls: "pri",
+      valid: () => rows.every(({ count }) => {
+        if (Number.isSafeInteger(Number(count.value)) && Number(count.value) > 0) return true;
+        count.focus(); count.reportValidity(); return false;
+      }) }, { label: "Cancel", value: "" }]);
+    if (result !== "add") return;
+    const total = rows.reduce((n, r) => n + Number(r.count.value), 0);
+    let sent = 0, queued = false;
+    busy(trigger, true);
+    try {
+      for (const { model, count, effort } of rows) {
+        for (let i = 0; i < Number(count.value); i++) {
+          trigger.textContent = "Adding " + (sent + 1) + " of " + total + "…";
+          const reply = await submit({ type: "WorkerAdd", id: L.newId(), like: like?.id || "",
+            model_id: model.value, effort: model.value && effort.children.length ? effort.value : "" }, null, true);
+          if (!reply?.ok) {
+            toast(sent + " of " + total + " requests accepted. " +
+              (reply?.shown || reply?.error || "Could not confirm the next worker. Check the team before retrying."));
+            return;
+          }
+          sent++; queued ||= !!reply.queued;
+        }
+      }
+      toast(queued ? "Submitted requests for " + total + " workers." : "Added " + total + (total === 1 ? " worker." : " workers."));
+    } finally { trigger.textContent = "Add worker"; busy(trigger, false); loadState(); }
   }
   function openModel(id) {
     const build = () => {
       const a = S.agents[id]; if (!a) return h("p", {}, "This agent is gone.");
       const k = "model:" + id + ":", cat = S.catalog || [];
-      const current = a.actual_model || a.choice.model || a.choice.label || "";
-      const body = [h("p", {}, h("b", {}, "Current model "), h("span", { title: current }, L.shortModel(current)),
-        a.choice.effort ? " · " + a.choice.effort + " effort" : "")];
+      const current = agentModel(a);
+      const matches = c => [c.model, [c.provider, c.model].filter(Boolean).join("/")].includes(current);
+      const confirmed = !a.actual_model || matches(a.choice);
+      const active = confirmed ? a.choice : cat.find(c => c.backend === a.choice.backend && matches(c));
+      const body = [h("p", {}, h("b", {}, "Current model "), h("span", { title: current }, current))];
       if (a.switch) {
-        body.push(h("div", { class: "banner note" }, h("div", { class: "t" }, (a.switch.step === "pending" ? "Switch pending to " : "Switching to ") + (a.switch.target.label || "the new model") +
-          (a.switch.step === "pending" ? ". It happens when the agent is idle." : ".") + (a.switch.error ? " " + a.switch.error : "")),
-          a.switch.step === "pending" ? h("button", { type: "button", class: "sm", on: { click: act("ForceSwitch", { agent: id }) } }, "Switch now") : null));
+        const status = L.switchStatus(a, S);
+        body.push(h("div", { class: "banner note" }, h("div", { class: "t" }, status + ": " + (a.switch.target.label || "the new model") +
+          (a.switch.error ? " · " + a.switch.error : "")),
+          a.switch.step === "pending" && !a.switch.forced ? h("button", { type: "button", class: "sm", on: { click: act("ForceSwitch", { agent: id }) } }, "Switch now") : null));
       }
       if (cat.length) {
-        const msel = draftSelect(k + "model", cat.map(m => [m.id, m.label || m.model]), a.choice.model_id);
+        const msel = draftSelect(k + "model", cat.map(m => [m.id, m.label || m.model]), active?.model_id || active?.id || "");
         const effWrap = h("div", { class: "field" });
         const fillEff = () => {
           const ef = L.efforts(cat, msel.value);
@@ -1178,14 +1405,17 @@
         };
         msel.addEventListener("change", () => { delete drafts[k + "effort"]; fillEff(); });
         fillEff();
-        body.push(h("div", { class: "field" }, h("label", {}, "Model"), msel), effWrap,
+        body.push(h("div", { class: "field" }, h("label", {}, "Switch to"), msel), effWrap,
           h("div", { class: "field" }, draftCheck(k + "force", "Switch now (current work and jobs stop)")),
           h("button", { type: "button", class: "pri", on: { click: async ev => { const r = await cmd("ChooseModel", { agent: id, model_id: msel.value, effort: (effWrap.querySelector("select") || {}).value || "", force: !!drafts[k + "force"] }, ev.currentTarget); if (r && r.ok) { ["model", "effort", "force"].forEach(x => delete drafts[k + x]); saveDrafts(); refresh(); } } } }, "Switch"));
       } else body.push(h("p", { class: "mute" }, "No models are listed yet."));
       if (a.choices.length > 1 || a.choice.name) {
         body.push(h("h3", { style: "margin-top:14px" }, "Backups"));
+        const activeOption = confirmed ? a.choices.find(c =>
+          ["backend", "provider", "model", "effort", "name"].every(key => (c[key] || "") === (a.choice[key] || ""))) :
+          a.choices.find(c => c.backend === a.choice.backend && matches(c));
         a.choices.forEach(c => {
-          const cur = ["backend", "provider", "model", "effort", "name"].every(key => (c[key] || "") === (a.choice[key] || ""));
+          const cur = c === activeOption;
           const name = c.label || L.shortModel(c.model), source = [c.backend, c.provider].filter(Boolean).join(" / ");
           body.push(h("div", { class: "opt" + (cur ? " cur" : "") },
             h("span", { class: "grow", title: c.model }, c.name ? name : "Main · " + name, source ? h("small", { class: "mute model-source" }, source) : null),
@@ -1196,7 +1426,7 @@
       return body;
     };
     const holder = h("div");
-    const refresh = () => paint(holder, JSON.stringify([S.agents[id], S.catalog]), build);
+    const refresh = () => paint(holder, JSON.stringify([S.agents[id], S.catalog, !!S.terminals?.[id]]), build);
     modal("Model of " + nm(id), holder, [{ label: "Close", value: true }], refresh);
     refresh();
   }
@@ -1280,7 +1510,7 @@
     if (typeof v === "string" && /^run\d+$/.test(v)) viewOld(list[Number(v.slice(3))]);
   }
   async function viewOld(r) {
-    try { old = await getJson("api/run?id=" + encodeURIComponent(r.id)); } catch (e) { toast("Could not open that run."); return; }
+    try { old = await getJson("api/run?id=" + encodeURIComponent(r.id) + "&limit=" + L.LIST_PAGE); } catch (e) { toast("Could not open that run."); return; }
     pages.delete("old-messages");
     renderOld(old, r);
   }
@@ -1293,7 +1523,7 @@
         render(); loadTimeline();
       } } }, "Back to the current run"));
     $("needs").hidden = true;
-    ["header-actions", "message-filters", "resources", "changems", "addworker", "notices", "message-pages"].forEach(id => { $(id).hidden = true; });
+    ["header-actions", "message-filters", "resources", "changems", "addworker", "teamcards", "notices", "message-pages"].forEach(id => { $(id).hidden = true; });
     $("title").textContent = r.project || "Earlier run";
     $("runstate").textContent = "Read only";
     const snapshotAgents = j.agents && !Array.isArray(j.agents);
@@ -1305,20 +1535,55 @@
       h("h3", {}, snapshotAgents ? L.agentName(j.agents, a.id) : L.plainName(a.called || a.name)),
       h("span", { class: "mute small" }, ROLE[a.role === "verifier" ? "critic" : a.role] || a.role || ""))));
     paint($("progress"), "old" + r.id, () => (j.milestones || j.tl_groups || []).map(g => h("div", { class: "line" }, g.title || g.label || g.key)));
-    const { rows, remaining } = L.latest(items, listLimit("old-messages"));
-    $("message-count").textContent = rows.length + " of " + items.length;
+    const paged = j.remaining !== undefined && !!j.messages;
+    const { rows, remaining } = paged ? {rows: items.slice(), remaining: j.remaining} : L.latest(items, listLimit("old-messages"));
+    $("message-count").textContent = rows.length + " of " + (paged ? rows.length + remaining : items.length);
     paint($("messages"), "old" + r.id + ":" + rows.length, () => items.length ? [
       rows.reverse().map(it => j.messages ? msgRow(it, r.id, j.agents) :
         h("details", { class: "msg" }, h("summary", {}, h("span", { class: "tm" }, String(it.ts || "").slice(11, 16)),
           h("span", { class: "route" }, L.plainName(it.from || "") + (it.to ? " → " + L.plainName(it.to) : "")),
           h("span", { class: "pv" }, L.preview(it.text || it.preview || it.title || ""))),
         h("div", { class: "fb" }, md(it.text || it.preview || it.title || "")))),
-      listMore("old-messages", remaining, () => renderOld(j, r)),
+      paged && remaining ? h("button", {type: "button", class: "link more-list", on: {click: async ev => {
+        const btn = ev.currentTarget; busy(btn, true);
+        try {
+          const page = await getJson("api/run?" + new URLSearchParams({id: r.id, before: items[0].seq, limit: L.LIST_PAGE}));
+          if (old !== j) return;
+          Object.assign(j.messages, page.messages); j.remaining = page.remaining; renderOld(j, r);
+        } catch (e) { toast("Could not load older messages."); } finally { busy(btn, false); }
+      }}}, "Show more") : listMore("old-messages", remaining, () => renderOld(j, r)),
     ] : h("p", { class: "empty" }, "Nothing recorded."));
   }
 
   // ------------------------------------------------------------------------------------------------ wiring
+  function wireTalkResize() {
+    const grip = $("talkresize"), input = $("talkin");
+    let drag = null;
+    const height = () => input.getBoundingClientRect().height;
+    function resize(wanted) {
+      const min = 44, max = Math.max(min, Math.min(window.innerHeight * .48, height() + $("talklog").clientHeight - 48));
+      input.style.height = Math.min(max, Math.max(min, wanted)) + "px";
+      grip.setAttribute("aria-valuenow", String(Math.round(100 * (height() - min) / (max - min || 1))));
+    }
+    grip.addEventListener("focus", () => resize(height()));
+    grip.addEventListener("pointerdown", e => {
+      if (e.button !== 0 || drag) return;
+      drag = { id: e.pointerId, y: e.clientY, height: height() };
+      grip.setPointerCapture(e.pointerId);
+    });
+    grip.addEventListener("pointermove", e => {
+      if (drag && drag.id === e.pointerId) resize(drag.height + drag.y - e.clientY);
+    });
+    grip.addEventListener("lostpointercapture", () => { drag = null; });
+    grip.addEventListener("keydown", e => {
+      if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
+      e.preventDefault();
+      resize(e.key === "Home" ? 0 : e.key === "End" ? Infinity : height() + (e.key === "ArrowUp" ? 20 : -20));
+    });
+  }
+
   function wire() {
+    wireTalkResize();
     for (const d of [$("dlg"), $("dlg2")]) dismissOnBackdrop(d, () => d.close());
     dismissOnBackdrop($("talk"), closeTalk);
     $("talkbtn").addEventListener("click", () => openTalk());
@@ -1343,6 +1608,7 @@
     $("updatebtn").addEventListener("click", updateOrch);
     $("runsbtn").addEventListener("click", runs);
     $("addworker").addEventListener("click", addWorker);
+    $("teamcards").addEventListener("click", toggleTeamCards);
     $("teamfold").addEventListener("click", () => setTeamFolded(!teamFolded));
     $("changems").addEventListener("click", changeMilestones);
     $("themebtn").addEventListener("click", () => {

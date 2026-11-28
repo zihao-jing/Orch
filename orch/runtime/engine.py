@@ -225,9 +225,12 @@ class Engine:
     def stop_agents(self) -> None:
         self.submit(C.StopAgents(at=self.clock.now(), id=os.urandom(16).hex()))
 
-    def state(self) -> Dict[str, Any]:
+    def state(self, *, dashboard: bool = False) -> Dict[str, Any]:
         with self._lock:
-            return C.public_state(self.store.snapshot())
+            return C.public_state(self.store.snapshot(), dashboard=dashboard)
+
+    def dashboard_state(self) -> Dict[str, Any]:
+        return self.state(dashboard=True)
 
     def submit(self, command: C.UserCommand) -> Dict[str, Any]:
         future: Future = Future()
@@ -581,10 +584,10 @@ class Engine:
         sw, proc = agent.switch, agent.proc
         if sw and sw.step in (C.SwitchStep.PENDING, C.SwitchStep.TESTING):
             return Engine._session_choice(agent)  # nothing new is open before OPENING
-        if sw and sw.new and proc and proc.started >= sw.new.started:
-            return sw.new.choice or sw.target
-        if sw and not sw.new and proc and (sw.step == C.SwitchStep.CONFIRMING
-                                           or sw.step == C.SwitchStep.OPENING and proc.started >= sw.step_at):
+        if sw and sw.step == C.SwitchStep.HANDOVER and sw.new and proc and proc.started >= sw.new.started:
+            return sw.new.choice  # the session that is writing or receiving the handover
+        if sw and proc and (sw.step == C.SwitchStep.CONFIRMING
+                            or sw.step == C.SwitchStep.OPENING and proc.started >= sw.step_at):
             return sw.target  # OPENING saved, then the new CLI started; a crash before that leaves the old one
         return Engine._session_choice(agent)
 
@@ -765,11 +768,13 @@ class Engine:
         if switch.step == C.SwitchStep.OPENING and not self._restarted(agent.id, intent, replay):
             self._stop(agent.id)
             if self.store.snapshot().agents[agent.id].proc is None:
-                session = switch.new
-                choice = session.choice if session else switch.target
-                self._open(agent.id, choice, session, intent.id)
-        elif switch.step == C.SwitchStep.FAILED and agent.proc is None and switch.old:
-            self._open(agent.id, switch.old.choice, switch.old, intent.id)
+                # Reuse the conversation, not the model it used last time.
+                self._open(agent.id, switch.target, switch.new, intent.id)
+        elif switch.step == C.SwitchStep.FAILED and switch.old:
+            if agent.proc and switch.first_message and not self._restarted(agent.id, intent, replay):
+                self._stop(agent.id)  # failed after opening the target; put the old session and route back
+            if self.store.snapshot().agents[agent.id].proc is None:
+                self._open(agent.id, switch.old.choice, switch.old, intent.id)
         return True
 
     def _refresh(self, intent: C.Intent, action: C.RefreshSession, replay: bool) -> None:

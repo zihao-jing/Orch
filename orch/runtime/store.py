@@ -34,10 +34,11 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set,
 
 from ..recorder import Recorder
 from ..report import cost_basis, endpoint_host
+from .models import same_model
 from .contracts import (
     CONTRACT_VERSION, USER, Action, AddWorker, AdvanceSwitch, Agent, AgentEvent, AskManagerToCheck,
     Assignment, Checklist, Clock, CloseGate, CloseTerminal, CommandReply, CountRound, Discarded,
-    Drop, DropReason, Ending, Event, FailAgent, Gate, GateKind, GoldenBoard, Hold, HoldAgent, HoldDecision, Intent,
+    DiscussionPhase, Drop, DropReason, Ending, Event, FailAgent, Gate, GateKind, GoldenBoard, Hold, HoldAgent, HoldDecision, Intent,
     IntentState, Job, JobEnded, JobNoticed, JobsChecked, JobStarted, JobState, MarkFailed, MarkLost, Message,
     MessageStatus, Milestone, ModelReported, NotifyReviewReady, OpenGate, OpenTerminal, ProcessExited, ProcRef,
     Received, RecordDecision, RefreshSession, Reject, Release, ReleaseAgent, Reply, ReportJob, Resend, ResetSilence,
@@ -57,7 +58,7 @@ ENGINE_ACTIONS = (Send, Release, Resend, ReleaseAgent, RecordDecision, StartSwit
                   RefreshSession, SmokeTest, SaveChoice, FailAgent, AddWorker, SetLifecycle, StopJob,
                   OpenTerminal, CloseTerminal, CommandReply)
 # what whoever creates a message fixes; the store raises if a known id comes with another content
-FIXED = ("sender", "recipient", "body", "text", "needs_answer", "trigger", "turn", "gates", "continues", "when_idle")
+FIXED = ("sender", "recipient", "body", "text", "needs_answer", "trigger", "turn", "gates", "continues", "when_idle", "via_cli")
 
 T = TypeVar("T")
 
@@ -188,6 +189,8 @@ class _Change:
             ref = self._session(a)
             if ref:
                 ref.given.update(m.given)
+            if a.discussion_end_notice and a.discussion_end_notice == m.given.get("discussion_end"):
+                a.discussion_end_notice = ""
 
     def _answered(self, t: Turn, at: float) -> bool:
         """The turn went on: everything it took in is answered. A notice ends at delivered (MSG-4)."""
@@ -383,6 +386,9 @@ class _Change:
 
     def _on_ModelReported(self, ev: ModelReported, a: Agent, at: float) -> None:
         a.actual_model = ev.model
+        t = self.open_turn(a.id)
+        if t:
+            t.reported_model = ev.model
 
     def _on_ProcessExited(self, ev: ProcessExited, a: Agent, at: float) -> None:
         if a.proc is None or a.proc.stream in ("", ev.stream):  # else an old process: a new one runs already
@@ -430,8 +436,14 @@ class _Change:
             if j is None:
                 self._add_job(seen, a.id, at)
                 continue
+            if j.state == JobState.LOST and seen.state == JobState.RUNNING and j.agent == a.id:
+                # The CLI found the same live job again. Its real completion still needs a wakeup.
+                j.state, j.ended, j.exit_code = JobState.RUNNING, 0.0, None
+                j.woke, j.fallback_sent = False, False
             if not j.command and seen.command:
                 j.command = redact(seen.command)
+            if seen.label and j.label in ("", j.id, j.id.split("/", 1)[-1]):
+                j.label = redact(seen.label)
             j.last_progress = max(j.last_progress, seen.last_progress)
             if (j.state == JobState.RUNNING and seen.state != JobState.RUNNING) or \
                     (j.state == JobState.LOST and seen.state == JobState.ENDED):
@@ -481,6 +493,9 @@ class _Change:
         quiet = isinstance(a, Tell) or m.recipient == USER
         new = Message(m.id, holds=list(m.holds), bypass=list(a.bypass), created=self.now,
                       jobs=list(a.job_ids) if isinstance(a, WakeWorker) else [], **{n: getattr(m, n) for n in FIXED})
+        if m.sender == USER and m.trigger == Trigger.USER_CHAT and m.key is None:
+            d = self.s.discussions.get(m.recipient)
+            new.discussion_chat = bool(d and d.phase == DiscussionPhase.OPEN)
         new.needs_answer = new.needs_answer and not quiet
         if not m.id:
             raise StoreError("a message without an id")
@@ -616,8 +631,7 @@ class _Change:
         g = self.agent(a.switch.agent)
         if g is None or (g.switch and g.switch.step in OPENING):
             return
-        same = a.switch.reason == SwitchReason.USER and a.switch.target.same(g.choice)
-        g.switch = None if same else replace(a.switch, created=a.switch.created or self.now,
+        g.switch = None if a.cancel else replace(a.switch, created=a.switch.created or self.now,
                                              step_at=a.switch.step_at or self.now)
 
     def _do_AdvanceSwitch(self, a: AdvanceSwitch) -> None:
@@ -627,6 +641,10 @@ class _Change:
         g.switch = replace(sw, step_at=sw.step_at or self.now)
         if sw.step == SwitchStep.DONE:
             g.choice, g.session_key = sw.target, sw.target.session_key
+            # An idle switch need not start a turn. Its predecessor's last report
+            # must not override the new session selection until the next output.
+            if not same_model(sw.target, g.actual_model):
+                g.actual_model = ""
             if sw.new:
                 g.sessions[g.session_key] = replace(sw.new, session_key=g.session_key)
         if sw.step in (SwitchStep.DONE, SwitchStep.FAILED):
@@ -711,6 +729,7 @@ class _Change:
         self.s.finished = a.finished
 
     def _do_SetDiscussion(self, a: SetDiscussion) -> None:
+        self.known(a.agent).discussion_end_notice = a.end_notice
         if a.discussion is None:
             self.s.discussions.pop(a.agent, None)
             return

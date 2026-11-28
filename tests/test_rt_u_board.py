@@ -49,6 +49,24 @@ class DashboardDataTest(unittest.TestCase):
         off = board.messages({"timeline": ["1"], "limit": ["500"], "off": ["lead,lookout"]})
         self.assertEqual({m["id"] for m in off["messages"]}, {"worker"})
 
+    def test_hiding_discussions_filters_both_sides_before_paging_but_keeps_applied_work(self):
+        turn = "r001-t01-lead"
+        folder = self.path / "rounds/r001"
+        folder.mkdir(parents=True)
+        (folder / "t01-lead.json").write_text(json.dumps({"turn_id": turn, "draft": True, "ended_at": 30}))
+        rows = [C.Message("prior", "user", "lead", seq=1, discussion_chat=False, reply_turn=turn),
+                C.Message("discussion", "user", "lead", seq=2, reply_turn=turn),
+                C.Message("reply", "lead", "user", seq=3, turn=turn),
+                C.Message("queued", "user", "lead", seq=4, discussion_chat=True),
+                C.Message("other", "builder", "reviewer", seq=5),
+                C.Message("apply", "user", "lead", seq=6, text=C.TextRef(C.TextKey.DISCUSSION_APPLY))]
+        board = Board(TimelineRuntime(rows), self.path)
+        args = {"timeline": ["1"], "discussions": ["0"], "limit": ["2"]}
+        page = board.messages(args)
+        self.assertEqual(([m["id"] for m in page["messages"]], page["remaining"]), (["other", "apply"], 1))
+        self.assertEqual([m["id"] for m in board.messages({**args, "before": ["5"]})["messages"]], ["prior"])
+        self.assertEqual(len(board.messages({"timeline": ["1"]})["messages"]), len(rows))
+
     def test_finish_time_decides_which_page_contains_a_reply(self):
         turn = "r001-t01-lead"
         folder = self.path / "rounds/r001"

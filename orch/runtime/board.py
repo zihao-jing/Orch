@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..boards import digest as text_digest
 from ..recorder import read_json
-from .contracts import (CONTRACT_VERSION, AgentStatus, Agent, Lifecycle, Message, MessageStatus, Role, RunInfo,
+from .contracts import (CONTRACT_VERSION, AgentStatus, Agent, CriticTell, Lifecycle, Message, MessageStatus, Role, RunInfo,
                         Snapshot, TextRef, UserCommand, from_dict, public_state, redact, reply_json, to_dict)
 from .golden import read_board
 from .milestones import read_checklist
@@ -185,6 +185,7 @@ class Board:
         self.runtime, self.run_dir, self.words, self.runs_root = runtime, Path(run_dir), words, runs_root
         self._lock = threading.Lock()
         self._at, self._state, self._hash, self.rev = -1e9, None, "", 0
+        self._compact_cache = {}
         self._finished_turns: Dict[str, Dict[str, Any]] = {}
         self.streams = threading.BoundedSemaphore(MAX_SSE)
 
@@ -206,6 +207,27 @@ class Board:
                     self._state = st
                 self._at = time.monotonic()
             return {**self._state, "rev": self.rev}
+
+    def dashboard_state(self) -> Dict[str, Any]:
+        read = getattr(self.runtime, "dashboard_state", None)
+        if read is None:
+            return self.state()
+        with self._lock:
+            cache = self._compact_cache
+            if cache and time.monotonic() < cache["until"]:
+                return cache["state"]
+            try:
+                st = self.shown(read())
+            except Exception:
+                if not cache:
+                    raise
+                cache["until"] = time.monotonic() + STATE_TTL
+                return cache["state"]
+            digest = hashlib.sha1(json.dumps({k: v for k, v in st.items() if k != "now"},
+                                             sort_keys=True, default=str).encode()).digest()
+            st["rev"] = (cache["state"]["rev"] if cache else 0) + (cache.get("digest") != digest)
+            cache.update(state=st, digest=digest, until=time.monotonic() + STATE_TTL)
+            return st
 
     def shown(self, obj: Any) -> Any:
         """Adds `shown` (the rendered words) to every TextRef in obj, in place."""
@@ -229,6 +251,8 @@ class Board:
     def command(self, body: Any) -> Tuple[int, Dict[str, Any]]:
         try:
             cmd = from_dict(UserCommand, body)
+            if isinstance(cmd, CriticTell):
+                return 400, {"ok": False, "error": "Use orch tell for critic dispatch."}
         except (ValueError, TypeError, KeyError, AttributeError) as e:
             return 400, {"ok": False, "error": str(e)[:200] or "bad command"}
         try:
@@ -250,6 +274,22 @@ class Board:
         except ValueError:
             before, limit = 0, MESSAGE_PAGE
         search, agent = one("q"), one("agent")
+        talk = one("talk")
+        if talk:
+            agents = self.dashboard_state().get("agents", {})
+            manager = agents.get(talk, {}).get("role") == "manager"
+            rows, more = [], True
+            cursor = before
+            while more and len(rows) <= limit:
+                batch, more = self.runtime.messages(before=cursor, limit=100, agent="user")
+                if not batch:
+                    break
+                rows.extend(sorted((m for m in batch if
+                                    (m.sender == "user" and m.recipient == talk) or
+                                    (m.recipient == "user" and (m.sender == talk or (manager and m.sender == "orch")))),
+                                   key=lambda m: -m.seq))
+                cursor = min(m.seq for m in batch)
+            return {"messages": [self._message_row(m) for m in reversed(rows[:limit])], "more": len(rows) > limit}
         if one("timeline") != "1":
             rows, more = self.runtime.messages(before=before, limit=limit, q=search, agent=agent)
             return {"messages": [self._message_row(m) for m in rows], "more": more}
@@ -257,8 +297,9 @@ class Board:
         supported = {"you", "critic", "workers", "monitor"}
         levels = set(one("levels", "you,critic,workers,monitor").split(",")) & supported
         notes = one("notes") != "0"
+        discussions = one("discussions") != "0"
         hidden = {x for x in one("off").split(",") if x}  # agents switched off; a line belongs to its writer
-        roles = {aid: a.get("role", "") for aid, a in (self.state().get("agents") or {}).items()}
+        roles = {aid: a.get("role", "") for aid, a in (self.dashboard_state().get("agents") or {}).items()}
         matches = []
         cursor = 0
         while levels:
@@ -267,6 +308,15 @@ class Board:
                 if _message_level(m, roles) not in levels or (not notes and _orch_note(m)) or _owner(m) in hidden:
                     continue
                 summary = self._turn_summary(m.turn) if m.turn else {}
+                if not discussions:
+                    if summary.get("draft") or m.drop == "draft_ended":
+                        continue
+                    if m.sender == "user" and m.key is None:
+                        in_discussion = m.discussion_chat
+                        if in_discussion is None and m.reply_turn:
+                            in_discussion = self._turn_summary(m.reply_turn).get("draft")
+                        if in_discussion:
+                            continue
                 matches.append((summary.get("ended") or m.created, m.seq, m, summary))
             if not batch or not more:
                 break
@@ -285,8 +335,12 @@ class Board:
             if _orch_note(m):
                 row["orch_note"] = True
             if summary:
-                row["written_by"] = {k: v for k, v in summary.items() if k != "ended"}
+                row["written_by"] = {k: v for k, v in summary.items() if k not in ("ended", "draft", "silent_only")}
                 row["ended"] = summary.get("ended", 0)
+            if m.reply_turn and roles.get(m.recipient) == "critic":
+                reply = self._turn_summary(m.reply_turn)
+                if reply.get("silent_only"):
+                    row["silent_reply"] = reply
             rows.append(row)
         return {"messages": rows, "more": len(matches) > limit, "remaining": len(matches) - len(rows)}
 
@@ -306,7 +360,9 @@ class Board:
         if t.get("turn_id") != tid:
             return {}
         summary = {"model": t.get("model") or "", "input_chars": len(t.get("input") or ""),
-                   "output_chars": len(t.get("output") or ""), "ended": _epoch(t.get("ended_at"))}
+                   "output_chars": len(t.get("output") or ""), "ended": _epoch(t.get("ended_at")),
+                   "draft": bool(t.get("draft")),
+                   "silent_only": bool(re.fullmatch(r"<silent\s*/>", (t.get("output") or "").strip()))}
         if summary["ended"]:
             self._finished_turns[tid] = summary
         return summary
@@ -326,7 +382,7 @@ class Board:
             t = read_json(p) or {}
             if t.get("turn_id") == tid:
                 out = {k: t.get(k) for k in ("turn_id", "agent", "purpose", "status", "input", "output",
-                                             "system_prompt", "stderr", "session_id", "duration_s")}
+                                             "system_prompt", "stderr", "session_id", "duration_s", "ended_at", "model", "draft")}
                 out["stderr"] = redact(str(out["stderr"] or ""))
                 return out
         return {"error": "not found"}
@@ -365,14 +421,14 @@ class Board:
 
     def golden(self) -> Dict[str, Any]:
         """The golden board; a relative path is taken from the run's workspace, as the store does."""
-        st = self.state()
+        st = self.dashboard_state()
         p = str((st.get("golden") or {}).get("path") or "")
         ws = str((st.get("run") or {}).get("workspace") or "")
         return self.text_file(str(Path(ws, p)) if p else "")
 
     def checklist(self, milestone: str) -> Dict[str, Any]:
         """The critic's checklist of one milestone, done ones too: its steps and items as read from the file now."""
-        st = self.state()
+        st = self.dashboard_state()
         ms = next((m for m in st.get("milestones") or [] if m.get("id") == milestone), None)
         if ms is None:
             return {"error": "not found"}
@@ -385,7 +441,7 @@ class Board:
 
     def audit_notes(self) -> Dict[str, Any]:
         """The file run.audit_notes_path names (the one the auditor reads); nothing if the run names none."""
-        p = str((self.state().get("run") or {}).get("audit_notes_path") or "")
+        p = str((self.dashboard_state().get("run") or {}).get("audit_notes_path") or "")
         return self.text_file(p) if p else {"text": "", "digest": "", "path": ""}
 
     def audit(self, record: str = "", history: bool = False) -> Dict[str, Any]:
@@ -397,7 +453,7 @@ class Board:
         text = _read(selected) if selected else ""
         reply = text.split("## Reply\n\n", 1)[1] if "## Reply\n\n" in text else ""
         reply = re.split(r"\n## stderr\n", reply, 1)[0].strip()
-        running = bool((self.state().get("run") or {}).get("audit_running"))
+        running = bool((self.dashboard_state().get("run") or {}).get("audit_running"))
         result = {"report": redact(reply)[:60000], "running": running}
         if history and not record:
             records = []
@@ -418,7 +474,7 @@ class Board:
                         "old": "runtime" not in st, "started": _epoch(st.get("started_at"))})
         return {"runs": sorted(out, key=lambda r: -r["started"])}
 
-    def run(self, key: str) -> Dict[str, Any]:
+    def run(self, key: str, limit: int = 0, before: int = 0) -> Dict[str, Any]:
         rd = self._run_folder(key)
         if rd is None:
             return {"error": "not found"}
@@ -426,14 +482,27 @@ class Board:
         old = "runtime" not in st  # a run saved before the runtime: read from its turn files
         try:
             snap = _old_snapshot(rd, st) if old else from_dict(Snapshot, st["runtime"]["snap"])
-            d = public_state(snap)
             archive = Board(self.runtime, rd)
+            remaining = 0
+            if limit:
+                def order(m):
+                    ended = archive._turn_summary(m.turn).get("ended") if m.turn else None
+                    return ended or m.created, m.seq
+                items = sorted(snap.messages.values(), key=order)
+                if before:
+                    end = next((i for i, m in enumerate(items) if m.seq == before), 0)
+                    items = items[:end]
+                remaining = max(0, len(items) - limit)
+                d = {} if before else public_state(snap, dashboard=True)
+                d["messages"] = {m.id: archive._message_row(m) for m in items[-limit:]}
+            else:
+                d = public_state(snap)
             for m in d.get("messages", {}).values():
                 if m.get("turn"):
                     m["ended"] = archive._turn_summary(m["turn"]).get("ended", 0)
         except (ValueError, TypeError, KeyError, AttributeError):
             return {"error": "unreadable run"}
-        return {**self.shown(d), "old": old, "rev": 0}
+        return {**self.shown(d), "old": old, "rev": 0, "remaining": remaining}
 
     def _run_folders(self) -> Dict[str, Path]:
         found = {}
@@ -476,9 +545,12 @@ class Viewer:
                 self._key = key
             return self._snap
 
-    def state(self) -> Dict[str, Any]:
+    def dashboard_state(self) -> Dict[str, Any]:
+        return self.state(dashboard=True)
+
+    def state(self, *, dashboard: bool = False) -> Dict[str, Any]:
         snap = self.snapshot()
-        out = public_state(snap)
+        out = public_state(snap, dashboard=dashboard)
         if not out.get("catalog") and snap.run.workspace:
             out["catalog"] = to_dict(self.catalog(Path(snap.run.workspace)))
         out["viewer"] = {"orch_running": self.orch_running()}
@@ -635,7 +707,7 @@ def _handler(board: Board, preview_host: str = ""):
                     return self.page_file(u.path)
                 api = u.path[5:]
                 if api == "state":
-                    self.js(board.state())
+                    self.js(board.dashboard_state() if one("view") == "board" else board.state())
                 elif api == "messages":
                     self.js(board.messages(q))
                 elif api == "message":
@@ -663,7 +735,7 @@ def _handler(board: Board, preview_host: str = ""):
                 elif api == "runs":
                     self.js(board.runs())
                 elif api == "run":
-                    r = board.run(one("id"))
+                    r = board.run(one("id"), min(500, max(0, int(one("limit") or 0))), int(one("before") or 0))
                     self.js(r, 404 if "error" in r else 200)
                 else:
                     self.js({"error": "not found"}, 404)
@@ -721,7 +793,7 @@ def _handler(board: Board, preview_host: str = ""):
                 while time.monotonic() - started < SSE_MAX_AGE:
                     out = b""
                     try:
-                        now_rev = board.state()["rev"]
+                        now_rev = board.dashboard_state()["rev"]
                     except Exception:
                         now_rev = rev
                     if now_rev != rev:

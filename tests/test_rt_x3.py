@@ -87,7 +87,8 @@ def handler_for(fake, pw):
                 return self._send(200, {"data": fake.jobs})
             if parts[:2] == ["api", "shell"]:
                 info = fake.shells.get(parts[2])
-                if info is None:
+                required = getattr(fake, "shell_directory", None)
+                if info is None or (required and self.headers.get("x-opencode-directory") != required):
                     return self._send(404, {"_tag": "ShellNotFoundError"})
                 return self._send(200, {"location": {}, "data": info})
             if parts[:3] == ["api", "session", parts[2] if len(parts) > 2 else ""] and len(parts) > 2:
@@ -96,7 +97,7 @@ def handler_for(fake, pw):
                     return self._send(404, {"_tag": "SessionNotFoundError", "message": "Session not found"})
                 rest = parts[3:]
                 if not rest:
-                    return self._send(200, {"data": {"id": parts[2], "model": s["model"]}})
+                    return self._send(200, {"data": {"id": parts[2], "model": s["model"], "location": s.get("location", {})}})
                 if rest == ["model"]:
                     s["model"] = {**body["model"], "variant": body["model"].get("variant", "default")}
                     return self._send(204)
@@ -240,6 +241,30 @@ class TestStart(Base):
         self.assertEqual(self.fake.sessions["ses_1"]["model"]["id"], "m9")
         self.assertEqual(self.fake.sessions["ses_1"]["model"]["variant"], "low")
         self.assertEqual([e.change for e in self.of(self.drain(b), SessionChanged)], [SessionChange.RESUMED])
+
+    def test_switch_rejects_ack_that_leaves_old_model_active(self):
+        a, _ = self.started()
+        old = {"data": {"model": self.fake.sessions["ses_1"]["model"]}}
+        a._call = lambda method, *args: (204, None) if method == "POST" else (200, old)
+        with self.assertRaisesRegex(AdapterError, "model mismatch"):
+            a._set_model("ses_1", old, Choice(backend="opencode", provider="q", model="m9"))
+
+    def test_missing_gemini_tool_history_requires_a_new_session(self):
+        a = self.adapter()
+        err = {"type": "provider.internal", "message": "Error: Missing Gemini tool thought signature history"}
+        self.assertEqual(a._error_class(err), ErrorClass.SESSION_LOST)
+        self.assertEqual(a._error_class({**err, "message": "upstream unavailable"}), ErrorClass.TRANSIENT)
+
+    def test_overlong_replayed_prompt_uses_handover_without_logging_prompt(self):
+        a = self.adapter()
+        why = "Total tokens of image and text exceed max message tokens. Request id: sample"
+        prompt = "private prompt" * 1000
+        err = {"type": "provider.internal", "status": 200, "message": str({
+            "prompt": prompt, "error": {"message": why, "param": "", "type": "BadRequest"}, "standard_code": 400001})}
+        self.assertEqual(a._error_class(err), ErrorClass.SESSION_LOST)
+        self.assertNotIn("private prompt", a._error_text(err))
+        self.assertEqual(a._error_class({**err, "message": str({"prompt": why, "message": "service busy"})}),
+                         ErrorClass.TRANSIENT)
 
     def test_SES_2_resume_of_a_missing_session_is_lost(self):
         a = self.adapter()
@@ -393,6 +418,28 @@ class TestJobs(Base):
         self.assertLess(names.index("JobStarted"), names.index("TurnEnded"))
         self.assertEqual([j.id for j in a.jobs()], ["worker-1/sh_a"])
 
+    def test_shell_continuing_after_tool_returns_keeps_command_through_completion(self):
+        a, _ = self.started()
+        self.user("x0123456789ab")
+        command = "find . -name '*finance*'"
+        self.reply("", content=[{"type": "tool", "name": "shell", "id": "t1", "state": {
+            "status": "completed", "input": {"command": command},
+            "metadata": {"status": "running", "shellID": "sh_find"}}}])
+        job, = self.of(self.drain(a), JobStarted)
+        self.assertEqual((job.job.id, job.job.command, job.job.label), ("worker-1/sh_find", command, command))
+        self.synthetic("sh_find")
+        self.assertEqual([type(e).__name__ for e in self.drain(a)], ["JobEnded", "JobNoticed"])
+        ended, = a.jobs()
+        self.assertEqual((ended.command, ended.label, ended.started), (command, command, job.job.started))
+
+    def test_completion_without_tool_record_recovers_command_by_shell_id(self):
+        a, _ = self.started()
+        self.fake.shells["sh_find"] = dict(shell("sh_find", "exited", 0), command="find .")
+        self.synthetic("sh_find")
+        self.drain(a)
+        ended, = a.jobs()
+        self.assertEqual((ended.command, ended.label), ("find .", "find ."))
+
     def test_JOB_4_server_wake_is_a_turn_after_job_ended(self):
         a, _ = self.started()
         self.drain(a)
@@ -403,7 +450,7 @@ class TestJobs(Base):
         self.assertEqual([type(e).__name__ for e in ev][:2], ["JobEnded", "TurnStarted"])
         self.assertEqual(self.of(ev, JobEnded)[0].exit_code, 3)
         self.assertEqual(self.of(ev, TurnStarted)[0].message_ids, ())
-        self.assertEqual(a.jobs()[0].exit_code, 3)
+        self.assertEqual((a.jobs()[0].exit_code, a.jobs()[0].label), (3, "sh_a"))
 
     def test_JOB_4_job_end_inside_a_running_turn_is_noticed_not_a_new_turn(self):
         a, _ = self.started()
@@ -670,6 +717,20 @@ class TestItems(Base):
         jobs = a.jobs()
         self.assertEqual([(j.id, j.state, j.exit_code) for j in jobs], [("worker-1/sh_k", JobState.ENDED, 3)])
         self.assertIn("worker-1/sh_g", a._known)
+
+    def test_reconnected_shell_uses_session_directory_for_running_and_exit(self):
+        a, proc = self.started()
+        self.fake.sessions[a.sid]["location"] = {"directory": "/mounted/alias"}
+        self.fake.shell_directory = "/mounted/alias"
+        self.fake.jobs = [{"sessionID": a.sid, "shellID": "sh_a", "status": "running", "kind": "shell"}]
+        self.fake.shells["sh_a"] = shell("sh_a")
+        a.detach()
+        b = self.adapter()
+        self.assertTrue(b.reconnect(proc))
+        self.assertEqual([(j.id, j.state) for j in b.jobs()], [("worker-1/sh_a", JobState.RUNNING)])
+        self.fake.jobs = []
+        self.fake.shells["sh_a"] = shell("sh_a", status="exited", exit=0)
+        self.assertEqual([(j.state, j.exit_code) for j in b.jobs()], [(JobState.ENDED, 0)])
 
     def test_item7_subagent_job_runs_while_its_child_session_is_active_and_ends_by_job_id(self):
         """Item 7: a subagent is checked by its child session, never by GET /api/shell; its end is metadata.jobID."""

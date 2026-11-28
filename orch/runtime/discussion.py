@@ -86,9 +86,19 @@ class _Module:
             return [_refusal(ev, why)]
         drops = [C.Drop(m.id, DropReason.DRAFT_ENDED) for m in _drafts(snap, a.id)]  # the new message replaces them
         if isinstance(ev, C.DiscussionEnd):
-            return drops + [C.SetDiscussion(a.id, None), C.CommandReply(ev.id)]
+            return drops + [C.SetDiscussion(a.id, None, end_notice=ev.id if a.role == Role.MANAGER else ""),
+                            C.CommandReply(ev.id)]
         msg = C.Message(C.new_id(NAME, ev), C.USER, a.id, text=TextRef(K.DISCUSSION_APPLY, {"request": ev.text.strip(), "milestone_change": d.milestone_change}),
                         trigger=C.Trigger.USER_CHAT, when_idle=True)  # never joins a draft turn
+        # The user settled the open prompts in discussion. Withdraw them rather than inventing
+        # individual answers (especially an approval), and retire work held for the old decision.
+        gates = snap.open_gates()
+        if gates:
+            drops.extend(C.CloseGate(g.id, withdrawn=True) for g in gates)
+            drops.extend(C.Drop(m.id, DropReason.ANSWERED_GATES) for m in snap.messages.values()
+                         if m.drop is None and not (m.sender == a.id and HoldReason.DRAFT in m.holds)
+                         and (HoldReason.QUESTION in m.holds or HoldReason.GATES in m.holds))
+            drops.extend(C.HoldDecision(m.id, None) for m in snap.milestones if m.held_decision is not None)
         return drops + [C.Send(msg), C.SetDiscussion(a.id, replace(d, phase=P.APPLYING, apply_message=msg.id)),
                         C.CommandReply(ev.id)]
 

@@ -189,10 +189,10 @@ class _Module:
         new = a.sessions.get(target.session_key)
         s = Switch(a.id, target, SwitchReason.USER, cmd.force, created=snap.now, step_at=snap.now, command_id=cmd.id,
                    old=a.session, new=new, new_session=new is None and a.session is not None)
-        if target.same(a.choice):
+        if target.same(a.choice) and same_model(target, a.actual_model):
             if sw is None:
                 return _refuse(cmd, Refusal.ALREADY)
-            return [StartSwitch(s), CommandReply(cmd.id)]  # ends the pending one
+            return [StartSwitch(s, cancel=True), CommandReply(cmd.id)]
         if cmd.force and not cmd.confirmed:
             jobs = [j.label or j.id for j in snap.running_jobs(a.id)]
             return [CommandReply(cmd.id, False, TextRef(TextKey.ASK_FORCE_SWITCH, {

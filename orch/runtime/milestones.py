@@ -392,6 +392,14 @@ class _Run:
         them to the manager (gates sends it once all answer gates are closed), so nothing moves while another gate
         is still open."""
         snap = self.snap
+        if isinstance(self.ev, C.DiscussionApply):
+            # An accepted milestone awaiting user review is editable again; only a later
+            # decision can advance it. Keep the reviewed turn notified to avoid reopening it.
+            m = self.cur()
+            if m and any(isinstance(a, C.CloseGate) and a.withdrawn and
+                         snap.gates[a.gate_id].kind == C.GateKind.MILESTONE and
+                         snap.gates[a.gate_id].milestone == m.id for a in self.prior):
+                self.put(replace(m, accepted=False, held_decision=None))
         closing = {a.gate_id: a.answer for a in self.prior
                    if isinstance(a, C.CloseGate) and not a.withdrawn and a.answer is not None}
         for gid, ans in closing.items():
@@ -511,7 +519,7 @@ class _Run:
             return
         if self.open_gate(C.GateKind.MILESTONE, m.id) or not self.quiet():
             return
-        jobs = [f"{j.agent}: {j.label}" for j in snap.jobs.values() if j.state == C.JobState.RUNNING]
+        jobs = [f"{j.agent}: {j.label or j.id}" for j in snap.jobs.values() if j.state == C.JobState.RUNNING]
         msg = C.Message(self.new_id(), C.ORCH, self.manager, trigger=C.Trigger.ORCH, text=TextRef(
             K.CHECKLIST_COMPLETE, {"milestone": m.id, "text": m.text,
                                    "rubric_path": rubric_path(snap.run.run_dir, self.ms, m), "jobs": jobs}))

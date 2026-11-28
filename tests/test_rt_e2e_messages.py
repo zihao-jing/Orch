@@ -6,6 +6,21 @@ SECOND = "<question>Which format?\nA) CSV\nB) JSON</question>"
 
 
 class TestMessages(RuntimeCase):
+    def test_tell_and_dashboard_chat_return_to_their_own_senders(self):
+        self.cli(W1).script("CLI result.", "Private result.")
+        self.cli(CRITIC).script(QUIET)
+        self.start()
+        self.command(C.CriticTell, W1, text="CLI assignment.")
+        self.advance(2)
+        request = self.assert_received_once(W1, body="CLI assignment.")
+        self.assertEqual((request.sender, request.trigger, request.via_cli), (CRITIC, C.Trigger.CRITIC, True))
+        self.assert_received_once(CRITIC, body="CLI result.")
+        self.chat(W1, "Private question.")
+        self.advance(2)
+        question = self.assert_received_once(W1, body="Private question.")
+        self.assertEqual((question.sender, question.via_cli), (C.USER, False))
+        self.assertEqual([m.recipient for m in self.state.messages.values() if m.body == "Private result."], [C.USER])
+
     def test_S01_MSG_1_MSG_7_WRK_8_simultaneous_reports(self):
         self.cli(CRITIC).script(
             tell(W1, "Run alpha.") + tell(W2, "Run beta.") + QUIET,

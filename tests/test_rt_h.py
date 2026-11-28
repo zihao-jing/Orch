@@ -140,6 +140,11 @@ class TestTexts(unittest.TestCase):
         out = texts.render(snapshot(), m).text
         self.assertTrue(out.startswith("Job still running: worker-1's job is still running (`train.py`), so this is not "
                                         "ready for review."), out)
+        instruction = "Reply to worker-1 only if it needs an answer or a change of direction."
+        lines = out.splitlines()
+        tags = next(i for i, line in enumerate(lines) if "<silent/>" in line)
+        self.assertEqual(lines[tags + 1], instruction)
+        self.assertEqual(out.count(instruction), 1)
 
     def test_REC_10_monitor_report_gives_the_status_once(self):
         out = texts._compose(texts._Text(snapshot(), C.TextRef(TextKey.MONITOR_REPORT, {
@@ -352,8 +357,8 @@ class TestReminders(unittest.TestCase):
             "<system-reminder>",
             "worker-1: idle for 12 min; assigned: Check the labels; you have not written to it since its last report",
             "worker-2: waiting for a job (`train.py`); nothing assigned yet",
-            'To a worker: <message to="worker-1">…</message> or <message to="worker-2">…</message>. Plain text goes to me; '
-            "add <silent/> when nothing in the reply needs me, and <done/> when the work I asked for is finished.",
+            'To a worker: <message to="worker-1">…</message> or <message to="worker-2">…</message>. Use <silent/> while this round’s work is unfinished unless you need me to make a decision or change an instruction. '
+            "Plain text reaches me; add <done/> when the work I asked for is finished and checked.",
             "</system-reminder>"]))
 
     def test_PRM_4_the_critic_gets_its_lines_with_every_message(self):
@@ -370,7 +375,7 @@ class TestReminders(unittest.TestCase):
     def test_WRK_6_WRK_9_pool_is_told_when_new_or_changed(self):
         snap = snapshot(workers=2)
         got, given = keys(snap, message("x1", "critic"))
-        self.assertIn("rem_workers", got)
+        self.assertEqual(got[got.index("rem_workers") + 1:][:2], ["rem_worker_line"] * 2)
         give(snap, "critic", **given)
         self.assertNotIn("rem_workers", keys(snap, message("x2", "critic"))[0])
         snap.agents["worker-2"].lifecycle = C.Lifecycle.CLOSED
@@ -379,7 +384,7 @@ class TestReminders(unittest.TestCase):
 
     def test_no_worker(self):
         out = texts.render(snapshot(workers=0), message("x1", "critic")).text
-        self.assertIn("No worker is available", out)
+        self.assertIn("No workers.", out)
         self.assertNotIn("<message", out)
 
     def test_PRM_4_PRM_5_golden_board_path_when_new_changed_or_compacted(self):
@@ -411,19 +416,28 @@ class TestReminders(unittest.TestCase):
         snap = seen_all(snapshot(gate("g1", text="Which split?"), BOARD))
         self.assertEqual(keys(snap, message("x1", "manager"))[0], [])
         got, _ = keys(snap, message("x1", "manager"), True)
-        self.assertEqual(got, ["rem_message_critic", "rem_open_gates", "rem_golden_use", "rem_golden_keep", "rem_writing"])
+        self.assertEqual(got, ["rem_manager_pause", "rem_message_critic", "rem_open_gates", "rem_golden_use", "rem_golden_keep", "rem_writing"])
         refs, _ = reminders.lines(snap, message("x1", "manager"), Fixed(True))
         self.assertIn("Still waiting for me: “Which split?”. Don't ask again", texts.reminder(snap, "manager", refs))
+
+    def test_decision_reminder_for_initial_and_followup_reviews_only(self):
+        snap = seen_all(snapshot())
+        for key in (TextKey.CHECKLIST_COMPLETE, TextKey.REVIEW_RUBRIC_MISSING, TextKey.REVIEW_SCORE_LOW,
+                    TextKey.GATE_ANSWERS):
+            m = message("review", "manager", key=key, values={"decide_again": "Build"})
+            self.assertIn("rem_review_decision", keys(snap, m)[0])
+        m = message("answer", "manager", key=TextKey.GATE_ANSWERS, values={"decide_again": ""})
+        self.assertNotIn("rem_review_decision", keys(snap, m, True)[0])
 
     def test_PRM_4_in_a_discussion_only_the_board_is_kept(self):
         snap = seen_all(snapshot(gate("g1"), BOARD, C.Discussion("manager", T0)))
         got, given = keys(snap, message("x1", "manager"), True)
-        self.assertFalse({"rem_message_critic", "rem_open_gates"} & set(got))
+        self.assertFalse({"rem_manager_pause", "rem_message_critic", "rem_open_gates"} & set(got))
         self.assertIn("rem_golden_keep", got)
         self.assertIn("rem_discussion", got)
         self.assertEqual(given["discussion"], str(T0))
 
-    def test_DISC_4_an_ended_discussion_is_no_longer_said_but_its_mark_is_reset(self):
+    def test_a_stale_discussion_mark_alone_does_not_imply_end_without_applying(self):
         snap = give(seen_all(snapshot(BOARD)), "manager", discussion="1")
         got, given = keys(snap, message("x1", "manager"))
         self.assertEqual((got, given), ([], {"discussion": ""}))
@@ -467,7 +481,8 @@ class TestReminders(unittest.TestCase):
     def test_PRM_4_each_random_item_has_its_own_chance(self):
         snap = seen_all(snapshot(BOARD))
         got = [texts.render(snap, message(f"x{i}", "manager")).text for i in range(2000)]
-        for text, chance in (("Only <message", 0.3), ("Keep the golden board", 0.25), ("Be brief", 0.25)):
+        for text, chance in (("If work must wait for me", 0.10), ("Only <message", 0.3),
+                             ("Keep the golden board", 0.25), ("Be brief", 0.25)):
             self.assertAlmostEqual(sum(text in x for x in got) / 2000, chance, delta=0.05, msg=text)
 
     def test_PRM_4_random_picks_come_from_the_given_source_and_repeat_on_replay(self):

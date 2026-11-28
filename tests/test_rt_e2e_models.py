@@ -2,6 +2,42 @@ from rt_e2e_helpers import BACKUP, C, CLAUDE, CRITIC, QUIET, W1, W2, Reply, Runt
 
 
 class TestModels(RuntimeCase):
+    def test_switch_back_to_configured_opencode_model_after_session_drift(self):
+        qwen = C.Choice(backend="opencode", provider="dashscope", model="qwen4-max")
+        self.add_agent(W1, choice=qwen)
+        cli = self.cli(W1, "opencode")
+        cli.script(Reply(model="provider/doubao"))
+        self.start()
+        self.chat(W1, "Establish the session.")
+        self.advance(2)
+        self.assertEqual(self.state.agents[W1].actual_model, "provider/doubao")
+        sid, starts = cli.session_id, len(cli.starts)
+        self.assertTrue(self.command(C.ChooseModel, W1)["ok"])
+        self.wait_for(lambda: len(cli.starts) > starts and self.state.agents[W1].switch is None,
+                      "configured model reapplied", real_io=True)
+        self.assertEqual((cli.starts[-1][0].choice, cli.session_id), (qwen, sid))
+        self.assertNotEqual(self.state.agents[W1].actual_model, "provider/doubao")
+        cli.script(Reply(model="dashscope/qwen4-max"))
+        self.chat(W1, "Continue.")
+        self.advance(2)
+        self.assertEqual(self.state.agents[W1].actual_model, "dashscope/qwen4-max")
+        self.assertFalse(self.command(C.ChooseModel, W1)["ok"])
+
+    def test_opencode_switch_uses_requested_route_on_existing_conversation(self):
+        old = C.Choice(backend="opencode", provider="p", model="old")
+        target = C.Choice(backend="opencode", provider="q", model="new", name="second")
+        self.add_agent(W1, choice=old, backups=(target,))
+        self.start()
+        self.chat(W1, "Establish session.")
+        self.advance(2)
+        sid = self.state.agents[W1].session.session_id
+        self.command(C.ChooseModel, W1, backup=target.name)
+        self.wait_for(lambda: self.state.agents[W1].choice == target, "switch", real_io=True)
+        spec, resumed = self.cli(W1, "opencode").starts[-1]
+        self.assertEqual(spec.choice, target)
+        self.assertEqual(resumed.session_id, sid)
+        self.assertEqual(self.state.agents[W1].session.session_id, sid)
+
     def test_S10_REC_1_REC_5_SES_4_SES_5_retry_backup_handover_and_return(self):
         self.add_agent(W1, backups=(BACKUP,))
         self.settings.retry_waits = [2]

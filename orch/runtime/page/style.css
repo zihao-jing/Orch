@@ -67,7 +67,7 @@ p { margin: 0 0 8px; }
 .progress-card { grid-area: 1 / 1; }
 .timeline { grid-area: 2 / 1; }
 .resources { grid-area: 3 / 1; }
-.team-card { grid-area: 1 / 2 / span 3; }
+.team-card { grid-area: 1 / 2 / span 2; }
 .workspace.team-folded { grid-template-columns: minmax(0, 1fr) 52px; }
 .team-folded .team-card { padding: 10px 6px; }
 .team-folded .team-card .section-head { justify-content: center; margin-bottom: 6px; }
@@ -159,10 +159,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .md tbody tr:last-child td { border-bottom: 0; }
 .md code { font: 12px ui-monospace, Menlo, monospace; background: var(--code); border-radius: 3px; padding: 0 3px; }
 
-.team-card { position: sticky; top: 16px; padding-bottom: 8px; }
+.team-card { padding-bottom: 8px; }
 .team-card .section-head { margin-bottom: 6px; gap: 8px; }
-.team { display: flex; flex-direction: column; gap: 8px; }
-.agent { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 8px; margin: 0 -8px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 9px; }
+.team { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding: 3px; }
+.team > * { flex-shrink: 0; }
+.team-folded .team { padding-inline: 0; }
+.agent { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 8px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 9px; }
 .agent:hover, .agent:focus-within { background: var(--surface); }
 .agent-sum { display: flex; align-items: center; gap: 7px; min-height: 30px; min-width: 0; grid-column: 1; grid-row: 1; border: 0; padding: 0 2px; background: transparent; text-align: start; }
 .agent-sum:hover { background: transparent; }
@@ -257,8 +259,10 @@ button.link.ms-reopen:hover { text-decoration: underline; }
 .mfilter input { flex: 1 1 150px; width: auto; }
 .mfilter select { width: auto; max-width: 100%; }
 .message-options, .levels { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
-.message-options { justify-content: space-between; margin: 8px 0 9px; }
-.notes-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--ink2); margin-left: 3px; cursor: pointer; }
+.message-options { margin: 8px 0 9px; }
+.message-switches { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 10px; margin-inline-start: auto; }
+.filter-all { font-size: 12px; white-space: nowrap; }
+.notes-switch { display: inline-flex; align-items: center; gap: 4px; color: var(--ink2); white-space: nowrap; cursor: pointer; }
 .level-you { --level: var(--you); }
 .level-critic { --level: var(--critic); }
 .level-workers { --level: var(--workers); }
@@ -288,6 +292,10 @@ button.level-toggle { color: var(--level); display: inline-flex; align-items: ce
 .msg.notice-row .pv { color: var(--accent); font-weight: 620; }
 .msg.housekeeping .pv { color: var(--mute); }
 .msg.touser .pv { color: var(--ink); }
+.orch-added { display: flex; align-items: baseline; gap: 6px; color: var(--mute); }
+.orch-added > .md { min-width: 0; }
+.orch-badge { flex: none; font-size: 10px; font-weight: 600; border-radius: 4px; padding: 1px 4px; color: var(--mute); background: var(--code); }
+.pv .orch-badge { margin-inline-end: 4px; }
 .tm, .sz { flex: none; color: var(--mute); font: 11px ui-monospace, Menlo, monospace; }
 .tm { min-width: 40px; }
 .sz { text-align: right; }
@@ -315,10 +323,14 @@ button.level-toggle { color: var(--level); display: inline-flex; align-items: ce
 .fold-body { padding: 4px 0 5px 12px; font-size: 12px; }
 .empty { color: var(--mute); margin: 4px 0; padding: 5px 0; }
 
-#talk { position: fixed; inset: 0; z-index: 25; display: grid; place-items: center; padding: 15px; background: #141b1765; }
-#talk .win { display: flex; flex-direction: column; width: min(850px, 100%); height: min(86vh, 880px); min-height: 0; background: var(--page); border-radius: 12px; padding: 14px; box-shadow: var(--shadow); }
+#talk { position: fixed; inset: 0; z-index: 25; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; padding: 15px; background: #141b1765; }
+#talk .win { display: flex; flex-direction: column; min-width: 0; width: min(850px, 100%); height: min(86vh, 880px); max-height: 100%; min-height: 0; background: var(--page); border-radius: 12px; padding: 14px; box-shadow: var(--shadow); }
 .talk-top { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 #talklog { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 4px; }
+.talk-compose { position: relative; flex: none; }
+#talkin { resize: none; padding-right: 25px; min-height: 44px; max-height: 48vh; }
+#talkresize { position: absolute; top: 1px; right: 1px; width: 23px; height: 23px; cursor: ns-resize; touch-action: none; user-select: none; }
+#talkresize::after { content: ""; position: absolute; top: 4px; right: 4px; width: 11px; height: 11px; background: repeating-linear-gradient(45deg, transparent 0 2px, var(--mute) 2px 3px); clip-path: polygon(0 0,100% 0,100% 100%); }
 .talk-send-row { justify-content: flex-end; }
 .cm { margin: 8px 0; max-width: 92%; }
 .cm.me { margin-left: auto; }
@@ -335,6 +347,13 @@ dialog:has(.agent-detail) { width: min(840px, calc(100vw - 26px)); max-height: c
 .job-detail { margin-block: 12px; }
 .job-detail h4 { font-size: 13px; margin: 0; }
 .job-detail pre { max-height: 55vh; }
+.worker-batches { max-height: 55vh; overflow-y: auto; margin-bottom: 8px; }
+.worker-batch { display: grid; grid-template-columns: minmax(0, 1fr) 5em; gap: 6px 12px; align-items: end; padding: 8px 0; }
+.worker-batch + .worker-batch { border-top: 1px solid var(--line); }
+.batch-field { display: grid; gap: 3px; color: var(--ink2); }
+.batch-field[hidden] { display: none; }
+.batch-field > * { width: 100%; min-width: 0; }
+.worker-batch button { grid-column: 2; }
 dialog .acts { justify-content: flex-end; margin-top: 12px; }
 .field { margin: 8px 0; }
 .field > label { display: block; color: var(--ink2); margin-bottom: 3px; }
@@ -343,12 +362,18 @@ dialog .acts { justify-content: flex-end; margin-top: 12px; }
 .opt .grow { min-width: 0; overflow-wrap: anywhere; }
 .model-source { display: block; }
 
+/* Let Milestones and Messages set the desktop height, regardless of worker count. */
+@media (min-width: 880.01px) {
+  .team-card { align-self: stretch; contain: size; display: flex; flex-direction: column; }
+  .team-card .section-head { flex: none; }
+  .team { flex: 1; min-height: 0; }
+}
 @media (max-width: 880px) {
   .workspace, .workspace.team-folded { grid-template-columns: minmax(0, 1fr); }
   .team-folded .team { flex-direction: row; flex-wrap: wrap; }
   .team-folded .team-card .section-head { justify-content: space-between; }
   .workspace > * { grid-area: auto; }
-  .team-card { position: static; }
+  .team { max-height: 45dvh; }
 }
 @media (max-width: 600px) {
   .wrap { padding: 0 12px 30px; }

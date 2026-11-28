@@ -373,21 +373,26 @@ class TextKey(_Str):
     # reminder lines (one short line each, PRM-3)
     REM_WORKER_LINE = "rem_worker_line"  # one per worker: status, assignment, unanswered report, idle since, failed
     REM_WORKERS = "rem_workers"  # how many are available; split only independent parts (WRK-9)
+    REM_JOB_UPDATE = "rem_job_update"  # critic receiving an intermediate worker report
     REM_LABELS = "rem_labels"  # examples with the ids and <silent/>
     REM_UNWATCHED = "rem_unwatched"
     REM_GOLDEN_USE = "rem_golden_use"
     REM_GOLDEN_PATH = "rem_golden_path"  # new or compacted session, or the board changed (PRM-5)
     REM_GOLDEN_KEEP = "rem_golden_keep"
     REM_GOLDEN_SIZE = "rem_golden_size"
+    REM_MANAGER_PAUSE = "rem_manager_pause"
+    REM_REVIEW_DECISION = "rem_review_decision"
     REM_MESSAGE_CRITIC = "rem_message_critic"
     REM_OPEN_GATES = "rem_open_gates"
     REM_DISCUSSION = "rem_discussion"
     REM_NIGHT = "rem_night"
     REM_ASK_AND_END = "rem_ask_and_end"
     REM_CRITIC_BOUNDARY = "rem_critic_boundary"
+    REM_DEPENDENT_WORK = "rem_dependent_work"
+    REM_CRITIC_SILENT = "rem_critic_silent"
     REM_WRITING = "rem_writing"
     REM_CHECKLIST = "rem_checklist"  # to the critic: where its checklist file is (new session or new milestone)
-    REM_DISCUSSION_OVER = "rem_discussion_over"  # no longer sent; the discussion ended without being applied (kept for stored data)
+    REM_DISCUSSION_OVER = "rem_discussion_over"  # next manager input after End without applying
     REM_NIGHT_OVER = "rem_night_over"
     # gates Orch opens, shown to the user
     GATE_PLAN = "gate_plan"
@@ -469,17 +474,22 @@ TEXT_VALUES: Dict[TextKey, Tuple[str, ...]] = {
     TextKey.REM_WORKER_LINE: ("worker", "status", "assignment", "open_report", "idle_since", "jobs"),
     TextKey.REM_WORKERS: ("workers",),
     TextKey.REM_LABELS: ("workers",),
+    TextKey.REM_JOB_UPDATE: ("worker",),
     TextKey.REM_UNWATCHED: ("workers",),
     TextKey.REM_GOLDEN_USE: (),
     TextKey.REM_GOLDEN_PATH: ("path",),
     TextKey.REM_GOLDEN_KEEP: ("path",),
     TextKey.REM_GOLDEN_SIZE: ("path", "chars", "limit"),
+    TextKey.REM_MANAGER_PAUSE: (),
+    TextKey.REM_REVIEW_DECISION: (),
     TextKey.REM_MESSAGE_CRITIC: (),
     TextKey.REM_OPEN_GATES: ("gates",),
     TextKey.REM_DISCUSSION: (),
     TextKey.REM_NIGHT: (),
     TextKey.REM_ASK_AND_END: (),
     TextKey.REM_CRITIC_BOUNDARY: (),
+    TextKey.REM_DEPENDENT_WORK: (),
+    TextKey.REM_CRITIC_SILENT: (),
     TextKey.REM_WRITING: ("rules",),
     TextKey.REM_CHECKLIST: ("path",),
     TextKey.REM_DISCUSSION_OVER: (),
@@ -684,6 +694,8 @@ class Message:
     error: str = ""  # [engine] why the last transmission failed
     rendered: str = ""  # [engine] the exact text sent, reminder included; a resend uses it again
     given: Dict[str, str] = field(default_factory=dict)  # [engine] Rendered.given; into SessionRef.given when taken
+    discussion_chat: Optional[bool] = None  # user chat at send time; older records use the receiving turn
+    via_cli: bool = False  # critic dispatch through orch tell rather than a reply tag
 
     @property
     def key(self) -> Optional[TextKey]:
@@ -777,6 +789,7 @@ class Agent:
     frozen_restart: float = 0.0  # [supervisor] SIL-4: restarted once in this turn; [fact] 0 after a turn ended ok
     last_smoke: float = 0.0  # [engine] last smoke test (REC-6)
     stopped_by_user: bool = False  # [engine] SIL-1, REC-9
+    discussion_end_notice: str = ""  # end command id until the manager takes the reminder
 
     @property
     def session(self) -> Optional[SessionRef]:
@@ -882,6 +895,7 @@ class Turn:
     ending: Optional[Ending] = None  # set when it ended (JOB-2)
     error: Optional[ErrorClass] = None
     detail: str = ""  # the error's text
+    reported_model: str = ""  # model reported during this turn
 
 
 @dataclass
@@ -1394,6 +1408,11 @@ class Chat(UserCommand):
 
 
 @dataclass(frozen=True)
+class CriticTell(Chat):
+    """CLI dispatch from the run's critic to an open worker."""
+
+
+@dataclass(frozen=True)
 class GateAnswer(UserCommand):
     """Answers one gate, of any kind. Nothing given: closes a pause or operational gate."""
     handler: ClassVar[str] = "gates"
@@ -1705,7 +1724,7 @@ class CloseGate(Action):
     an answer is unsent, on Tick too; milestones reads it in `prior`). Except milestone_change: its approval takes
     effect with its CloseGate: milestones reads that in `prior`, withdraws the open plan or milestone gate (MS-13) and
     applies the list."""
-    emitters: ClassVar[Tuple[str, ...]] = ("gates", "milestones", "recovery")
+    emitters: ClassVar[Tuple[str, ...]] = ("gates", "milestones", "recovery", "discussion")
     gate_id: str = ""
     answer: Optional[Answer] = None
     withdrawn: bool = False
@@ -1714,7 +1733,7 @@ class CloseGate(Action):
 @dataclass(frozen=True)
 class HoldDecision(Action):
     """MS-9. Store: Milestone.held_decision. In `prior` it tells milestones not to act on the decision. None: lifted."""
-    emitters: ClassVar[Tuple[str, ...]] = ("gates",)
+    emitters: ClassVar[Tuple[str, ...]] = ("gates", "discussion")
     milestone_id: str = ""
     decision: Optional[Decision] = None
 
@@ -1740,10 +1759,10 @@ class Retry(Action):
 
 @dataclass(frozen=True)
 class StartSwitch(Action):
-    """Store: Agent.switch = switch (replaces one not yet OPENING); target.same(Agent.choice) and a USER switch: None
-    (the pending one is ended). Engine: the effect of its step. Recovery lifts SWITCH holds an ended switch left."""
+    """Store: replace a switch not yet OPENING, or clear it on explicit cancellation."""
     emitters: ClassVar[Tuple[str, ...]] = ("models", "recovery")
     switch: Switch = field(default_factory=lambda: Switch(""))
+    cancel: bool = False
 
 
 @dataclass(frozen=True)
@@ -1889,6 +1908,7 @@ class SetDiscussion(Action):
     emitters: ClassVar[Tuple[str, ...]] = ("discussion",)
     agent: str = ""
     discussion: Optional[Discussion] = None
+    end_notice: str = ""  # only an explicit manager DiscussionEnd sets this
 
 
 @dataclass(frozen=True)
@@ -2211,9 +2231,32 @@ def _load(tp: Any, v: Any) -> Any:
 # Shown texts (gate.words, message.text, reply.text) carry a TextRef; J adds `shown`, the rendered words, next to it.
 
 
-def public_state(snap: Snapshot) -> Dict[str, Any]:
+def public_state(snap: Snapshot, *, dashboard: bool = False) -> Dict[str, Any]:
     """The snapshot for GET /api/state: no keys, addresses or process details."""
-    d = to_dict(snap)
+    if dashboard:
+        # The timeline and Talk fetch their own pages. Keep only messages needed by
+        # visible cards/banners, and cheap facts for invalidation and the unread badge.
+        assignments = {a.assignment.message_id for a in snap.agents.values() if a.assignment}
+        d = {f.name: to_dict(getattr(snap, f.name)) for f in fields(snap) if f.name not in ("messages", "turns")}
+        d["turns"] = {aid: {"id": t.id, "started": t.started, "ended": t.ended, "status": str(t.status),
+                            "reported_model": t.reported_model,
+                            "draft": t.draft, "reply": {"silent": bool(t.reply and t.reply.silent),
+                                                       "silent_only": bool(t.reply and t.reply.text.strip() == "<silent/>")}}
+                      for aid, t in snap.turns.items()}
+        d["messages"], d["inbox_seqs"], d["latest_seq"] = {}, [], 0
+        revision = hashlib.sha256()
+        for m in snap.messages.values():
+            if m.id in assignments or (m.sender == ORCH and m.recipient == USER and
+                                       (m.key == TextKey.NOTE_MIGRATED or m.created >= snap.now - 60)):
+                d["messages"][m.id] = to_dict(m)
+            if m.recipient == USER and m.sender != ORCH:
+                d["inbox_seqs"].append(m.seq)
+            d["latest_seq"] = max(d["latest_seq"], m.seq)
+            revision.update(repr((m.id, m.seq, str(m.status), m.drop, m.holds, m.reply_turn, m.attempts,
+                                  m.taken_at, m.answered_at, m.error)).encode())
+        d["message_version"] = revision.hexdigest()
+    else:
+        d = to_dict(snap)
     for aid, a in snap.agents.items():
         p = d["agents"][aid]
         p["choice"], p["choices"] = a.choice.public(), [c.public() for c in a.choices]

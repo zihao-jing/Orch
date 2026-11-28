@@ -373,6 +373,22 @@ class TestTurns(Base):
         self.fact(TurnEnded)
         self.assertEqual(self.store.state.kept, {})
 
+    def test_manager_gets_end_notice_on_next_input_without_a_wakeup(self):
+        from orch.runtime import discussion, texts
+        self.make(Discussion("manager"))
+        end = self.ev(DiscussionEnd, "manager")
+        actions = discussion.module().decide(self.s, end)
+        self.do(end, *actions)
+        self.assertFalse(self.s.messages or self.s.turns)
+        self.reopen()
+        first = self.send("next", to="manager")
+        rendered = texts.render(self.s, first)
+        self.assertIn("Discussion ended. Messages allowed.", rendered.text)
+        self.assertTrue(self.store.begin_send(first.id, rendered.text, rendered.given))
+        self.fact(Received, "manager", message_id=first.id, taken=True)
+        another = self.send("later", to="manager")
+        self.assertNotIn("Discussion ended. Messages allowed.", texts.render(self.s, another).text)
+
     def test_draft_turns(self):
         self.make(Discussion("critic"))
         self.fact(TurnStarted, "critic")
@@ -497,7 +513,7 @@ class TestSessions(Base):
         self.act(AdvanceSwitch(replace(self.a().switch, step=SwitchStep.FAILED)))
         self.assertEqual(self.a(), before)
         self.act(StartSwitch(Switch("worker-1", target=CODEX)))
-        self.act(StartSwitch(Switch("worker-1", target=replace(CLAUDE, model_id="other"))))  # the current one again
+        self.act(StartSwitch(Switch("worker-1", target=replace(CLAUDE, model_id="other")), cancel=True))
         self.assertIsNone(self.a().switch)
 
     def test_REC_7_saves_process_read_position_and_model(self):
@@ -528,6 +544,17 @@ class TestJobs(Base):
         self.assertTrue(self.s.jobs["worker-1/j3"].reported and self.s.jobs["worker-1/j3"].stopped_by_user)
         self.fact(JobStarted, job=job("worker-1/j1"))  # known: nothing
         self.assertEqual(self.s.jobs["worker-1/j1"].state, JobState.ENDED)
+
+    def test_verified_running_job_recovers_from_false_loss_but_not_from_completion(self):
+        jid = "worker-1/j1"
+        self.make(job(jid, state="lost", ended=T0, woke=True, fallback_sent=True))
+        self.fact(JobsChecked, jobs=(job(jid),))
+        j = self.s.jobs[jid]
+        self.assertEqual((j.state, j.ended, j.woke, j.fallback_sent), (JobState.RUNNING, 0, False, False))
+        self.assertEqual(self.a().status, AgentStatus.WAITING_JOB)
+        self.fact(JobEnded, job_id=jid, exit_code=0)
+        self.fact(JobsChecked, jobs=(job(jid),))
+        self.assertEqual(self.s.jobs[jid].state, JobState.ENDED)
 
     def test_noticed_only_in_a_turn(self):
         self.make(job(state="ended"))

@@ -104,7 +104,7 @@ class World:
             elif isinstance(x, (StartSwitch, AdvanceSwitch)):
                 sw = copy.deepcopy(x.switch)
                 a = s.agents[sw.agent]
-                if isinstance(x, StartSwitch) and sw.reason == SwitchReason.USER and sw.target.same(a.choice):
+                if isinstance(x, StartSwitch) and x.cancel:
                     a.switch = None
                 elif sw.step == SwitchStep.DONE:
                     a.choice, a.session_key, a.switch = sw.target, sw.target.session_key, None
@@ -357,6 +357,54 @@ class TestSwitch(unittest.TestCase):
         acts = w.ev(SessionChanged, change="lost")  # SES-3: it failed again: the choice failed
         sw = w.a().switch
         self.assertEqual((sw.target.name, sw.step), ("codex backup", SwitchStep.TESTING))
+
+    def test_frozen_confirming_backup_keeps_handover_session_for_next_route(self):
+        b = Choice("opencode", provider="p", model="b", name="b")
+        c = Choice("opencode", provider="q", model="c", name="c")
+        w = world(turn(W), choices=(CLAUDE, b, c))
+        a = w.a()
+        t = w.s.turns[W]
+        t.status, t.started = TurnStatus.RUNNING, w.s.now
+        ref = SessionRef("handover", b.session_key, b)
+        a.switch = Switch(W, b, new=ref, step=SwitchStep.CONFIRMING, step_at=w.s.now)
+        a.holds = [HoldReason.SWITCH]
+        assert_none(self, w.later(1), AdvanceSwitch)
+        w.s.paused = True
+        assert_none(self, w.later(w.s.settings.frozen_after), AdvanceSwitch)
+        w.s.paused = False
+        a.tools = ["read"]
+        assert_none(self, w.later(1), AdvanceSwitch)
+        a.tools = []
+        sw = assert_has(self, w.later(1), AdvanceSwitch).switch
+        self.assertEqual((sw.target, sw.new.session_id, sw.turn, sw.forced), (c, "handover", t.id, True))
+
+    def test_opencode_confirms_only_a_successful_turn_on_target(self):
+        target = Choice(backend="opencode", provider="p", model="gemini")
+        for reported, error, passed in [("p/gemini", None, True), ("old/gemini", None, False),
+                                        ("", None, False), ("p/gemini", "session_lost", False)]:
+            with self.subTest(reported=reported, error=error):
+                w = world()
+                w.a().actual_model = "p/gemini"  # a previous turn cannot prove this one
+                w.a().switch = Switch(W, target, step=SwitchStep.CONFIRMING)
+                acts = w.end(reported_model=reported, error=error)
+                self.assertEqual(any(isinstance(x, ToUser) and x.message.key == TextKey.NOTE_SWITCHED
+                                     for x in acts), passed)
+                if error:
+                    self.assertTrue(w.a().switch.tried_new)
+
+    def test_older_signature_retry_waits_until_user_terminal_closes(self):
+        w = world()
+        w.a().choice = Choice(backend="opencode", provider="p", model="gemini")
+        w.a().retry = RetryState(attempt=1, until=w.s.now, error=ErrorClass.TRANSIENT,
+                                 why="provider.internal: Error: Missing Gemini tool thought signature history",
+                                 turn="interrupted")
+        w.a().holds.append(HoldReason.TERMINAL)
+        assert_none(self, w.later(1), StartSwitch)
+        w.a().holds.remove(HoldReason.TERMINAL)
+        sw = assert_has(self, w.later(1), StartSwitch).switch
+        self.assertEqual(sw.target, w.a().choice)
+        self.assertTrue(sw.tried_new)
+        self.assertEqual(sw.turn, "interrupted")
 
     def test_SES_2_a_different_session_id_is_a_rejection(self):
         w = world()

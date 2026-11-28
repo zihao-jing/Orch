@@ -52,7 +52,7 @@ class TestPageFiles(unittest.TestCase):
         self.assertTrue(used, "the page uses no API")
         self.assertEqual(used - listed, set())
 
-    CLI_ONLY = {"TerminalOpen", "TerminalClose"}  # they come from `orch terminal`; the page shows its command
+    CLI_ONLY = {"TerminalOpen", "TerminalClose", "CriticTell"}  # they come from `orch terminal`; the page shows its command
     # SendToCritic is refused (a chat with a worker stays with the user); StopOrch has no button so it cannot be hit by
     # accident: Orch is closed from the terminal
     NO_CONTROL = {"SendToCritic", "StopOrch"}
@@ -351,7 +351,13 @@ class ES { constructor(u) { this.url = u; this.l = {}; sources.push(this); } add
 async function fetchStub(url, opt) {
   if (opt && opt.method === 'POST') { const b = JSON.parse(opt.body); posts.push(b); return json(commandReply(b)); }
   gets.push(url);
-  if (url.startsWith('api/state')) { if (failState) throw new Error('down'); return json(state); }
+  if (url.startsWith('api/state')) { if (failState) throw new Error('down');
+    if (scenario === 'caps' && url.includes('view=board')) {
+      const rows = Object.values(state.messages);
+      return json({...state, messages: {}, latest_seq: Math.max(...rows.map(m => m.seq)),
+        inbox_seqs: [], message_version: String(rows.length)});
+    }
+    return json(state); }
   if (url.startsWith('api/golden')) return json({text: 'Always be kind.', digest: 'd1', path: '/x'});
   if (url.startsWith('api/audit_notes')) return json({text: 'my notes', digest: 'n1', path: '/y'});
   if (url.startsWith('api/audit')) return json({report: 'All fine.', running: false});
@@ -364,6 +370,11 @@ async function fetchStub(url, opt) {
     const p = new URLSearchParams(url.split('?')[1]);
     const levels = (p.get('levels') || '').split(',');
     const q = (p.get('q') || '').toLowerCase(), agent = p.get('agent'), before = Number(p.get('before')), limit = Number(p.get('limit'));
+    if (p.get('talk')) {
+      const all = win.OrchLogic.talkLog(win.OrchLogic.sortedMessages(state.messages), p.get('talk'), 'manager')
+        .filter(m => !before || m.seq < before);
+      return json({messages: all.slice(-limit), more: all.length > limit});
+    }
     const off = (p.get('off') || '').split(',').filter(Boolean);
     const matching = win.OrchLogic.sortedMessages(state.messages).filter(m =>
       (!before || m.seq < before) && (!agent || m.sender === agent || m.recipient === agent) &&
@@ -374,7 +385,7 @@ async function fetchStub(url, opt) {
   }
   return json({}, false, 404);
 }
-const store = scenario === "restoredFilters" ? {"orch-message-hidden": '["critic"]', "orch-message-notes": "0", "orch-message-search": "Hello manager"} : {}, clipboard = [];
+const store = scenario === "restoredFilters" ? {"orch-message-hidden": '["critic"]', "orch-message-notes": "0", "orch-message-discussions": "0", "orch-message-search": "Hello manager"} : {}, clipboard = [];
 const win = {
   OrchLogic: require(path.join(dir, 'logic.js')),
   localStorage: {getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }},
@@ -522,7 +533,7 @@ global.SC = {
   async header({assert, $, byText, click, lastPost, posts}) {
     await click($('nightbtn')); assert.deepStrictEqual([lastPost().type, lastPost().on], ['SetNight', true]);
     await click($('addworker')); assert.ok($('dlg').open);   // the model to start it on
-    await click(byText($('dlg-a'), 'Add worker')); assert.strictEqual(lastPost().type, 'WorkerAdd');
+    await click(byText($('dlg-a'), 'Add workers')); assert.strictEqual(lastPost().type, 'WorkerAdd');
     await click($('stopbtn')); assert.ok($('dlg').open);
     await click(byText($('dlg-a'), 'Stop agents')); assert.deepStrictEqual([lastPost().type, lastPost().agents], ['StopAgents', []]);
     await click($('updatebtn')); await click(byText($('dlg-a'), 'Update')); assert.strictEqual(lastPost().type, 'UpdateOrch');
@@ -532,8 +543,31 @@ global.SC = {
     await click($('addworker'));
     const sel = $('dlg-b').all().find(e => e.tagName === 'SELECT');   // the first: the model
     sel.value = 'alpha'; sel.fire('change');
-    await click(byText($('dlg-a'), 'Add worker'));
+    await click(byText($('dlg-a'), 'Add workers'));
     assert.deepStrictEqual([lastPost().type, lastPost().model_id, lastPost().effort], ['WorkerAdd', 'alpha', 'low']);
+  },
+  async workerBatches({assert, $, byText, click, posts, setReply}) {
+    await click($('addworker'));
+    const panel = $('dlg-b'), more = byText(panel, 'Add another batch');
+    await click(more); await click(more);
+    await click(byText(panel, 'Remove'));
+    const models = panel.all().filter(e => e.attrs['aria-label'] === 'Model');
+    assert.strictEqual(models.length, 2);
+    models.forEach((m, i) => { m.value = i ? 'beta' : 'alpha'; m.fire('change'); });
+    panel.all().filter(e => e.attrs['aria-label'] === 'Effort')[1].value = 'high';
+    const counts = panel.querySelectorAll('input'), add = byText($('dlg-a'), 'Add workers');
+    counts[0].value = '2'; counts[1].value = '0';
+    counts[1].reportValidity = () => {};
+    await click(add); assert.ok($('dlg').open); assert.strictEqual(posts.length, 0);
+    counts[1].value = '1'; await click(add);
+    assert.deepStrictEqual(posts.map(b => [b.model_id, b.effort]), [['alpha','low'], ['alpha','low'], ['beta','high']]);
+    assert.strictEqual(new Set(posts.map(b => b.id)).size, 3);
+    await click($('addworker'));
+    panel.querySelector('input').value = '4';
+    setReply(() => ({ok: posts.length === 4, shown: 'Model unavailable.'}));
+    await click(byText($('dlg-a'), 'Add workers'));
+    assert.strictEqual(posts.length, 5);
+    assert.ok($('toast').textContent.includes('1 of 4 requests accepted'));
   },
   async startAgents({assert, $, click, lastPost, getState, setState, refresh}) {
     const s = getState(); s.agents['worker-1'].stopped_by_user = true; setState(s); await refresh();
@@ -574,18 +608,33 @@ global.SC = {
     await click(terminal);
     assert.deepStrictEqual(clipboard, ['orch terminal demo manager']);
   },
-  async enterSends({assert, $, click, lastPost, type, settle}) {
+  async enterSends({assert, $, click, lastPost, type, settle, posts, setReply}) {
     await click($('talkbtn')); type($('talkin'), 'by key');
-    $('talkin').fire('keydown', {key: 'Enter'}); await settle();
+    let finish;
+    setReply(() => new Promise(resolve => { finish = resolve; }));
+    $('talkin').fire('keydown', {key: 'Enter'});
+    $('talkin').fire('keydown', {key: 'Enter'});
+    assert.ok($('talksend').disabled);
+    assert.strictEqual($('talksend').textContent, 'Sending…');
+    type($('talkin'), 'next draft');
+    finish({ok: true}); await settle();
+    assert.strictEqual(posts.length, 1);
     assert.strictEqual(lastPost().text, 'by key');
+    assert.strictEqual($('talkin').value, 'next draft');
+    assert.match($('talkstatus').textContent, /waiting/i);
   },
-  async discussion({assert, $, click, lastPost, byText, type, settle, buttons}) {
+  async discussion({assert, $, click, lastPost, byText, type, settle, getState, refresh}) {
     await click($('talkbtn')); $('talkwho').value = 'critic'; $('talkwho').fire('change'); await settle();
     assert.ok($('talkinfo').textContent.includes('discussion is open'));
     await click(byText($('talkacts'), 'Apply discussion'));
     type($('dlg-b').all().find(e => e.tagName === 'TEXTAREA'), 'go ahead');
     await click(byText($('dlg-a'), 'Apply'));
     assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().text], ['DiscussionApply', 'critic', 'go ahead']);
+    assert.ok(byText($('talkacts'), 'Applying…').disabled);
+    assert.ok(byText($('talkacts'), 'End without applying').disabled);
+    getState().discussions.critic.phase = 'applying'; await refresh();
+    assert.ok(byText($('talkacts'), 'Applying…').disabled);
+    getState().discussions.critic = {phase:'open', started:9000}; await refresh();
     await click(byText($('talkacts'), 'End without applying')); await click(byText($('dlg-a'), 'End it'));
     assert.deepStrictEqual([lastPost().type, lastPost().agent], ['DiscussionEnd', 'critic']);
   },
@@ -603,32 +652,58 @@ global.SC = {
     await click(byText($('dlg-a'), 'Ask'));
     assert.deepStrictEqual([lastPost().type, lastPost().text], ['ChangeMilestones', 'add a docs step']);
   },
-  async models({assert, $, click, byText, lastPost, type}) {
+  async models({assert, $, click, byText, lastPost, type, getState, refresh}) {
+    const agent = getState().agents['worker-1'];
+    agent.status = 'idle';
+    agent.choice.model = 'qwen4-max'; agent.choice.provider = 'dashscope';
+    Object.assign(agent.choices[0], agent.choice);
+    agent.actual_model = 'live/doubao';
+    await refresh();
     const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
     await click(byText(card, '…'));
     await click(byText($('dlg-b'), 'Model'));
     assert.ok($('dlg').open); const body = $('dlg-b');
+    assert.strictEqual(card.all().find(e => e.className === 'model-name').textContent, 'doubao');
+    assert.ok(body.textContent.includes('Current model live/doubao') && body.textContent.includes('Switch to'));
     assert.ok(body.textContent.includes('Alpha') && body.textContent.includes('Backups'));
     const sels = body.all().filter(e => e.tagName === 'SELECT'); assert.strictEqual(sels.length, 2, 'model and effort');
     sels[0].value = 'beta'; sels[0].fire('change'); await new Promise(r => setTimeout(r, 5));
     const eff = body.all().filter(e => e.tagName === 'SELECT')[1]; eff.value = 'high'; eff.fire('change');
     await click(byText(body, 'Switch'));
     assert.deepStrictEqual([lastPost().type, lastPost().agent, lastPost().model_id, lastPost().effort], ['ChooseModel', 'worker-1', 'beta', 'high']);
-    await click(byText(body, 'Use'));
+    await click(byText(body.all().find(e => e.className === 'opt' && e.textContent.includes('slow')), 'Use'));
     assert.deepStrictEqual([lastPost().type, lastPost().backup], ['ChooseModel', 'slow']);
   },
-  async switchPending({assert, $, click, byText, lastPost}) {
+  async switchPending({assert, $, click, byText, lastPost, getState, refresh}) {
     const card = $('team').all().filter(e => e.className.split(' ').includes('agent')).find(c => c.textContent.includes('Worker 1'));
-    assert.ok(card.textContent.includes('Switching model'));
+    assert.ok(card.textContent.includes('Switch waiting for current turn'));
     await click(byText(card, '…'));
     await click(byText($('dlg-b'), 'Model'));
-    assert.ok($('dlg-b').textContent.includes('Switch pending'));
+    assert.ok($('dlg-b').textContent.includes('Switch waiting for current turn: Beta'));
     await click(byText($('dlg-b'), 'Switch now')); assert.deepStrictEqual([lastPost().type, lastPost().agent], ['ForceSwitch', 'worker-1']);
+    const a = getState().agents['worker-1'];
+    a.status = 'idle'; a.holds = []; a.jobs = [];
+    await refresh();
+    assert.ok($('dlg-b').textContent.includes('Switch requested: Beta'));
+    for (const [step, label] of [['testing', 'Testing new model'], ['opening', 'Opening model session'], ['confirming', 'Confirming new model']]) {
+      a.switch.step = step; await refresh();
+      assert.ok($('team').textContent.includes(label) && $('dlg-b').textContent.includes(label + ': Beta'));
+    }
+    a.switch = null; await refresh();
+    assert.ok(!$('dlg-b').textContent.includes('Confirming new model'));
   },
   async teamFold({assert, $, click}) {
     const cards = () => $('team').all().filter(e => e.className.split(' ').includes('agent'));
     const n = cards().length;
     assert.ok(n >= 3);
+    const summaries = () => $('team').all().filter(e => e.className === 'agent-sum');
+    await click($('teamcards'));
+    assert.ok(summaries().every(e => e.attrs['aria-expanded'] === 'true'));
+    assert.strictEqual($('teamcards').textContent, 'Fold all');
+    await click(summaries()[0]);
+    assert.strictEqual($('teamcards').textContent, 'Expand all');
+    await click($('teamcards')); await click($('teamcards'));
+    assert.ok(summaries().every(e => e.attrs['aria-expanded'] === 'false'));
     await click($('teamfold'));
     assert.ok($('workspace').className.includes('team-folded'));
     const rail = $('team').all().filter(e => e.className === 'rail-agent');
@@ -667,25 +742,27 @@ global.SC = {
     const written = detail('mr');
     await open(written);
     assert.ok(!gets.some(u => u.startsWith('api/turn')));
-    const input = fold(written, "Input to the manager's turn that wrote this");
+    const input = fold(written, "Input");
     await open(input);
     assert.ok(input.textContent.includes('TURN INPUT'));
     assert.ok(!input.textContent.includes('SYSTEM INSTRUCTIONS'));
     await open(fold(input, 'System instructions for Manager'));
     assert.ok(input.textContent.includes('SYSTEM INSTRUCTIONS'));
-    await open(fold(written, "The manager's whole reply"));
+    await open(fold(written, "Whole Output"));
     assert.ok(written.textContent.includes('WHOLE REPLY'));
     const state = getState();
     state.messages.mr.status = 'delivered';
     await refresh();
-    assert.ok(detail('mr').open && fold(detail('mr'), "The manager's whole reply").open);
+    assert.ok(detail('mr').open && fold(detail('mr'), "Whole Output").open);
     assert.strictEqual(gets.filter(u => u.startsWith('api/turn')).length, 1);
   },
   async restoredFilters({assert, $, byText, gets}) {
     assert.strictEqual(byText($('who'), 'Critic').attrs['aria-pressed'], 'false');
     assert.strictEqual($('msearch').value, 'Hello manager');
     assert.strictEqual($('orch-notes').checked, false);
+    assert.strictEqual($('show-discussions').checked, false);
     const first = new URLSearchParams(gets.find(u => u.startsWith('api/messages?')).split('?')[1]);
+    assert.strictEqual(first.get('discussions'), '0');
     assert.deepStrictEqual([first.get('off'), first.get('q'), first.get('notes')], ['critic', 'Hello manager', '0']);
   },
   async timelinePage({assert, $, byText, click, gets, refresh, getState, settle, store, type}) {
@@ -733,7 +810,7 @@ global.SC = {
     await refresh();
     assert.ok($('needs').hidden);
   },
-  async caps({assert, $, byText, click, getState, refresh}) {
+  async caps({assert, $, byText, click, getState, refresh, gets}) {
     const state = getState();
     for (let seq = 6; seq <= 27; seq++) {
       const m = {id: 'talk-' + seq, seq, sender: 'manager', recipient: 'user', body: 'Conversation ' + seq, status: 'delivered'};
@@ -743,7 +820,9 @@ global.SC = {
     await refresh();
     assert.ok($('progress').textContent.includes('Task number 1'));   // the whole checklist, every step, is shown
     assert.ok($('progress').textContent.includes('Task number 22'));
+    assert.ok(!gets.some(u => u.includes('talk=manager')));
     await click($('talkbtn'));
+    assert.ok(gets.some(u => u.includes('talk=manager') && u.includes('limit=15')));
     assert.ok(!$('talklog').textContent.includes('Hello manager'));
     assert.ok($('talklog').textContent.includes('Conversation 27'));
     await click(byText($('talklog'), 'Show more'));
@@ -878,7 +957,7 @@ global.SC = {
   async commandRetriesWithSameId({assert, $, click, posts, setReply}) {
     let n = 0;
     setReply(() => { if (n++ === 0) throw new Error('network'); return {ok: true, shown: 'Done.', choices: [], data: {}}; });
-    await click($('addworker')); await click(byText($('dlg-a'), 'Add worker')); await new Promise(r => setTimeout(r, 30));
+    await click($('addworker')); await click(byText($('dlg-a'), 'Add workers')); await new Promise(r => setTimeout(r, 30));
     assert.ok(posts.length >= 2 && posts[0].id === posts[1].id, 'same id again');
   },
 };
@@ -1013,6 +1092,9 @@ class TestSmoke(unittest.TestCase):
     def test_UI_3_add_worker_on_a_chosen_model(self):
         self.run_scenario("addWorkerModel")
 
+
+    def test_worker_batches(self):
+        self.run_scenario("workerBatches")
 
     def test_UI_3_start_agents_after_stop(self):
         def m(d):

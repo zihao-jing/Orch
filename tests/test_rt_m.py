@@ -19,7 +19,7 @@ from orch.recorder import Recorder, read_json, write_json
 from orch.runtime import milestones, models, migrate
 from orch.runtime.contracts import (
     ChangeMilestones,
-    Chat,
+    CriticTell,
     Choice,
     GateAnswer,
     Message,
@@ -205,7 +205,8 @@ class TestAddWorkerAndCommands(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(["stop", str(run_dir)]), 0)
             self.assertEqual(cli.main(["stop", "--agents", str(run_dir)]), 0)
-            self.assertEqual(cli.main(["tell", str(run_dir), "critic", "Focus on tests."]), 0)
+            self.assertEqual(cli.main(["tell", str(run_dir), "critic", "Focus on tests."]), 1)
+            self.assertEqual(cli.main(["tell", str(run_dir), "worker-1", "Focus on tests."]), 0)
             self.assertEqual(cli.main(["approve", str(run_dir), "--note", "Looks good"]), 0)
             self.assertEqual(cli.main(["approve", str(run_dir), "--revise", "Add edge cases"]), 0)
             self.assertEqual(cli.main(["answer", str(run_dir), "q1", "Option B"]), 0)
@@ -216,8 +217,8 @@ class TestAddWorkerAndCommands(unittest.TestCase):
         self.assertFalse(cmds[0].agents)
         self.assertIsInstance(cmds[1], StopOrch)
         self.assertTrue(cmds[1].agents)
-        self.assertIsInstance(cmds[2], Chat)
-        self.assertEqual((cmds[2].agent, cmds[2].text), ("critic", "Focus on tests."))
+        self.assertIsInstance(cmds[2], CriticTell)
+        self.assertEqual((cmds[2].agent, cmds[2].text), ("worker-1", "Focus on tests."))
         self.assertIsInstance(cmds[3], GateAnswer)
         self.assertEqual((cmds[3].gate_id, cmds[3].approve, cmds[3].text), ("g-plan", True, "Looks good"))
         self.assertIsInstance(cmds[4], GateAnswer)
